@@ -80,6 +80,40 @@ real spot lengths (15/30/60 s, ±4.5 s), which recovers the actual commercials �
 typically 4–8 spots per break. Each is written to `media/commercials/<year>/`, and
 that year folder *is* the era tag.
 
+#### Already downloading with something faster?
+
+archive.org throttles **per connection** at roughly 0.4 MB/s, so the script issues
+parallel range requests (~1.1 MB/s measured). A download manager such as
+JDownloader will still beat it, and that is fine — use whichever you prefer and let
+the script do the part a downloader cannot:
+
+```powershell
+# split tapes you already downloaded, filing each under the year in its name
+.\scripts\import-breaks.ps1 -FromFolder D:\downloads\breaks
+
+# force one era when the filenames carry no year
+.\scripts\import-breaks.ps1 -FromFolder D:\downloads\breaks -Year 2003
+```
+
+`-FromFolder` takes the year from each **filename or folder path**, so
+`October 2003 break.mp4` lands in `2003/`. Files are skipped if their output already
+exists, so re-running after adding more is cheap.
+
+#### Two things that will otherwise fool you
+
+**The year comes from the title, not the upload date.** An item called
+`Super Cartoon Sunday (Break #2, 1984)` is often uploaded in 2007; taking
+`publicdate` would file a 1984 tape into a 2007 folder. Titles are checked first and
+upload dates only as a last resort.
+
+**Sports and news breaks need a looser pass.** Snapping boundaries to
+15/30/60 s assumes there is a cut roughly every 15–60 s, which holds for an ad
+block. A long static sports graphic can run 90 s with no cut at all, so strict
+snapping stopped after one spot and discarded the rest. When no cut lines up with a
+spot length, the script now falls back to the cut that yields a length inside the
+acceptable range. A 157 s Fox Sports break went from *1 spot, 142 s discarded* to
+*5 spots, 0 s discarded*.
+
 Accepted episode filename forms: `S01E02`, `s1e2`, `1x02`,
 `Season 1 Episode 2`, and an episode number inside a `Season NN/` folder.
 Anything else is reported by `nostalgia doctor` rather than guessed at.

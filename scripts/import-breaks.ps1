@@ -44,6 +44,17 @@
 .PARAMETER DryRun
     Print what would happen; download and encode nothing.
 
+.PARAMETER FromFolder
+    Process break tapes you already downloaded (JDownloader, a browser, anything)
+    instead of fetching them: only the split-and-file step runs.
+
+    The year is taken from each filename or its folder, so
+    `October 2003 break.mp4` lands in 2003. Use -Year to force one folder when the
+    names carry no year.
+
+.EXAMPLE
+    .\scripts\import-breaks.ps1 -FromFolder D:\downloads\breaks
+
 .EXAMPLE
     .\scripts\import-breaks.ps1 -DryRun -Limit 5 `
         -Query 'title:"commercial break" AND year:[2002 TO 2004]'
@@ -64,6 +75,9 @@ param(
 
     [Parameter(ParameterSetName = 'Id', Mandatory = $true)]
     [string[]]$Id,
+
+    [Parameter(ParameterSetName = 'FromFolder', Mandatory = $true)]
+    [string]$FromFolder,
 
     [int]$Year,
     [string]$Dest = 'media\commercials',
@@ -170,35 +184,105 @@ function Get-VideoFiles {
 }
 
 function Get-ItemYear {
+    <#
+        Best guess at the *content* year, not the upload year.
+
+        Titles are checked first and `publicdate` is checked last on purpose: an
+        item titled "Super Cartoon Sunday (Break #2, 1984)" otherwise landed in a
+        2007 folder, because that is when someone uploaded it. For a channel whose
+        whole point is period accuracy, filing a 1984 tape as 2007 is worse than
+        skipping the item.
+    #>
     param($Metadata)
-    # Archive.org is inconsistent: some items carry `year`, many only `date`.
     $meta = Get-Field $Metadata 'metadata'
-    foreach ($field in 'year', 'date', 'publicdate') {
+
+    foreach ($field in 'title', 'year', 'date') {
         $value = Get-Field $meta $field
         if ($value -and "$value" -match '\b(19[5-9]\d|20[0-4]\d)\b') { return [int]$Matches[1] }
     }
+    # Last resort only: an upload date says nothing trustworthy about the content.
+    $value = Get-Field $meta 'publicdate'
+    if ($value -and "$value" -match '\b(19[5-9]\d|20[0-4]\d)\b') { return [int]$Matches[1] }
     return $null
 }
 
 function Save-Remote {
-    param([string]$Url, [string]$Target)
-    if (Test-Path $Target) {
-        if ((Get-Item $Target).Length -gt 0) { return $Target }
-    }
-    $attempt = 0
-    while ($true) {
-        $attempt++
-        try {
-            # Archive.org redirects to a node; -UseBasicParsing keeps it cheap on
-            # Windows PowerShell, and Invoke-WebRequest follows the 302 for us.
-            Invoke-WebRequest -Uri $Url -OutFile $Target -UseBasicParsing -TimeoutSec 600
-            return $Target
-        }
-        catch {
-            if ($attempt -ge 3) { throw "download failed after 3 tries: $Url`n$($_.Exception.Message)" }
+    <#
+        Download with parallel HTTP range requests.
+
+        archive.org throttles *per connection* at roughly 0.4 MB/s regardless of
+        available bandwidth, so a single stream makes a multi-GB import take hours.
+        Six concurrent ranges measured ~1.1 MB/s, a 3x speed-up for the same file.
+
+        Invoke-WebRequest -OutFile is also avoided on purpose: it buffers in memory,
+        so the target file sits at 0 bytes for the whole transfer and the only way
+        to see progress is to watch RAM.
+    #>
+    param([string]$Url, [string]$Target, [int]$Streams = 4)
+
+    if ((Test-Path $Target) -and (Get-Item $Target).Length -gt 0) { return $Target }
+
+    # How big is it, and does it support ranges?
+    $head = curl.exe -sIL -o NUL -w '%{http_code} %{size_download} %{header_json}' --max-time 60 $Url 2>&1
+    $size = 0
+    $rangeOk = $false
+    $headText = ($head | Out-String)
+    if ($headText -match '"content-length"\s*:\s*\[\s*"(\d+)"') { $size = [int64]$Matches[1] }
+    if ($headText -match '"accept-ranges"\s*:\s*\[\s*"bytes"') { $rangeOk = $true }
+
+    if ($size -le 0 -or -not $rangeOk -or $Streams -le 1) {
+        # Plain sequential download.
+        for ($attempt = 1; $attempt -le 3; $attempt++) {
+            curl.exe -s -L --retry 2 --retry-delay 2 --max-time 1800 -o $Target $Url
+            if ((Test-Path $Target) -and (Get-Item $Target).Length -gt 0) { return $Target }
             Start-Sleep -Seconds (2 * $attempt)
         }
+        throw "download failed after 3 tries: $Url"
     }
+
+    $chunk = [int64][Math]::Ceiling($size / $Streams)
+    $parts = @()
+    $jobs = @()
+    for ($i = 0; $i -lt $Streams; $i++) {
+        $start = $i * $chunk
+        $end = [Math]::Min($start + $chunk - 1, $size - 1)
+        if ($start -gt $end) { continue }
+        $partPath = "$Target.part$i"
+        $parts += $partPath
+        $jobs += Start-Job -ScriptBlock {
+            param($srcUrl, $rangeStart, $rangeEnd, $outPath)
+            # Careful with parameter names here: PowerShell splats an array after a
+            # native command, so a variable called $u would be rendered as -u and
+            # swallow the URL.
+            & curl.exe -s -L --retry 3 --retry-delay 2 --max-time 1800 `
+                -r "${rangeStart}-${rangeEnd}" -o $outPath $srcUrl
+            if (Test-Path $outPath) { (Get-Item $outPath).Length } else { 0 }
+        } -ArgumentList $Url, $start, $end, $partPath
+    }
+
+    try {
+        $null = $jobs | Wait-Job -Timeout 3600
+        $sizes = @($jobs | Receive-Job)
+        $got = ($sizes | Measure-Object -Sum).Sum
+        if ($got -lt $size) {
+            throw "incomplete download: got $got of $size bytes"
+        }
+    }
+    finally {
+        $jobs | Remove-Job -Force -ErrorAction SilentlyContinue
+    }
+
+    # Concatenate in order.
+    $out = [System.IO.File]::Create($Target)
+    try {
+        foreach ($partPath in $parts) {
+            $in = [System.IO.File]::OpenRead($partPath)
+            try { $in.CopyTo($out) } finally { $in.Dispose() }
+        }
+    }
+    finally { $out.Dispose() }
+    $parts | ForEach-Object { Remove-Item $_ -Force -ErrorAction SilentlyContinue }
+    return $Target
 }
 
 # -- step 3: find cut points ------------------------------------------------
@@ -233,6 +317,10 @@ function Get-ProbeDuration {
 # boundary to the nearest spot length is what recovers the actual commercials.
 $spotTargets = @(15, 30, 60)
 $snapTolerance = 4.5
+#: A segment longer than this is a promo or an in-house segment, not a spot. It is
+#: still useful ("we now return to..." cards live here) but must not be emitted as
+#: a commercial, so it is skipped rather than truncated.
+$tailTolerance = 6.0
 
 function Get-Spots {
     param([double[]]$Cuts, [double]$Duration)
@@ -245,8 +333,10 @@ function Get-Spots {
         $guard++
         $remaining = $Duration - $cursor
 
-        # Whatever is left already looks like a single spot: take it whole.
-        if ($remaining -le $MaxSeconds) {
+        # Whatever is left already looks like a single spot: take it whole. The
+        # upper bound allows a little over 60s so a 63s promo is kept rather than
+        # thrown away for being four seconds long.
+        if ($remaining -le ($MaxSeconds + $tailTolerance)) {
             if ($remaining -ge $MinSeconds) {
                 $spots.Add([pscustomobject]@{ Start = $cursor; Length = $remaining })
             }
@@ -270,10 +360,32 @@ function Get-Spots {
         }
 
         if ($null -eq $best) {
-            # No boundary is close enough to a spot length. Emit the remainder as
-            # one spot if it fits, otherwise stop rather than guess.
-            if ($remaining -le ($MaxSeconds + $snapTolerance)) {
-                $spots.Add([pscustomobject]@{ Start = $cursor; Length = [Math]::Min($remaining, $MaxSeconds) })
+            # Nothing lines up with 15/30/60s. Sports and news breaks break this:
+            # a long static graphic can run 60+ seconds with no cut inside a spot
+            # length, so strict snapping stops dead and throws the rest away.
+            # Fall back to the cut that yields a length *within* the acceptable
+            # range, preferring one close to a real spot length.
+            $fallback = $null
+            $fallbackScore = [double]::MaxValue
+            foreach ($cut in $Cuts) {
+                if ($cut -le ($cursor + $MinSeconds)) { continue }
+                $length = $cut - $cursor
+                if ($length -gt ($MaxSeconds + $tailTolerance)) { continue }
+                # Distance from the nearest ideal spot length.
+                $score = [double]::MaxValue
+                foreach ($target in $spotTargets) { $score = [Math]::Min($score, [Math]::Abs($length - $target)) }
+                if ($score -lt $fallbackScore) { $fallbackScore = $score; $fallback = $cut }
+            }
+            if ($null -ne $fallback) {
+                $spots.Add([pscustomobject]@{ Start = $cursor; Length = ($fallback - $cursor) })
+                $cursor = $fallback
+                continue
+            }
+
+            # Genuinely nothing usable: keep the remainder only if it is a sane
+            # length, otherwise stop rather than emit a four-minute "commercial".
+            if ($remaining -ge $MinSeconds -and $remaining -le ($MaxSeconds + $tailTolerance)) {
+                $spots.Add([pscustomobject]@{ Start = $cursor; Length = $remaining })
             }
             break
         }
@@ -285,6 +397,103 @@ function Get-Spots {
 }
 
 # -- main -------------------------------------------------------------------
+
+function Split-Source {
+    <#
+        Cut one break tape into spots and file them under *YearDir*.
+
+        Shared by the download path and -FromFolder, so a tape you fetched with
+        JDownloader is processed exactly like one this script fetched itself.
+    #>
+    param([string]$Source, [string]$Slug, [string]$YearDir, [double]$Duration)
+
+    $cuts = Get-SceneCuts -Source $Source -Threshold $SceneThreshold -DurationSeconds $Duration
+    $spots = Get-Spots -Cuts $cuts.ToArray() -Duration $Duration
+    $covered = 0.0
+    foreach ($spot in $spots) { $covered += $spot.Length }
+    Write-Host ('   {0} shot cut(s) -> {1} spot(s), {2:N0}s of tape left over' -f `
+        $cuts.Count, $spots.Count, ($Duration - $covered)) -ForegroundColor DarkGray
+
+    $kept = 0
+    $index = 0
+    foreach ($spot in $spots) {
+        $index++
+        $target = Join-Path $YearDir ('{0}-{1:d3}.mp4' -f $Slug, $index)
+        if (Test-Path $target) { $kept++; continue }
+        # Re-encode instead of stream-copying: a keyframe cut leaves each spot up
+        # to a GOP short, and the planner trusts the real duration.
+        & $ffmpeg -hide_banner -nostdin -loglevel error -ss ('{0:F3}' -f $spot.Start) `
+            -t ('{0:F3}' -f $spot.Length) -i $Source `
+            -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 128k `
+            -movflags +faststart $target
+        if ($LASTEXITCODE -eq 0 -and (Test-Path $target)) { $kept++ }
+    }
+    return $kept
+}
+
+function Get-YearFromName {
+    param([string]$Text)
+    if ($Text -match '\b(19[5-9]\d|20[0-4]\d)\b') { return [int]$Matches[1] }
+    return 0
+}
+
+function Convert-Folder {
+    <#
+        Split break tapes that are already on disk.
+
+        JDownloader (and a browser, and curl -r) fetch faster than this script's
+        range requests, so the useful split of labour is: let them download, and
+        use this for the part they cannot do -- cutting a 3-minute break into
+        individual 15/30/60-second spots.
+    #>
+    param([string]$Folder, [int]$ForcedYear)
+
+    if (-not (Test-Path $Folder)) { throw "folder not found: $Folder" }
+    $sources = @(Get-ChildItem -Path $Folder -Recurse -File |
+        Where-Object { $_.Extension -match '^\.(mp4|mkv|webm|avi|m4v|mpg|mpeg|ogv)$' } |
+        Sort-Object Name)
+    if ($sources.Count -eq 0) { throw "no video files under $Folder" }
+
+    Write-Host "files to split: $($sources.Count)" -ForegroundColor Cyan
+    $total = 0
+    foreach ($file in $sources) {
+        $year = if ($ForcedYear -gt 0) { $ForcedYear } else { Get-YearFromName $file.FullName }
+        Write-Host "`n== $($file.Name)" -ForegroundColor Cyan
+        if ($year -le 0) {
+            Write-Warning '   no year in the name or path; skipping (use -Year to force one)'
+            continue
+        }
+        $duration = Get-ProbeDuration $file.FullName
+        if ($duration -le 0) { Write-Warning '   cannot probe duration; skipping'; continue }
+        Write-Host ('   {0:N1}s -> era {1}' -f $duration, $year) -ForegroundColor DarkGray
+
+        $yearDir = Join-Path $Dest "$year"
+        New-Item -ItemType Directory -Force -Path $yearDir | Out-Null
+        $slug = ($file.BaseName -replace '[^a-zA-Z0-9\-_]', '-').ToLower()
+
+        if ($DryRun) {
+            Write-Host "   would split into $yearDir" -ForegroundColor Yellow
+            continue
+        }
+
+        if ($duration -le $MaxSeconds) {
+            $target = Join-Path $yearDir "$slug.mp4"
+            if (-not (Test-Path $target)) {
+                & $ffmpeg -hide_banner -nostdin -loglevel error -i $file.FullName `
+                    -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 128k `
+                    -movflags +faststart $target
+            }
+            $total += 1
+            Write-Host '   + 1 spot (already single)' -ForegroundColor Green
+            continue
+        }
+
+        $kept = Split-Source -Source $file.FullName -Slug $slug -YearDir $yearDir -Duration $duration
+        $total += $kept
+        Write-Host "   + $kept spot(s) into $year" -ForegroundColor Green
+    }
+    return $total
+}
 
 function Convert-Item {
     param([string]$Identifier, [int]$ForcedYear)
@@ -335,26 +544,7 @@ function Convert-Item {
         return 1
     }
 
-    # Otherwise snap cut points to real spot lengths and cut on those.
-    $cuts = Get-SceneCuts -Source $local -Threshold $SceneThreshold -DurationSeconds $duration
-    $spots = Get-Spots -Cuts $cuts.ToArray() -Duration $duration
-    Write-Host ('   {0} shot cut(s) -> {1} spot(s)' -f $cuts.Count, $spots.Count) -ForegroundColor DarkGray
-
-    $kept = 0
-    $index = 0
-    foreach ($spot in $spots) {
-        $index++
-        $target = Join-Path $yearDir ('{0}-{1:d3}.mp4' -f $slug, $index)
-        if (Test-Path $target) { $kept++; continue }
-        # Re-encode instead of stream-copying: a keyframe cut leaves each spot up
-        # to a GOP short, and the planner trusts the real duration. These are
-        # 480i-era tapes, so this is cheap.
-        & $ffmpeg -hide_banner -nostdin -loglevel error -ss ('{0:F3}' -f $spot.Start) `
-            -t ('{0:F3}' -f $spot.Length) -i $local `
-            -c:v libx264 -preset veryfast -crf 20 -c:a aac -b:a 128k `
-            -movflags +faststart $target
-        if ($LASTEXITCODE -eq 0 -and (Test-Path $target)) { $kept++ }
-    }
+    $kept = Split-Source -Source $local -Slug $slug -YearDir $yearDir -Duration $duration
 
     if ($KeepSource) {
         $keepDir = Join-Path $Dest '_source'
@@ -369,6 +559,19 @@ function Convert-Item {
 }
 
 # -- run --------------------------------------------------------------------
+
+if ($PSCmdlet.ParameterSetName -eq 'FromFolder') {
+    # Already-downloaded tape: no fetching, just split and file.
+    Write-Host "source folder: $FromFolder" -ForegroundColor Cyan
+    Write-Host "destination: $Dest" -ForegroundColor Cyan
+    $written = Convert-Folder -Folder $FromFolder -ForcedYear $Year
+    Write-Host "`n--- done ---" -ForegroundColor Cyan
+    Write-Host "spots written: $written"
+    if ($written -gt 0) {
+        Write-Host 'next: .\run.ps1 scan && .\run.ps1 plan --date 2003-06-16' -ForegroundColor Green
+    }
+    return
+}
 
 # Wrap in @() so a single identifier is still an array: Set-StrictMode turns a
 # bare string's .Count into a hard error.
