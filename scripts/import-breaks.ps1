@@ -84,6 +84,10 @@ param(
     [int]$Limit = 0,
     [int]$MinSeconds = 8,
     [int]$MaxSeconds = 65,
+    #: Skip any item whose only video file is larger than this. Full recordings
+    #: ("Red Heat, Partial Movie with Commercials") are 2 GB and yield a handful of
+    #: spots, which is a bad trade when a 20 MB break tape yields as many.
+    [int]$MaxSourceMB = 400,
     [double]$SceneThreshold = 0.32,
     [switch]$KeepSource,
     [switch]$DryRun
@@ -512,7 +516,18 @@ function Convert-Item {
 
     $videos = Get-VideoFiles $metadata
     if ($videos.Count -eq 0) { Write-Warning '   no video file'; return 0 }
-    $file = $videos[0]
+
+    # Prefer a smaller derivative if the item has one; skip the item entirely if
+    # every option is a full-length recording.
+    $file = $null
+    foreach ($candidate in $videos) {
+        if (([int64]$candidate.size / 1MB) -le $MaxSourceMB) { $file = $candidate; break }
+    }
+    if (-not $file) {
+        $smallest = [math]::Round(([int64]$videos[0].size / 1MB), 0)
+        Write-Host "   skipped: smallest file is ${smallest} MB (limit ${MaxSourceMB} MB)" -ForegroundColor DarkYellow
+        return 0
+    }
     Write-Host ('   file: {0} ({1:N1} MB)' -f $file.name, ([int64]$file.size / 1MB)) -ForegroundColor DarkGray
 
     $yearDir = Join-Path $Dest "$year"
