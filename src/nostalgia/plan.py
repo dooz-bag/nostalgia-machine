@@ -295,6 +295,37 @@ def _generated_allowance(slot_count: int, max_share: float) -> int:
     return int(bump_slots * max_share)
 
 
+#: Below this many era-appropriate spots, a strict filter would repeat so heavily
+#: that a break stops sounding like a real one, so the pool is widened instead.
+MIN_ERA_POOL = 12
+
+
+def era_ad_pool(ads: Sequence[Asset], year: int, drift: int) -> tuple[list[Asset], bool]:
+    """Commercials whose era covers *year*, within *drift* years.
+
+    ``ads.era_drift_years`` was documented as governing commercials but was only
+    ever consulted for bump scoring, so a 2000 spot could air on a 2003 day.
+
+    Untagged spots (no year folder) stay eligible: the owner has not said when
+    they are from, which is different from saying they are wrong.
+
+    Returns ``(pool, widened)``. ``widened`` is true when the era-appropriate
+    selection was too thin to fill breaks and the whole pool was used instead.
+    """
+    if not any(asset.era_from is not None for asset in ads):
+        # Nothing is era-tagged, so filtering cannot mean anything yet.
+        return list(ads), False
+
+    in_era = [
+        asset
+        for asset in ads
+        if asset.era_from is None or asset.era_covers(year, drift)
+    ]
+    if len(in_era) >= MIN_ERA_POOL:
+        return in_era, False
+    return list(ads), True
+
+
 def render_generated_bumps(
     context: PlanContext,
     *,
@@ -488,6 +519,22 @@ def _plan_slot(
     cursor_ms = slot.start_ms
     emitted = 0
 
+    # Only spots whose era covers this day may air, so a 2000 tape does not turn
+    # up in a 2008 break. Untagged spots stay eligible.
+    ad_pool, widened = era_ad_pool(context.ads, plan.day.year, root.ads.era_drift_years)
+    if widened and not any("match era" in warning for warning in plan.warnings):
+        matching = sum(
+            1
+            for asset in context.ads
+            if asset.era_from is not None
+            and asset.era_covers(plan.day.year, root.ads.era_drift_years)
+        )
+        plan.warnings.append(
+            f"{prefix}: only {matching} commercial(s) match era {plan.day.year} "
+            f"+/-{root.ads.era_drift_years}y; widened to the whole pool -- add "
+            f"spots under media/commercials/{plan.day.year}/"
+        )
+
     for index, spec in enumerate(script.specs):
         if spec.kind == "episode":
             part_len = spec.duration_ms or episode.duration_ms
@@ -558,7 +605,10 @@ def _plan_slot(
             if target <= 0:
                 continue
 
-            pool = (context.idents or context.ads) if spec.kind == "ident" else context.ads
+            if spec.kind == "ident":
+                pool = context.idents or context.ads
+            else:
+                pool = ad_pool
             # The final real pod fills up to (but not past) the reserved bumps; any
             # sliver left over is covered afterwards, so the closing card still
             # lands last and the next slot starts on its boundary.

@@ -122,6 +122,19 @@ remaining break budget, not by a fixed number of seconds, because a library's
 "22-minute" episodes run a few seconds over. A fixed pod would starve the closing
 "up next" card or leave a long tail.
 
+**Commercials respect their era.** A spot filed under `media/commercials/2003/` can
+air on a 2003 day; `ads.era_drift_years` (default 2) widens that window, and
+untagged spots stay eligible because "unknown year" is not "wrong year". If the
+era-appropriate pool is too thin to fill breaks, the planner widens to the whole
+pool rather than airing the same handful of spots twelve times — and says so in
+`plan.warnings`.
+
+**Pod filling is bounded.** Subset-sum runs on real, ragged durations (15.015 s,
+30.021 s, 60.26 s), where a naive search over ~50 spots needs tens of millions of
+iterations and stalls a build. The search tracks spot *indices* in a frozenset and
+carries a hard iteration budget, so a tail pod resolves in milliseconds and still
+lands exactly.
+
 **The guide is continuous.** Playout JSON lists every commercial and bumper, because
 the streamer airs each one. The XMLTV lists *programmes*, each stretched to the next
 one's start, so the guide tiles the day instead of leaking a gap at every break.
@@ -190,6 +203,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia tag` | Confirm one bump's subject from the terminal |
 | `nostalgia bumps` | Render generated bump cards (`--dry-run`, `--style`) |
 | `nostalgia serve` | Web UI: what's on now, and the bump review queue |
+| `scripts/import-breaks.ps1` | Bulk-import commercial breaks from archive.org and split them into spots |
 
 ## Layout
 

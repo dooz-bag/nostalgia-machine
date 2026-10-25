@@ -7,6 +7,7 @@
 | Python 3.12+ | the scheduler | only stdlib beyond 4 small packages |
 | ffmpeg + ffprobe | durations, bump rendering | Docker images install it |
 | ~2 GB free | catalog + generated cards | plus your media |
+| yt-dlp *or* the `ia` CLI (optional) | bulk-downloading commercials | `scripts/import-breaks.ps1` needs neither — it uses plain HTTP |
 | Docker (optional) | the compose deployment | |
 
 On Windows:
@@ -47,6 +48,37 @@ media/
   idents/
     station-id.mp4
 ```
+
+### Importing commercials in bulk
+
+A break airs roughly **1,100 spots a day — six hours** — so the pool is the part
+that decides whether the channel feels like TV. With `ads.cooldown_hours: 2`, each
+spot may air at most 12×/day, which puts the absolute floor at ~92 unique spots and
+comfortable variety at 250–350 (~2 GB).
+
+`scripts/import-breaks.ps1` bulk-imports from the Internet Archive:
+
+```powershell
+# see what a query would pull, without downloading
+.\scripts\import-breaks.ps1 -DryRun -Limit 5 `
+    -Query 'title:"commercial break" AND year:[2002 TO 2004] AND title:(cartoon OR adult OR fox OR comedy)'
+
+# for real
+.\scripts\import-breaks.ps1 `
+    -Query 'title:"commercial break" AND year:[2001 TO 2008] AND title:(cartoon OR adult)'
+```
+
+Recorded breaks are far more valuable than single ads: one item yields several
+spots *plus* the network's own promos, which is exactly the continuity this project
+exists to reproduce. **Filter by network** in the query — an unfiltered
+`title:"commercial break"` returns Australian and Canadian stations (HSV-7, YTV)
+that would look badly out of place.
+
+How it splits: a break tape has a cut at every *shot* change, so raw scene
+segmentation yields 1–7 s shards. The script instead snaps candidate boundaries to
+real spot lengths (15/30/60 s, ±4.5 s), which recovers the actual commercials —
+typically 4–8 spots per break. Each is written to `media/commercials/<year>/`, and
+that year folder *is* the era tag.
 
 Accepted episode filename forms: `S01E02`, `s1e2`, `1x02`,
 `Season 1 Episode 2`, and an episode number inside a `Season NN/` folder.

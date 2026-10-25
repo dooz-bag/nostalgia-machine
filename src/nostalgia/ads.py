@@ -56,6 +56,12 @@ class PodError(ValueError):
     pass
 
 
+#: Upper bound on subset-sum iterations per pod. Large enough to find exact
+#: combinations for real 30/60/90 s targets, small enough that a pathological
+#: pool (dozens of spots with jittery real durations) cannot stall a build.
+_SEARCH_BUDGET = 250_000
+
+
 def fill_pod(
     pool: Iterable[Asset],
     *,
@@ -274,26 +280,15 @@ def _ads(pool: Iterable[Asset]) -> list[Asset]:
     return [asset for asset in pool if asset.kind == "ad" and asset.duration_ms > 0]
 
 
+def _to_assets(candidates: Sequence[Asset], indices: Iterable[int]) -> list[Asset]:
+    return [candidates[index] for index in sorted(indices)]
+
+
 def _exact_sum(candidates: Sequence[Asset], target: int, max_items: int) -> list[Asset] | None:
     """First subset (in *candidates* order) whose durations sum to *target*."""
-    reachable: dict[int, list[Asset]] = {0: []}
-    for _round in range(max_items):
-        snapshot = sorted(reachable.items())
-        grew = False
-        for subtotal, chosen in snapshot:
-            for asset in candidates:
-                if asset in chosen:
-                    continue
-                total = subtotal + asset.duration_ms
-                if total > target or total in reachable:
-                    continue
-                reachable[total] = chosen + [asset]
-                grew = True
-                if total == target:
-                    return reachable[target]
-        if not grew:
-            break
-    return None
+    reachable = _reachable_totals(candidates, target, max_items)
+    chosen = reachable.get(target)
+    return None if chosen is None else _to_assets(candidates, chosen)
 
 
 def _exact_sum_trimmed(
@@ -302,70 +297,89 @@ def _exact_sum_trimmed(
     slop: int,
 ) -> list[tuple[Asset, int | None]] | None:
     """Exact sum where the final spot may be shortened by at most *slop* ms."""
-    reachable: dict[int, list[Asset]] = {0: []}
-    for _round in range(8):
-        snapshot = sorted(reachable.items())
-        grew = False
-        for subtotal, chosen in snapshot:
-            for asset in candidates:
-                if asset in chosen:
-                    continue
-                total = subtotal + asset.duration_ms
-                if total >= target or total in reachable:
-                    continue
-                reachable[total] = chosen + [asset]
-                grew = True
-        if not grew:
-            break
+    reachable = _reachable_totals(candidates, target - 1, 8)
 
-    best: tuple[int, list[Asset], Asset] | None = None
+    best: tuple[int, frozenset[int], int] | None = None
     for subtotal, chosen in reachable.items():
         need = target - subtotal
         if need <= 0:
             continue
-        for asset in candidates:
-            if asset in chosen or asset.duration_ms < need:
+        for index, asset in enumerate(candidates):
+            if index in chosen or asset.duration_ms < need:
                 continue
             if asset.duration_ms - need <= slop:
                 # Prefer the combination that uses the most real spots.
                 if best is None or len(chosen) > len(best[1]):
-                    best = (need, chosen, asset)
+                    best = (need, chosen, index)
     if best is None:
         return None
-    need, chosen, asset = best
-    return [(item, None) for item in chosen] + [(asset, need)]
+    need, chosen, index = best
+    trimmed = candidates[index]
+    return [(asset, None) for asset in _to_assets(candidates, chosen)] + [(trimmed, need)]
 
 
 def _closest_under(candidates: Sequence[Asset], target: int, max_items: int) -> list[Asset]:
     """The subset that gets closest to *target* without exceeding it."""
     reachable = _reachable_totals(candidates, target, max_items)
-    return reachable[max(reachable)]
+    return _to_assets(candidates, reachable[max(reachable)])
 
 
 def _closest_to(candidates: Sequence[Asset], target: int, max_items: int) -> list[Asset] | None:
     """The subset whose total is nearest *target*, over or under."""
-    reachable = _reachable_totals(candidates, int(target * 1.5) + 1, max_items)
+    # Only look one spot beyond the target. 1.5x the target was needlessly wide:
+    # an overshoot can never be useful by more than the longest single spot, and a
+    # wider window multiplies the state count for nothing.
+    longest = max((asset.duration_ms for asset in candidates), default=0)
+    limit = target + max(longest, 1)
+    reachable = _reachable_totals(candidates, limit, max_items)
     if not reachable:
         return None
     best = min(reachable, key=lambda total: (abs(total - target), total))
-    return reachable[best]
+    return _to_assets(candidates, reachable[best])
 
 
 def _reachable_totals(
     candidates: Sequence[Asset], limit: int, max_items: int
-) -> dict[int, list[Asset]]:
-    reachable: dict[int, list[Asset]] = {0: []}
+) -> dict[int, frozenset[int]]:
+    """Totals up to *limit*, with the indices that reach each one.
+
+    Two things make this cheap enough to call per break:
+
+    * **Sets of indices, not lists of assets.** ``Asset`` is a dataclass with a
+      ``dict`` field, so ``asset in chosen`` is a deep dict comparison at every
+      node. A real library has spots of 15.015 s, 15.021 s, 30.021 s and 60.26 s
+      rather than round numbers, which multiplies the state space; membership on a
+      frozenset of ints is O(1) and was the difference between seconds and minutes.
+
+    * **One best combination per total.** Subset-sum only needs to know whether a
+      total is reachable, so re-deriving the same total from a different
+      combination is wasted work. Keeping the first reachable set and skipping
+      everything that repeats it is what stops the enumeration from exploding.
+    """
+    reachable: dict[int, frozenset[int]] = {0: frozenset()}
+    durations = [asset.duration_ms for asset in candidates]
+
+    # A hard budget, in "states grown". The loop is O(states x candidates), so
+    # without a cap a 6-minute tail over 52 spots is tens of millions of
+    # iterations -- which is exactly what took minutes before. Exceeding the
+    # budget just means the answer is approximate, and the caller's tolerance and
+    # the slot's tail already absorb that.
+    budget = _SEARCH_BUDGET
+    work = 0
+
     for _round in range(max_items):
-        snapshot = sorted(reachable.items())
         grew = False
-        for subtotal, chosen in snapshot:
-            for asset in candidates:
-                if asset in chosen:
+        for subtotal, chosen in sorted(reachable.items()):
+            for index in range(len(candidates)):
+                work += 1
+                if work > budget:
+                    return reachable
+                if index in chosen:
                     continue
-                total = subtotal + asset.duration_ms
+                total = subtotal + durations[index]
                 if total > limit or total in reachable:
                     continue
-                reachable[total] = chosen + [asset]
+                reachable[total] = chosen | {index}
                 grew = True
         if not grew:
             break
