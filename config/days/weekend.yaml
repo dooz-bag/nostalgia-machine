@@ -1,0 +1,37 @@
+# Weekend programming.
+#
+# Weekends get marathons: one show runs for a long block, which is how the channel
+# avoids feeling like the same shuffle every day.
+days:
+  - name: weekend
+    days: [sat, sun]
+    dayparts:
+      - start: "00:00"
+        end: "06:00"
+        title: "Night Marathon"
+        family: short
+        shows: [aqua-teen-hunger-force]
+
+      - start: "06:00"
+        end: "12:00"
+        title: "Morning Block"
+        family: half
+        shows: [futurama]
+
+      - start: "12:00"
+        end: "18:00"
+        title: "Afternoon Block"
+        family: half
+        shows: [king-of-the-hill]
+
+      - start: "18:00"
+        end: "22:00"
+        title: "Prime Time"
+        family: half
+        shows: [futurama, king-of-the-hill]
+
+      - start: "22:00"
+        end: "00:00"
+        title: "Late Shorts"
+        family: short
+        shows: [sealab-2021, aqua-teen-hunger-force]

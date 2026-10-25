@@ -1,0 +1,30 @@
+# Bump behaviour and the Phase 2 generated-bump settings.
+bumps:
+  # strict   -> only a bump naming the right show, or nothing
+  # semi     -> the right show, else a neutral bump (default)
+  # off      -> allow a wrong-subject bump rather than fall back to neutral
+  strictness: semi
+
+  # Minimum score for a real bump to be used. Raise this if you'd rather have a
+  # neutral bump than a loosely-related one.
+  min_score: 6.0
+
+  # No bump repeats within this window.
+  cooldown_hours: 6
+
+  generated:
+    # Render typographic cards for slots the real pool cannot fill.
+    # Real bumps always win; this only replaces the neutral-fallback path.
+    enabled: true
+
+    # Never let more than this fraction of the day's bump slots be synthetic.
+    max_share: 0.25
+
+    cache_dir: "bumps/generated"
+
+    # The look to render when the channel has no `on_air_date`. Set this to the
+    # era you are recreating, not to "now", or you will get 2020s-style cards.
+    era_year: 2003
+
+    # Force one style pack instead of selecting by air date (e.g. "2003").
+    # style_pack: "2003"

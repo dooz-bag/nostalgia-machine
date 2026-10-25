@@ -1,0 +1,47 @@
+# Weekday programming.
+#
+# Every daypart must start on a grid boundary (:00/:15/:30/:45) and span a whole
+# number of slots. `family` sets the slot length: short = 15 min, half = 30 min,
+# hour = 60 min. Multiple shows in one daypart take turns deterministically.
+#
+# This is deliberately a sketch, not a claim of historical accuracy. Edit freely;
+# nothing in the code depends on these particular blocks.
+days:
+  - name: weekday
+    days: [mon, tue, wed, thu, fri]
+    dayparts:
+      # Overnight: 11-minute shows back to back, the way [as] ran them.
+      - start: "00:00"
+        end: "05:00"
+        title: "Overnight"
+        family: short
+        shows: [aqua-teen-hunger-force, sealab-2021]
+
+      # Early morning anime/sitcom block.
+      - start: "05:00"
+        end: "09:00"
+        title: "Early"
+        family: half
+        shows: [futurama, king-of-the-hill]
+
+      # Daytime: off-air style block. Comment this out to keep the channel dark;
+      # the planner fills unscheduled time with the fallback.
+      - start: "09:00"
+        end: "17:00"
+        title: "Daytime"
+        family: half
+        shows: [king-of-the-hill, futurama]
+
+      # Prime time: the block people actually tune in for.
+      - start: "17:00"
+        end: "21:00"
+        title: "Evening"
+        family: half
+        shows: [futurama, king-of-the-hill]
+
+      # Late night: short-form shows, the classic [as] signature.
+      - start: "21:00"
+        end: "00:00"
+        title: "Late Night"
+        family: short
+        shows: [aqua-teen-hunger-force, sealab-2021]

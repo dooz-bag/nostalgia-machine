@@ -1,0 +1,34 @@
+# The channel itself: identity, the broadcast grid, and how far ahead to plan.
+channel:
+  name: "Adult Swim"
+  number: "1"
+  tvg_id: "adultswim.1"
+  group: "Nostalgia"
+
+  grid:
+    # A real [as] launch date, so "day 0" has meaning.
+    anchor: "2001-09-02"
+    # Every slot boundary lands on :00/:15/:30/:45.
+    quantum_minutes: 15
+    timezone: "America/New_York"
+
+  # The wall-clock date that maps to the channel's "start". Leave commented to
+  # use today, which is what you want on a live channel.
+  # on_air_date: "2003-06-15"
+
+  # Plan this many days ahead. ErsatzTV Next picks up new files without a restart.
+  horizon_days: 3
+
+  # Optional: a logo shown in client guides.
+  # logo: "https://example.invalid/adult-swim.png"
+
+# Default encode. 720p/2.5 Mbps keeps a 24/7 transcode affordable; raise it if
+# you have a GPU and want 1080p.
+encoding:
+  width: 1280
+  height: 720
+  bitrate_kbps: 2500
+  audio_bitrate_kbps: 160
+
+# Where media lives, relative to the project root.
+media_root: "media"

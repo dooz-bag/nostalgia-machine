@@ -1,0 +1,125 @@
+# The channel, in two processes.
+#
+#   scheduler  our code: scans media, builds the plan, writes playout JSON + XMLTV
+#   ersatztv   ErsatzTV Next: transcodes and serves HLS / M3U / XMLTV
+#
+# Both are stateless apart from the mounted folders, so this file is also the
+# deployment recipe for an rPi or a VPS: copy it, point MEDIA_DIR at the library,
+# done.
+
+name: nostalgia-machine
+
+services:
+  scheduler:
+    build: .
+    container_name: nostalgia-scheduler
+    restart: unless-stopped
+    # The image entrypoint is `python -m nostalgia.cli`; this service runs a shell
+    # loop instead, so the entrypoint is cleared.
+    entrypoint: []
+    environment:
+      TZ: ${TZ:-America/New_York}
+      # Emit paths as the *streamer* sees them. Without this, playout JSON would
+      # contain host paths (C:/Projects/...) that do not exist inside the
+      # ersatztv container.
+      NOSTALGIA_CONTAINER_ROOT: /app
+    volumes:
+      - ./config:/app/config
+      - ${MEDIA_DIR:-./media}:/app/media:ro
+      - ./data:/app/data
+      - ./playout:/app/playout
+      - ./xmltv:/app/xmltv
+      - ./lineup:/app/lineup
+      # The bump renderer writes here, so the media mount must expose it.
+      - ${GENERATED_BUMP_DIR:-./media/bumps/generated}:/app/media/bumps/generated
+    # Regenerate the plan on a loop. `emit` is idempotent, so re-running is safe
+    # and is what keeps the horizon rolling without a restart.
+    command:
+      - sh
+      - -c
+      - |
+        nost_run() { python -m nostalgia.cli --root /app "$$@"; }
+        nost_run scan || true
+        if [ "$${GENERATE_BUMPS:-false}" = "true" ]; then
+          nost_run bumps || true
+        fi
+        while true; do
+          # emit is idempotent, so re-running it is what keeps the horizon
+          # rolling without ever restarting the streamer.
+          nost_run emit || echo "emit failed; retrying"
+          sleep "$${PLAN_INTERVAL_SECONDS:-21600}"
+        done
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pathlib,sys; sys.exit(0 if list(pathlib.Path('/app/playout').glob('*.json')) else 1)"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 1m
+
+  ersatztv:
+    image: ghcr.io/ersatztv/next:${ETV_TAG:-latest}
+    container_name: nostalgia-ersatztv
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/New_York}
+    ports:
+      - "${ETV_PORT:-8409}:8409"
+    volumes:
+      # Exactly the folders the streamer needs. `lineup/` holds lineup.json and
+      # channels/<n>/channel.json, which is what `emit` writes.
+      - ./lineup:/app/config:ro
+      - ./playout:/app/playout:ro
+      - ./xmltv:/app/xmltv:ro
+      - ${MEDIA_DIR:-./media}:/app/media:ro
+      - ${GENERATED_BUMP_DIR:-./media/bumps/generated}:/app/media/bumps/generated:ro
+      # HLS output. The one folder the streamer must *write*, so it is a named
+      # volume rather than a bind mount: a bind mount to a folder that does not
+      # yet exist is created root-owned and the channel then dies with
+      # "failed to create the output folder /app/hls/1: Permission denied".
+      # The image runs as uid/gid 1000, so `hls-init` below pre-chowns it.
+      - hls:/app/hls
+    command: ["/app/config/lineup.json"]
+    # The named volume is created root-owned; `hls-init` hands it to this uid
+    # before the channel starts, so the streamer can write segments.
+    user: "1000:1000"
+    # One depends_on block only: a second key would replace this one, so both
+    # conditions live here.
+    depends_on:
+      scheduler:
+        condition: service_healthy
+      hls-init:
+        condition: service_completed_successfully
+
+  hls-init:
+    image: alpine:3.20
+    container_name: nostalgia-hls-init
+    restart: "no"
+    command: ["chown", "-R", "1000:1000", "/app/hls"]
+    volumes:
+      - hls:/app/hls
+
+  # -- Optional: Plex -----------------------------------------------------------
+  # ErsatzTV Next speaks M3U + XMLTV, which Plex cannot consume directly. Enable
+  # the `plex` profile to put Dispatcharr in front and get a spoofable HDHomeRun
+  # tuner:
+  #
+  #   docker compose --profile plex up -d
+  #
+  # Then add Dispatcharr (http://localhost:9191) as a tuner in Plex. Next's own
+  # URLs also need adding to Dispatcharr once:
+  #   http://ersatztv:8409/channels.m3u
+  #   http://ersatztv:8409/xmltv.xml
+  dispatcharr:
+    profiles: ["plex"]
+    image: ghcr.io/dispatcharr/dispatcharr:latest
+    container_name: nostalgia-dispatcharr
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-America/New_York}
+    ports:
+      - "${DISPATCHARR_PORT:-9191}:9191"
+    volumes:
+      - ./dispatcharr:/data
+
+volumes:
+  hls:

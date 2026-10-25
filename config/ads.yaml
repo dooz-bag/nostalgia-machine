@@ -1,0 +1,28 @@
+# Commercials: pool behaviour and pod targets.
+ads:
+  # A commercial cannot air again within this window.
+  cooldown_hours: 2
+
+  # How far outside an asset's era a commercial may still run. 0 = strictly the
+  # same year, 1 = +/- one year. Bump files without an era folder get tagged by
+  # `nostalgia tag` or the /bumps page.
+  era_drift_years: 2
+
+  # How far a pod may land from its target while still using whole spots. Real
+  # commercials run 30.02s or 14.98s; a station plays them as booked, so the pod
+  # is allowed this much drift and the slot's tail absorbs the remainder. Set to
+  # 0 to demand millisecond-exact pods (at the cost of trimming almost every spot).
+  pod_tolerance_ms: 250
+
+  # When the pool cannot reach the target at all, shorten one spot by at most
+  # this much rather than leaving the break short.
+  trim_slop_ms: 1500
+
+  # Fixed pod lengths. The planner picks the largest that fits the break.
+  pod_targets:
+    - seconds: 30
+      count: 1
+    - seconds: 60
+      count: 1
+    - seconds: 90
+      count: 1

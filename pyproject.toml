@@ -1,0 +1,32 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "nostalgia-machine"
+version = "0.1.0"
+description = "A deterministic 24/7 [adult swim] 2001-2008 IPTV channel: scheduler and traffic engine for ErsatzTV Next."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+dependencies = [
+    "pydantic>=2.7",
+    "PyYAML>=6.0",
+    # Windows ships no tz database, so zoneinfo needs this to work there.
+    "tzdata>=2024.1",
+]
+
+[project.optional-dependencies]
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+tag = ["pytesseract>=0.3.10", "Pillow>=10.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+nostalgia = "nostalgia.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nostalgia"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+filterwarnings = ["error::DeprecationWarning:nostalgia.*"]

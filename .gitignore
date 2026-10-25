@@ -1,0 +1,28 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+.pytest_cache/
+dist/
+build/
+
+# runtime state -- regenerable, machine-specific
+data/
+playout/
+xmltv/
+hls/
+lineup/
+ersatztv/
+bumps/generated/
+logs/
+.env
+
+# media is never committed
+media/
+
+# editors / os
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

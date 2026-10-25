@@ -1,0 +1,109 @@
+# Era style packs for generated bumps (Phase 2, Tier 1).
+#
+# The 2003-2007 [adult swim] bumps are typographic black cards: a line of white
+# text, a lot of negative space, sometimes a still frame behind. There is no
+# photoreal imagery to synthesize, so a template renderer gets ~90% of the look
+# with no model at all -- and because it is deterministic, generated bumps obey
+# the same "same date, same channel" guarantee as everything else.
+#
+# Sizes are fractions of the frame so one pack works at 480p, 720p and 1080p.
+# `drawtext` filter syntax uses ':' as a separator, so any literal ':' in a value
+# must be escaped -- the renderer handles that for you.
+styles:
+  "2001":
+    name: "Launch era"
+    font: "Arial"
+    font_size: 0.062
+    colour: "white"
+    uppercase: true
+    tracking: 0.02
+    margin_x: 0.12
+    margin_y: 0.46
+    align: "left"
+    background: "black"
+    letterbox: false
+    vignette: 0.0
+    grain: 0.0
+    hold_ms: 4200
+    fade_ms: 400
+    show_position_word: false
+
+  "2003":
+    name: "Splice era"
+    font: "Arial"
+    font_size: 0.058
+    colour: "white"
+    uppercase: true
+    tracking: 0.06
+    margin_x: 0.14
+    margin_y: 0.48
+    align: "left"
+    background: "black"
+    letterbox: false
+    vignette: 0.12
+    grain: 0.05
+    hold_ms: 4200
+    fade_ms: 500
+    show_position_word: true
+
+  "2005":
+    name: "Wordmark era"
+    font: "Arial Narrow"
+    font_size: 0.055
+    colour: "white"
+    uppercase: true
+    tracking: 0.08
+    margin_x: 0.16
+    margin_y: 0.50
+    align: "left"
+    background: "black"
+    letterbox: true
+    vignette: 0.18
+    grain: 0.08
+    hold_ms: 4000
+    fade_ms: 600
+    show_position_word: true
+
+  "2007":
+    name: "Late era"
+    font: "Arial"
+    font_size: 0.050
+    colour: "white"
+    uppercase: true
+    tracking: 0.10
+    margin_x: 0.18
+    margin_y: 0.52
+    align: "center"
+    background: "black"
+    letterbox: true
+    vignette: 0.22
+    grain: 0.10
+    hold_ms: 3800
+    fade_ms: 700
+    show_position_word: true
+
+# The wordmark line above the subject.
+brand:
+  "2001": "[adult swim]"
+  "2003": "[adult swim]"
+  "2005": "[adult swim]"
+  "2007": "[adult swim]"
+
+# What the position word says, per position and era.
+position_words:
+  INTO:
+    default: "STAY TUNED"
+    "2003": "STAY TUNED"
+    "2005": "COMING UP"
+    "2007": "COMING UP"
+  OUT:
+    default: "WE NOW RETURN TO"
+    "2003": "WE NOW RETURN TO"
+    "2005": "WE NOW RETURN TO"
+    "2007": "WE'LL BE RIGHT BACK"
+  AFTER:
+    default: "WE NOW RETURN TO"
+  NEXT:
+    default: "NEXT"
+  ANY:
+    default: "NEXT"

@@ -1,0 +1,124 @@
+# Continuity: how a slot is broken up.
+#
+# This is the "traffic department". Each slot family gets a template, and the
+# planner spends the slot budget against it exactly.
+#
+# Bump intent fields:
+#   subject:  this | next | prev | neutral | specific:<show-id>
+#   position: INTO | OUT | NEXT | AFTER | ANY
+#   max_seconds: skip the bump if it runs longer than this
+#
+# Pod sizing, pick one per segment:
+#   share:   fraction of the slot's remaining break budget (recommended)
+#   seconds: a fixed booking length (30/60/90)
+#
+# `share` is usually right: episodes in a real library run a few seconds over or
+# under their nominal length, and a fixed pod cannot adapt. A share keeps the
+# break balanced and leaves room for the closing bump.
+#
+# `mid:` splits the episode at a percentage and returns to it, which is how a
+# 22-minute episode fills a 30-minute slot without being cut.
+continuity:
+  # 15-minute slot for an ~11-minute episode: about 4 minutes of break.
+  default-short:
+    name: "Short (15 min)"
+    segments:
+      - kind: ad_pod
+        share: 0.34
+      - kind: bump
+        subject: this
+        position: INTO
+        max_seconds: 12
+      - kind: episode
+      - kind: bump
+        subject: this
+        position: AFTER
+        max_seconds: 12
+      - kind: ad_pod
+        share: 0.62
+      - kind: bump
+        subject: next
+        position: NEXT
+        max_seconds: 12
+
+  # 30-minute slot for a ~22-minute episode: about 7 minutes of break.
+  default-half:
+    name: "Half hour (30 min)"
+    segments:
+      - kind: ad_pod
+        share: 0.30
+      - kind: bump
+        subject: this
+        position: INTO
+        max_seconds: 12
+      - kind: episode
+      - kind: bump
+        subject: this
+        position: AFTER
+        max_seconds: 12
+      - kind: ad_pod
+        share: 0.66
+      - kind: bump
+        subject: next
+        position: NEXT
+        max_seconds: 12
+    mid:
+      - after_percent: 45
+        segments:
+          - kind: bump
+            subject: this
+            position: OUT
+            max_seconds: 12
+          - kind: ad_pod
+            seconds: 60
+          - kind: bump
+            subject: this
+            position: INTO
+            max_seconds: 12
+
+  # 60-minute block (movies, specials, marathons).
+  default-hour:
+    name: "Hour block"
+    segments:
+      - kind: ad_pod
+        share: 0.25
+      - kind: bump
+        subject: this
+        position: INTO
+        max_seconds: 12
+      - kind: episode
+      - kind: bump
+        subject: this
+        position: AFTER
+        max_seconds: 12
+      - kind: ad_pod
+        share: 0.70
+      - kind: bump
+        subject: next
+        position: NEXT
+        max_seconds: 12
+    mid:
+      - after_percent: 33
+        segments:
+          - kind: bump
+            subject: this
+            position: OUT
+            max_seconds: 12
+          - kind: ad_pod
+            seconds: 90
+          - kind: bump
+            subject: this
+            position: INTO
+            max_seconds: 12
+      - after_percent: 66
+        segments:
+          - kind: bump
+            subject: this
+            position: OUT
+            max_seconds: 12
+          - kind: ad_pod
+            seconds: 90
+          - kind: bump
+            subject: this
+            position: INTO
+            max_seconds: 12

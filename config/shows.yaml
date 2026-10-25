@@ -1,0 +1,66 @@
+# The roster.
+#
+# Nothing in the scheduler believes it knows what "actually aired" on [adult
+# swim]. Canon is data: this file is the whole customisability layer.
+#
+#   eligibility: always     ignore the airing window entirely
+#   eligibility: window     honour airing_from / airing_to
+#
+# Shows are addressed by `id` (the YAML key) in continuity templates, day files
+# and bump tags. Keep ids lowercase -- they appear in bump filenames.
+shows:
+  aqua-teen-hunger-force:
+    title: "Aqua Teen Hunger Force"
+    folder: shows/aqua-teen-hunger-force
+    family: comedy
+    slot: short                 # ~11 min episodes -> 15-minute slots
+    # Ran from the 2001 launch. No airing_from needed.
+    aliases: ["ATHF", "Aqua Teen"]
+    order: episode
+    weight: 1.4
+
+  sealab-2021:
+    title: "Sealab 2021"
+    folder: shows/sealab-2021
+    family: comedy
+    slot: short
+    aliases: ["SeaLab"]
+    order: episode
+    weight: 1.0
+
+  futurama:
+    title: "Futurama"
+    folder: shows/futurama
+    family: sitcom
+    slot: half                  # ~22 min episodes -> 30-minute slots
+    aliases: ["Futurama"]
+    order: episode
+    weight: 1.2
+
+  king-of-the-hill:
+    title: "King of the Hill"
+    folder: shows/king-of-the-hill
+    family: sitcom
+    slot: half
+    # KotH joined [adult swim] in 2009 syndication, i.e. OUTSIDE the 2001-2008
+    # window this channel re-creates. Two honest options, pick one:
+    #
+    #   1. Let it phase in at its real date (eligibility: window)
+    #   2. Just play it anyway -- it's your channel (eligibility: always)
+    #
+    # Default is (2) with no window, so the seed schedule works out of the box.
+    eligibility: always
+    aliases: ["KotH", "King of the Hill"]
+    order: episode
+    weight: 0.9
+
+  # Add more without touching code:
+  #
+  # home-movies:
+  #   title: "Home Movies"
+  #   folder: shows/home-movies
+  #   family: comedy
+  #   slot: half
+  #   airing_from: "2004-11-01"   # joined [as] in late 2004
+  #   eligibility: window
+  #   weight: 0.8
