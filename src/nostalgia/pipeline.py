@@ -7,6 +7,7 @@ can produce a playout file. Anything that "just changes one thing" goes through
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -82,6 +83,150 @@ def _overlay_layer(config: RootConfig, paths: Paths) -> dict | None:
         look,
         path=str(paths.saw(card)).replace("\\", "/"),
     )
+
+
+#: Strings the streamer binary must contain for an overlay layer to be honoured.
+#: These are the serde field names from ``GraphicsLayer`` in ersatztv-playout; if
+#: a future build drops the field, the layer is ignored *silently* and the mark
+#: just stops appearing -- so it is worth detecting rather than discovering later.
+OVERLAY_BINARY_MARKERS = ("within_source_content", "opacity_percent", "bottom_right")
+
+
+def streamer_supports_overlay(*, binary: Path | None = None, container: str | None = None) -> bool | None:
+    """Whether the streamer knows about graphics layers.
+
+    Checks a host binary when there is one, else greps the binary inside a running
+    container -- which is the normal case here, because ErsatzTV only runs as a
+    container on Windows.
+
+    Returns ``None`` when it cannot be determined (no binary, unreadable, container
+    not running), so the caller warns rather than claiming a false pass.
+    """
+    if container:
+        return _container_supports_overlay(container)
+    if binary is None or not binary.is_file():
+        return None
+    try:
+        blob = binary.read_bytes()
+    except OSError:
+        return None
+    return all(marker.encode() in blob for marker in OVERLAY_BINARY_MARKERS)
+
+
+def _container_supports_overlay(container: str) -> bool | None:
+    import subprocess
+
+    found = 0
+    for marker in OVERLAY_BINARY_MARKERS:
+        try:
+            result = subprocess.run(
+                # `docker exec` has no -T (that is `compose exec`); -i is not
+                # needed for a non-interactive grep.
+                ["docker", "exec", container, "sh", "-c",
+                 f'grep -qc "{marker}" /app/ersatztv-channel 2>/dev/null'],
+                capture_output=True, text=True, timeout=20, check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode == 0:
+            found += 1
+    if found == 0:
+        # Either the support is absent or the container is not reachable. Both
+        # mean "cannot confirm", which is a warning, not a pass.
+        return None
+    return found == len(OVERLAY_BINARY_MARKERS)
+
+
+def _watermark_findings(config: RootConfig, paths: Paths) -> list[tuple[str, str, str]]:
+    """Report whether the configured watermark mode can actually work."""
+    findings: list[tuple[str, str, str]] = []
+    config_wm = config.watermark
+    if config_wm.mode == "none":
+        return findings
+
+    from .watermark import WANTED_FONT, resolve_mark_font
+
+    resolved = resolve_mark_font(config_wm.font)
+    if resolved is None:
+        findings.append(
+            (
+                "error",
+                "watermark",
+                f"no usable font for {config_wm.font!r}; the mark cannot be rendered",
+            )
+        )
+    elif config_wm.font == WANTED_FONT and resolved.name.lower() != WANTED_FONT.lower().replace(
+        " ", ""
+    ):
+        # Not an error: the chain deliberately falls back. Saying which face is
+        # actually in use is what lets the owner notice a boxy-looking mark.
+        findings.append(
+            (
+                "ok",
+                "watermark",
+                f"{WANTED_FONT} not installed; using {resolved.name} "
+                f"condensed by {config_wm.condense:g}",
+            )
+        )
+    else:
+        findings.append(("ok", "watermark", f"font {resolved.name}"))
+
+    if not any(show.enable for show in config.shows.values()):
+        findings.append(("warn", "watermark", "no shows are enabled; nothing to mark"))
+
+    if config_wm.mode == "overlay":
+        binary = _streamer_binary(paths)
+        # Inside the scheduler container the Docker CLI is not available, so the
+        # generic "cannot confirm" warning is the honest answer there.
+        container = os.environ.get("NOSTALGIA_STREAMER_CONTAINER")
+        supported = streamer_supports_overlay(binary=binary, container=container)
+        if supported is True:
+            findings.append(
+                ("ok", "watermark", "streamer composited per item (overlay mode)")
+            )
+        elif supported is False:
+            findings.append(
+                (
+                    "error",
+                    "watermark",
+                    "overlay mode, but this streamer build has no graphics support; "
+                    "the mark will be silently ignored -- use mode: burn",
+                )
+            )
+        else:
+            findings.append(
+                (
+                    "warn",
+                    "watermark",
+                    "overlay mode; cannot inspect the streamer binary to confirm it "
+                    "honours graphics layers (burn mode does not depend on it)",
+                )
+            )
+    else:
+        card = watermark_card_path(paths)
+        cached = list(card.glob("*.mkv")) if card.is_dir() else []
+        if cached:
+            findings.append(
+                ("ok", "watermark", f"burn mode; {len(cached)} composited episode(s) cached")
+            )
+        else:
+            findings.append(
+                (
+                    "warn",
+                    "watermark",
+                    "burn mode; no composited episodes yet -- run 'nostalgia watermark --apply'",
+                )
+            )
+    return findings
+
+
+def _streamer_binary(paths: Paths) -> Path | None:
+    """The ErsatzTV executable, host-side (Docker or native), if we can find it."""
+    candidates = [paths.root / "ersatztv" / "ersatztv.exe", paths.root / "ersatztv" / "ersatztv"]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _is_video(path: Path) -> bool:
@@ -324,6 +469,8 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
     for show_id, show in config.shows.items():
         if show.eligibility == "window" and show.airing_from is None:
             continue
+
+    findings.extend(_watermark_findings(config, paths))
 
     from .rotation import build_rings, cycle_length as _cycle
 

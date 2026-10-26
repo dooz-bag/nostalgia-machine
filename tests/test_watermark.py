@@ -203,3 +203,79 @@ def test_the_placement_filter_is_an_overlay_bottom_right() -> None:
     graph = build_filtergraph(WatermarkLook(), width=1280, height=720)
     assert graph.startswith("overlay=")
     assert "W-w-" in graph and "H-h-" in graph
+
+
+# -- can the overlay actually work? ----------------------------------------
+
+
+def test_the_binary_markers_are_the_schema_field_names() -> None:
+    """These are serde field names; a rename upstream makes the layer a no-op."""
+    from nostalgia.pipeline import OVERLAY_BINARY_MARKERS
+
+    assert "within_source_content" in OVERLAY_BINARY_MARKERS
+    assert "bottom_right" in OVERLAY_BINARY_MARKERS
+
+
+def test_overlay_support_is_unknown_without_a_binary() -> None:
+    """Unknown must not read as success: the caller warns instead."""
+    from nostalgia.pipeline import streamer_supports_overlay
+
+    assert streamer_supports_overlay(binary=None, container=None) is None
+
+
+def test_overlay_support_detects_a_binary_missing_the_fields(tmp_path) -> None:
+    from nostalgia.pipeline import streamer_supports_overlay
+
+    stub = tmp_path / "ersatztv"
+    stub.write_bytes(b"an old build with no graphics layer support")
+    assert streamer_supports_overlay(binary=stub) is False
+
+
+def test_overlay_support_detects_a_binary_carrying_the_fields(tmp_path) -> None:
+    from nostalgia.pipeline import OVERLAY_BINARY_MARKERS, streamer_supports_overlay
+
+    stub = tmp_path / "ersatztv"
+    stub.write_bytes(" ".join(OVERLAY_BINARY_MARKERS).encode())
+    assert streamer_supports_overlay(binary=stub) is True
+
+
+def test_none_mode_reports_nothing_about_watermark(config, catalog, paths) -> None:
+    from nostalgia.pipeline import _watermark_findings
+
+    payload = config.model_dump()
+    payload["watermark"] = {**payload["watermark"], "mode": "none"}
+    quiet = type(config).model_validate(payload)
+    assert _watermark_findings(quiet, paths) == []
+
+
+def test_overlay_mode_warns_when_it_cannot_confirm(config, catalog, paths) -> None:
+    """No host binary and no container name: say so rather than claim success."""
+    from nostalgia.pipeline import _watermark_findings
+
+    payload = config.model_dump()
+    payload["watermark"] = {**payload["watermark"], "mode": "overlay"}
+    overlay = type(config).model_validate(payload)
+    messages = [message for _l, _a, message in _watermark_findings(overlay, paths)]
+    assert any("cannot inspect" in message for message in messages), messages
+
+
+def test_burn_mode_prompts_for_the_composite_step(config, catalog, paths) -> None:
+    from nostalgia.pipeline import _watermark_findings
+
+    payload = config.model_dump()
+    payload["watermark"] = {**payload["watermark"], "mode": "burn"}
+    burn = type(config).model_validate(payload)
+    messages = [message for _l, _a, message in _watermark_findings(burn, paths)]
+    assert any("watermark --apply" in message for message in messages), messages
+
+
+def test_the_fallback_font_is_reported_so_a_boxy_mark_is_explicable(
+    config, catalog, paths
+) -> None:
+    payload = config.model_dump()
+    payload["watermark"] = {**payload["watermark"], "mode": "overlay"}
+    overlay = type(config).model_validate(payload)
+    from nostalgia.pipeline import _watermark_findings
+
+    messages = [message for _l, _a, message in _watermark_findings(overlay, paths)]
+    assert any("condensed by" in message or WANTED_FONT in message for message in messages)

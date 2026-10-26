@@ -234,6 +234,20 @@ corner.
 .\run.ps1 watermark --apply    # actually encode into media/derived/watermark/
 ```
 
+**Overlay is the mode that can regress silently.** It depends on a schema field
+in the streamer, so a future image could drop it and the mark would simply stop
+appearing while everything else kept working. `nostalgia doctor` therefore greps
+the running streamer binary for the fields the layer needs and reports one of:
+
+```
+[ ok] watermark streamer composited per item (overlay mode)
+[ERR] watermark overlay mode, but this streamer build has no graphics support;
+      the mark will be silently ignored -- use mode: burn
+```
+
+`burn` mode has no such dependency — it rewrites the files — which is why it is
+the safe choice if you would rather this be impossible.
+
 > The card lives in `media/derived/`, **not** `data/`. The streamer mounts only
 > the media tree, so a card written to `data/` is created by the scheduler and
 > then unreadable by the process that has to composite it — which showed up as

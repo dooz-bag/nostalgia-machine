@@ -23,6 +23,9 @@ services:
       # contain host paths (C:/Projects/...) that do not exist inside the
       # ersatztv container.
       NOSTALGIA_CONTAINER_ROOT: /app
+      # Lets `doctor` confirm the streamer build still honours graphics layers
+      # for overlay-mode watermarks. Harmless when it cannot reach Docker.
+      NOSTALGIA_STREAMER_CONTAINER: ${STREAMER_CONTAINER:-nostalgia-ersatztv}
     volumes:
       - ./config:/app/config
       - ${MEDIA_DIR:-./media}:/app/media:ro
