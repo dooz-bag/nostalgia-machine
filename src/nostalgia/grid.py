@@ -32,6 +32,14 @@ class Slot:
     daypart: str
     """Title of the owning daypart, used for logs and the EPG."""
 
+    template: str | None = None
+    """Continuity template the daypart asked for, if any.
+
+    Carried on the slot because the planner resolves a slot's break structure
+    from here; without it a daypart's `template:` was validated and then silently
+    ignored, so a custom break length could never take effect.
+    """
+
     @property
     def length_ms(self) -> int:
         return self.end_ms - self.start_ms
@@ -176,6 +184,7 @@ def build_day(day: date, day_config: DayConfig, config: GridConfig) -> list[Slot
                     end_ms=slot_start + unit,
                     family=family,
                     daypart=label,
+                    template=part.template,
                 )
             )
         cursor_ms = finish_ms

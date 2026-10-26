@@ -103,6 +103,20 @@ accounts for well under 1% of the day.
 `plan.Plan.validate()` re-derives the whole timeline and refuses to emit anything
 with a gap, an overlap, or a non-positive duration.
 
+## Break size is not a template property
+
+A slot is a fixed budget and the episode is a fixed cost, so the break is the
+difference. A template decides the *shape* of that break -- where the bumps and
+pods sit, and how much of it each pod claims -- and the tail pod absorbs the
+remainder. Consequently no combination of `share`/`seconds` can change how much
+of the day is commercials: only the slot family (or which show occupies a slot)
+can. `doctor` reports the resulting figure so it is a number you read rather than
+one you infer from a plan.
+
+The resolution order for a slot's template is daypart `template:` → show `slot:`
+→ slot `family`. The daypart is the most specific statement about *this block of
+the schedule*, so it wins.
+
 ## Templates: `share` versus `seconds`
 
 A break segment is sized one of two ways:

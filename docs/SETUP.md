@@ -255,6 +255,80 @@ the safe choice if you would rather this be impossible.
 > replaced by black. `media/` is mounted read-only for the scheduler, so
 > `media/derived` is remounted writable on its own.
 
+### Changing how much of the day is commercials
+
+**Two separate questions**, and the code answers them very differently:
+
+| Question | Where |
+|---|---|
+| How is a break *divided*? | `config/continuity.yaml` |
+| How much break *is there*? | the slot family, and which show sits in which slot |
+
+The second is arithmetic, not a setting: a slot is a fixed length and the episode
+is a fixed cost, so
+
+$$\text{break} = \text{slot} - \text{episode}$$
+
+A 22-minute episode in a 30-minute slot leaves 8 minutes of break; in a 60-minute
+slot it leaves 38. `share:` and `seconds:` in a template decide where spots and
+bumps sit *inside* that break — the tail pod absorbs whatever the template does
+not spend, so **no template can change the total**. Measured on the default
+config: 347.7 min/day (24%) whatever the shares are.
+
+`nostalgia doctor` prints the number so you never have to guess:
+
+```
+[ ok] breaks   384 min/day of break (16.0 min per hour, 27% of the day)
+               -- slot minus episode, so pod shares only redistribute it
+```
+
+To actually change it, pick one of:
+
+```yaml
+# config/days/weekday.yaml
+- start: "05:00"
+  end: "09:00"
+  family: hour        # 22-min episode in a 60-min slot => 38 min of break
+  shows: [futurama]
+```
+
+* **`family`** — the blunt lever. `short` (15 min), `half` (30), `hour` (60).
+* **`slot:` per show** in `shows.yaml` — which family a show expects to sit in.
+* **Which shows run where** — a block of 11-minute shows in 15-minute slots is
+  ~27% break; a 22-minute show in a 60-minute slot is ~63%.
+* **`mid:` breaks** add spots without changing the slot; they split the episode
+  rather than extending the break.
+
+### Pointing a block at its own break structure
+
+A daypart can name a template, which is how you give one part of the schedule a
+different rhythm without touching any other:
+
+```yaml
+# config/continuity.yaml
+continuity:
+  heavy-breaks:
+    name: "Heavy breaks"
+    segments:
+      - kind: ad_pod
+        share: 0.10        # short pod, then the show
+      - kind: episode
+      - kind: ad_pod
+        share: 0.80        # most of the break at the end
+```
+
+```yaml
+# config/days/weekday.yaml
+- start: "00:00"
+  end: "05:00"
+  template: heavy-breaks   # wins over the show's slot family
+  family: short
+  shows: [aqua-teen-hunger-force]
+```
+
+Resolution order is **daypart `template:` → show `slot:` → slot `family`**. A
+`template:` naming something that does not exist falls back rather than failing.
+
 ## 2. Configure the channel
 
 Edit `config/channel.yaml`:

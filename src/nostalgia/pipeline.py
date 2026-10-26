@@ -229,6 +229,63 @@ def _streamer_binary(paths: Paths) -> Path | None:
     return None
 
 
+def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
+    """How much of the day is break time, for a representative weekday.
+
+    Worth reporting because the number is *not* a setting: a slot is fixed and an
+    episode is a fixed cost, so ``break = slot - episode``. Tuning pod shares in
+    ``continuity.yaml`` redistributes the break but cannot change this total,
+    which is easy to spend an afternoon discovering.
+    """
+    from .grid import build_day
+    from .rotation import build_rings, select as _select
+    from .schedule import assign_day
+
+    day = config.channel.on_air_date or date.today()
+    while day.weekday() >= 5:
+        day += timedelta(days=1)
+
+    day_config = day_config_for(config, day)
+    slots = build_day(day, day_config, config.channel.grid)
+    schedule = assign_day(slots, day_config, config, day)
+
+    orders = {show_id: show.order for show_id, show in config.shows.items()}
+    rings = build_rings(catalog.episodes(), orders, seed_salt=config.channel.name)
+    if not rings:
+        return {}
+
+    break_ms = 0
+    episode_ms = 0
+    for assigned in schedule.slots:
+        ring = rings.get(assigned.show_id)
+        if ring is None or not ring.episodes:
+            continue
+        try:
+            episode = _select(
+                ring,
+                day=day,
+                anchor=config.channel.grid.anchor,
+                slots_per_day=max(1, assigned.of_same_show),
+                slot_in_day=assigned.slot_in_day,
+            )
+        except Exception:  # noqa: BLE001 - a summary must never fail a build
+            continue
+        episode_ms += episode.duration_ms
+        break_ms += max(0, assigned.slot.length_ms - episode.duration_ms)
+
+    day_ms = sum(slot.length_ms for slot in slots)
+    if not day_ms:
+        return {}
+    return {
+        "day": day,
+        "slots": len(slots),
+        "episode_minutes": episode_ms / 60_000,
+        "break_minutes": break_ms / 60_000,
+        "break_percent": break_ms / day_ms * 100,
+        "break_per_hour": break_ms / 60_000 / (day_ms / 3_600_000),
+    }
+
+
 def _is_video(path: Path) -> bool:
     from .probe import VIDEO_EXTENSIONS
 
@@ -469,6 +526,19 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
     for show_id, show in config.shows.items():
         if show.eligibility == "window" and show.airing_from is None:
             continue
+
+    summary = break_budget_summary(config, catalog)
+    if summary:
+        findings.append(
+            (
+                "ok",
+                "breaks",
+                f"{summary['break_minutes']:.0f} min/day of break "
+                f"({summary['break_per_hour']:.1f} min per hour, "
+                f"{summary['break_percent']:.0f}% of the day) -- slot minus episode, "
+                f"so pod shares only redistribute it",
+            )
+        )
 
     findings.extend(_watermark_findings(config, paths))
 

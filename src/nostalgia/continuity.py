@@ -17,7 +17,7 @@ not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Sequence
 
 from .config import ContinuitySegment, ContinuityTemplate
@@ -64,9 +64,21 @@ class SlotScript:
         return [spec for spec in self.specs if spec.kind == "bump"]
 
     def reserved_ms(self) -> int:
-        """Explicitly-sized segments; bumps are not included (unknown until chosen)."""
-        return sum(
-            spec.seconds for spec in self.specs if spec.kind in ("ad_pod", "ident") and spec.seconds
+        """Explicitly-sized segments; bumps are not included (unknown until chosen).
+
+        ``seconds`` is *seconds*, so it is converted. Returning the raw value
+        counted a 90-second pod as 90 **milliseconds**, which made every budget
+        derived from it wrong by three orders of magnitude: the plan still tiled
+        because the tail absorbed the error, so the only visible symptom was that
+        a template's pod lengths were quietly ignored.
+        """
+        return (
+            sum(
+                spec.seconds
+                for spec in self.specs
+                if spec.kind in ("ad_pod", "ident") and spec.seconds
+            )
+            * 1000
         )
 
     def has_shares(self) -> bool:
@@ -213,20 +225,28 @@ def plan_budget(
 
     if reserved > slack:
         # Shrink explicit pods from the end until they fit; this keeps the grid
-        # exact rather than letting the slot overflow.
+        # exact rather than letting the slot overflow. `SegmentSpec` is frozen, so
+        # the trimmed value is *rebuilt*: assigning to `spec.seconds` raised
+        # FrozenInstanceError, which made this entire branch dead code and left
+        # an over-long pod to be silently shrunk nowhere.
         excess = reserved - slack
-        specs = list(script.specs)
-        for spec in reversed(specs):
+        for index in reversed(range(len(script.specs))):
             if excess <= 0:
                 break
-            if spec.kind in ("ad_pod", "ident") and spec.seconds:
-                cut = min(spec.seconds, excess)
-                new_seconds = spec.seconds - cut
-                excess -= cut
-                degraded.append(
-                    f"{spec.kind} cut {cut}ms to fit the slot"
-                )
-                spec.seconds = new_seconds if new_seconds > 0 else None
+            spec = script.specs[index]
+            if spec.kind not in ("ad_pod", "ident") or not spec.seconds:
+                continue
+            # Cut in whole seconds: `seconds` is an int booking length, and
+            # trimming it to a fraction would give the planner a pod target it
+            # could never fill with whole spots.
+            cut_ms = min(spec.seconds * 1000, excess)
+            cut_seconds = -(-cut_ms // 1000)
+            remaining = spec.seconds - cut_seconds
+            script.specs[index] = replace(
+                spec, seconds=remaining if remaining > 0 else None
+            )
+            excess -= cut_seconds * 1000
+            degraded.append(f"{spec.kind} cut {cut_seconds}s to fit the slot")
         reserved = script.reserved_ms()
 
     bump_budget = max(0, min(slack - reserved, bump_cap_ms))
@@ -257,7 +277,7 @@ def describe_script(script: SlotScript) -> str:
         elif spec.kind == "bump":
             parts.append(f"BUMP[{spec.subject}:{spec.position}]")
         elif spec.kind == "ad_pod":
-            target = f"{spec.seconds}ms" if spec.seconds else (spec.pod or "?")
+            target = f"{spec.seconds}s" if spec.seconds else (spec.pod or "?")
             parts.append(f"POD[{target}]")
         else:
             parts.append(spec.kind.upper())

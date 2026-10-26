@@ -831,7 +831,17 @@ def _episode_for(plan: Plan, assigned: AssignedSlot, context: PlanContext):
 
 
 def _template_for(assigned: AssignedSlot, context: PlanContext):
+    """Resolve which break structure a slot uses.
+
+    Order matters: a template named on the *daypart* is an explicit statement
+    about this block of the schedule and wins; otherwise the show's slot family
+    picks the default. Previously the daypart's choice was validated at load time
+    and then never read, so a custom break length could not take effect at all.
+    """
     root = context.root
+    explicit = assigned.slot.template
+    if explicit and explicit in root.continuity:
+        return root.continuity[explicit]
     show_id = assigned.show_id
     family = root.shows[show_id].slot if show_id in root.shows else assigned.slot.family
     name = f"default-{family}"

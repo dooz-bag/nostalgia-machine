@@ -1,0 +1,119 @@
+continuity:
+  default-half:
+    mid:
+    - after_percent: 45
+      segments:
+      - kind: bump
+        max_seconds: 16
+        position: OUT
+        subject: this
+      - kind: ad_pod
+        seconds: 60
+      - kind: bump
+        max_seconds: 16
+        position: INTO
+        subject: this
+    name: Half hour (30 min)
+    segments:
+    - kind: ad_pod
+      share: 0.3
+    - kind: bump
+      max_seconds: 16
+      position: INTO
+      subject: this
+    - kind: episode
+    - kind: bump
+      max_seconds: 16
+      position: AFTER
+      subject: this
+    - kind: ad_pod
+      share: 0.66
+    - kind: bump
+      max_seconds: 16
+      position: NEXT
+      subject: next
+  default-hour:
+    mid:
+    - after_percent: 33
+      segments:
+      - kind: bump
+        max_seconds: 16
+        position: OUT
+        subject: this
+      - kind: ad_pod
+        seconds: 90
+      - kind: bump
+        max_seconds: 16
+        position: INTO
+        subject: this
+    - after_percent: 66
+      segments:
+      - kind: bump
+        max_seconds: 16
+        position: OUT
+        subject: this
+      - kind: ad_pod
+        seconds: 90
+      - kind: bump
+        max_seconds: 16
+        position: INTO
+        subject: this
+    name: Hour block
+    segments:
+    - kind: ad_pod
+      share: 0.25
+    - kind: bump
+      max_seconds: 16
+      position: INTO
+      subject: this
+    - kind: episode
+    - kind: bump
+      max_seconds: 16
+      position: AFTER
+      subject: this
+    - kind: ad_pod
+      share: 0.7
+    - kind: bump
+      max_seconds: 16
+      position: NEXT
+      subject: next
+  default-short:
+    name: Short (15 min)
+    segments:
+    - kind: ad_pod
+      share: 0.34
+    - kind: bump
+      max_seconds: 16
+      position: INTO
+      subject: this
+    - kind: episode
+    - kind: bump
+      max_seconds: 16
+      position: AFTER
+      subject: this
+    - kind: ad_pod
+      share: 0.62
+    - kind: bump
+      max_seconds: 16
+      position: NEXT
+      subject: next
+  heavy-breaks:
+    name: Heavy breaks
+    segments:
+    - kind: ad_pod
+      share: 0.45
+    - kind: bump
+      max_seconds: 16
+      position: INTO
+      subject: this
+    - kind: episode
+    - kind: bump
+      max_seconds: 16
+      position: AFTER
+      subject: this
+    - kind: ad_pod
+      share: 0.9
+    - kind: bump
+      max_seconds: 16
+      position: NEXT
+      subject: next

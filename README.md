@@ -172,8 +172,8 @@ or to build a "what if [adult swim] picked it up in 2004" timeline:
 |---|---|
 | `config/channel.yaml` | Name, number, grid, timezone, plan horizon, encode |
 | `config/shows.yaml` | The roster: folders, slot family, airing windows, weights |
-| `config/days/*.yaml` | Dayparts: which shows run at which hours |
-| `config/continuity.yaml` | Break structure per slot family: bumps, pods (`share`/`seconds`), mid-rolls |
+| `config/days/*.yaml` | Dayparts: which shows run at which hours, slot family, optional `template:` |
+| `config/continuity.yaml` | Break structure: bumps, pods (`share`/`seconds`), mid-rolls — the *shape*, not the length |
 | `config/ads.yaml` | Pod targets, era drift, pod tolerance, trim slop |
 | `config/watermark.yaml` | The corner bug: mode, typeface, placement, which shows |
 | `config/bumps.yaml` | Match strictness, cooldowns, generated-bump limits |
