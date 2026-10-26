@@ -6,6 +6,15 @@
 #
 # This is deliberately a sketch, not a claim of historical accuracy. Edit freely;
 # nothing in the code depends on these particular blocks.
+#
+# Families are chosen from the *measured* episode lengths in this library, and a
+# show belongs in exactly one family:
+#   short (15 min)   median episode 11 min -- ATHF, Sealab, Brak, Birdman,
+#                    Squidbillies, Perfect Hair Forever, Space Ghost
+#   half  (30 min)   median episode 22 min -- Futurama, Home Movies,
+#                    Cartoon Planet, King of the Hill, The Venture Bros.
+# A show whose episode exceeds its slot gets a substitute episode and a warning,
+# so a stray double-length episode never takes the day down.
 days:
   - name: weekday
     days: [mon, tue, wed, thu, fri]
@@ -15,33 +24,39 @@ days:
         end: "05:00"
         title: "Overnight"
         family: short
-        shows: [aqua-teen-hunger-force, sealab-2021]
+        shows: [aqua-teen-hunger-force, sealab-2021, the-brak-show, harvey-birdman]
 
-      # Early morning anime/sitcom block.
+      # Early morning: the 22-minute block.
       - start: "05:00"
         end: "09:00"
         title: "Early"
         family: half
-        shows: [futurama, king-of-the-hill]
+        shows: [futurama, king-of-the-hill, home-movies]
 
-      # Daytime: off-air style block. Comment this out to keep the channel dark;
-      # the planner fills unscheduled time with the fallback.
+      # Daytime: off-air style block.
       - start: "09:00"
-        end: "17:00"
+        end: "13:00"
         title: "Daytime"
         family: half
-        shows: [king-of-the-hill, futurama]
+        shows: [king-of-the-hill, futurama, cartoon-planet]
+
+      # Afternoon: the talk/variety block -- median 12 min episodes.
+      - start: "13:00"
+        end: "17:00"
+        title: "Afternoon"
+        family: short
+        shows: [space-ghost-coast-to-coast, sealab-2021]
 
       # Prime time: the block people actually tune in for.
       - start: "17:00"
         end: "21:00"
         title: "Evening"
         family: half
-        shows: [futurama, king-of-the-hill]
+        shows: [futurama, king-of-the-hill, the-venture-bros]
 
       # Late night: short-form shows, the classic [as] signature.
       - start: "21:00"
         end: "00:00"
         title: "Late Night"
         family: short
-        shows: [aqua-teen-hunger-force, sealab-2021]
+        shows: [aqua-teen-hunger-force, sealab-2021, squidbillies, perfect-hair-forever]

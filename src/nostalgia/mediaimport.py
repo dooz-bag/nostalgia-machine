@@ -22,14 +22,18 @@ worth reading.
 
 from __future__ import annotations
 
+import re
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
 
-from .naming import normalise_for_match, parse_episode, season_from_dir
+from .naming import identity_prefix, normalise_for_match, parse_episode, season_from_dir
 from .probe import VIDEO_EXTENSIONS
 from .rotation import EpisodeRef
+
+#: Path parts, relative to the import root.
+Parts = tuple[str, ...]
 
 OK = "ok"
 UNPARSED = "unparsed"
@@ -38,6 +42,12 @@ DUPLICATE = "duplicate"
 TOO_SMALL = "too-small"
 UNKNOWN_SHOW = "unknown-show"
 ALREADY = "already"
+EXTRA = "extra"
+"""A real video below the episode floor: a webisode, an extra, a bumper.
+
+Kept apart from ``too-small`` so that "this file is not an episode" and "this file
+cannot be identified" stay distinguishable when reading a dry run.
+"""
 
 #: Names that are never part of the season, whatever their size.
 _JUNK_TOKENS = (
@@ -50,7 +60,30 @@ _JUNK_TOKENS = (
     "interview",
     "commentary",
     "nfo",
+    # Filename fragments that mark disc extras rather than episodes.
+    "deleted scene",
+    "animatic",
+    "storyboard",
+    "music video",
+    "fake ending",
+    "easter egg",
 )
+
+#: Folder names that only ever hold disc extras. Matched against whole path
+#: components, so a show whose title contains "xtras" is not disqualified.
+#:
+#: "Specials" is deliberately absent: a ``Specials`` folder here holds
+#: properly-labelled ``S00E01 - Pitch Pilot.mkv`` files, which are real content
+#: the schedule can air. Only folders that are extras by construction are listed.
+_EXTRA_DIRS = {
+    "xtras",
+    "extras",
+    "bonus",
+    "featurettes",
+    "deleted scenes",
+    "animatics",
+    "storyboards",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -139,9 +172,13 @@ def match_show(name: str, aliases: Mapping[str, str]) -> str | None:
     Falls back to a prefix match because downloads often append quality noise
     (``Futurama 1080p WEB-DL``). Longest alias wins so "Aqua Teen" cannot shadow
     "Aqua Teen Hunger Force".
+
+    Very short names are refused outright. A prefix rule otherwise lets a
+    one-letter folder match every alias that starts with that letter -- a folder
+    called ``a`` resolved to ``ATHF`` and filed an entire season under Aqua Teen.
     """
     token = normalise_for_match(name)
-    if not token:
+    if len(token.replace(" ", "")) < 3:
         return None
     if token in aliases:
         return aliases[token]
@@ -151,7 +188,7 @@ def match_show(name: str, aliases: Mapping[str, str]) -> str | None:
 
     best: tuple[int, str] | None = None
     for alias, show_id in aliases.items():
-        if len(alias) < 3:
+        if len(alias.replace(" ", "")) < 3:
             continue
         if token.startswith(alias) or alias.startswith(token):
             if best is None or len(alias) > best[0]:
@@ -160,10 +197,17 @@ def match_show(name: str, aliases: Mapping[str, str]) -> str | None:
 
 
 def is_junk(path: Path, *, min_bytes: int) -> tuple[bool, str]:
-    """Whether a file is certainly not an episode."""
+    """Whether a file is certainly not an episode.
+
+    The whole path is searched, not just the filename. Featurettes are usually
+    identified by their *folder* while every filename inside looks ordinary --
+    ``Featurettes/Season 1/Easter Egg - Boomhauer Clips.mkv`` -- and a filename
+    like ``2) Hank Hill.mkv`` inside ``The Arlen School of Drawing`` parses as
+    season 2 episode 0 unless the folder is what disqualifies it.
+    """
     if path.suffix.lower() not in VIDEO_EXTENSIONS:
         return True, "not a video file"
-    lowered = path.name.lower()
+    lowered = str(path).lower().replace("\\", "/")
     for token in _JUNK_TOKENS:
         if token in lowered:
             return True, f"looks like {token}"
@@ -172,8 +216,35 @@ def is_junk(path: Path, *, min_bytes: int) -> tuple[bool, str]:
     except OSError as exc:
         return True, str(exc)
     if min_bytes and size < min_bytes:
-        return True, f"only {size // 1024} KB"
+        return True, f"only {size / (1024 * 1024):.1f} MB"
     return False, ""
+
+
+#: Shorter than this and the file is not a programme. A 240p TV rip of an
+#: 11-minute [adult swim] show can be 9 MB, so *size* cannot be the test -- a
+#: 30-second promo can be nearly as large. Runtime can.
+MIN_EPISODE_MS = 4 * 60_000
+
+
+def episode_duration_ms(
+    path: Path, *, ffprobe: str | None = None
+) -> int | None:
+    """Runtime of *path*, or ``None`` when it cannot be determined.
+
+    Only used to separate an episode from a promo when a file is small enough to
+    be suspicious, so a missing ffprobe is not fatal: the size floor stands.
+    """
+    from .probe import sidecar_duration_ms
+
+    sidecar = sidecar_duration_ms(path)
+    if sidecar:
+        return sidecar
+    from .probe import ProbeError, probe
+
+    try:
+        return probe(path, ffprobe).duration_ms
+    except (ProbeError, OSError):
+        return None
 
 
 def _source_show_name(path: Path, source_root: Path) -> str:
@@ -193,6 +264,36 @@ def _source_show_name(path: Path, source_root: Path) -> str:
     return path.stem
 
 
+def _show_id_for(
+    path: Path,
+    relative: Parts,
+    aliases: Mapping[str, str],
+    default_show: str | None,
+) -> str | None:
+    """Work out which show a file belongs to.
+
+    Naming a show is not the same as *holding* one. ``ATHF Xtras/Soul Quest
+    Overdrive S01E01`` sits under a folder that names Aqua Teen but is a different
+    show entirely, so the innermost folder wins and the top-level folder is only
+    a fallback.
+
+    The filename is consulted before the top-level folder too, because a release
+    that parks twelve series in one root has to be identified by its files; only
+    the part before the episode marker is used, or a title containing a show's
+    name would pull in the whole folder.
+    """
+    if default_show:
+        return default_show
+    candidates = [path.parent.name, identity_prefix(path.name), path.stem]
+    if relative:
+        candidates.append(relative[0])
+    for name in candidates:
+        resolved = match_show(name, aliases)
+        if resolved is not None:
+            return resolved
+    return None
+
+
 def target_name(show_id: str, season: int, episode: int, extension: str) -> str:
     """The library's own naming, derived rather than guessed.
 
@@ -208,14 +309,29 @@ def plan_import(
     dest_shows_root: Path | str,
     *,
     min_bytes: int = 20 * 1024 * 1024,
+    min_bytes_extra: int | None = 1 * 1024 * 1024,
     default_show: str | None = None,
     recursive: bool = True,
+    ffprobe: str | None = None,
+    show_roots: Mapping[str, str] | None = None,
 ) -> list[Candidate]:
     """Work out where every file would go, without touching anything.
 
     ``default_show`` forces every file under one show id, which is what you want
     when you already know you are importing a single series and the folder name
     is unhelpful.
+
+    ``show_roots`` maps a top-level source folder to the show it holds. Some
+    releases are structured so the folder genuinely does not name the show --
+    ``King of the Hill/King of the Hill/Season 01/101 - Pilot.mkv`` has an
+    ordinary inner folder name, and a flat Harvey Birdman release names the show
+    only in a mangled filename. Declaring it beats adding a fragile alias.
+
+    ``min_bytes_extra`` is the size floor for files the roster will not use at
+    all. The episode floor is far too aggressive for a 3 MB webisode or a 0.3 MB
+    bumper, and those are exactly the files most worth keeping for a later
+    import, so they are reported as extras instead of rubbish. ``None`` disables
+    the distinction.
     """
     source_root = Path(source_root)
     dest_shows_root = Path(dest_shows_root)
@@ -223,14 +339,21 @@ def plan_import(
         raise NotADirectoryError(f"not a folder: {source_root}")
 
     aliases = build_alias_index(shows)
+    # Non-video files are not candidates at all. Subtitles and .nfo sit beside
+    # every episode in a real download, and reporting each one as "not a video
+    # file" buried the actual problems under hundreds of lines of noise.
     files = sorted(
         path
         for path in (source_root.rglob("*") if recursive else source_root.glob("*"))
-        if path.is_file()
+        if path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
     )
 
     candidates: list[Candidate] = []
-    taken: dict[str, Path] = {}
+    #: ``(candidate index, episode key, source, size)`` for every file wanting an
+    #: episode slot. Duplicates are resolved once the whole tree has been seen, so
+    #: the winner does not depend on the order the filesystem returns.
+    competing: list[tuple[int, str, Path, int]] = []
+
     for path in files:
         size = 0
         try:
@@ -238,17 +361,18 @@ def plan_import(
         except OSError:
             pass
 
-        junk, reason = is_junk(path, min_bytes=min_bytes)
-        if junk:
+        # Rejection by name comes first: a trailer or a disc extra is never an
+        # episode, whatever it weighs or how long it runs.
+        named, why = _named_extra(path)
+        if named:
             candidates.append(
-                Candidate(path, None, None, None, None, TOO_SMALL, reason, size)
+                Candidate(path, None, None, None, None, EXTRA, why, size)
             )
             continue
 
-        named = default_show or _source_show_name(path, source_root)
-        show_id = match_show(named, aliases)
-        if show_id is None:
-            show_id = match_show(path.stem, aliases)
+        relative = path.relative_to(source_root).parts
+        declared = (show_roots or {}).get(relative[0]) if relative else None
+        show_id = declared or _show_id_for(path, relative, aliases, default_show)
         if show_id is None:
             candidates.append(
                 Candidate(
@@ -258,7 +382,8 @@ def plan_import(
                     None,
                     None,
                     UNKNOWN_SHOW,
-                    f"no roster match for {named!r}",
+                    f"no roster match for {_source_show_name(path, source_root)!r}"
+                    f" or {path.name!r}",
                     size,
                 )
             )
@@ -283,30 +408,34 @@ def plan_import(
             )
             continue
 
-        target = (
-            dest_shows_root
-            / show_id
-            / f"Season {parsed.season:02d}"
-            / target_name(show_id, parsed.season, parsed.episode, path.suffix)
+        # Only now, with a real season and episode in hand, does size mean
+        # anything. Judging earlier threw away 28 genuine episodes: a 240p TV rip
+        # of an 11-minute show is 9 MB, and the floor rejected it before anyone
+        # checked whether it was an episode at all.
+        accepted, verdict = _episode_size_verdict(
+            path, size, min_bytes, min_bytes_extra, ffprobe
         )
-        key = f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}"
-
-        if key in taken:
-            # Two files claim the same slot. Keeping the larger one is a guess,
-            # so it is reported rather than silently applied.
+        if not accepted:
             candidates.append(
                 Candidate(
                     path,
                     show_id,
                     parsed.season,
                     parsed.episode,
-                    target,
-                    DUPLICATE,
-                    f"same episode as {taken[key].name}",
+                    None,
+                    verdict[0],
+                    verdict[1],
                     size,
                 )
             )
             continue
+
+        target = (
+            dest_shows_root
+            / show_id
+            / f"Season {parsed.season:02d}"
+            / target_name(show_id, parsed.season, parsed.episode, path.suffix)
+        )
         if target.exists() and target.resolve() != path.resolve():
             candidates.append(
                 Candidate(
@@ -321,13 +450,119 @@ def plan_import(
                 )
             )
             continue
-        taken[key] = path
+
+        competing.append(
+            (
+                len(candidates),
+                f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}",
+                path,
+                size,
+            )
+        )
         candidates.append(
             Candidate(
                 path, show_id, parsed.season, parsed.episode, target, OK, "", size
             )
         )
+
+    return _resolve_duplicates(candidates, competing)
+
+
+def _named_extra(path: Path) -> tuple[bool, str]:
+    """Whether the *name* says this is not an episode.
+
+    Checked before anything else, because a trailer or a disc extra is never an
+    episode however large it is. The whole path is searched: featurettes are
+    usually identified by their folder while every filename inside looks
+    ordinary, and ``2) Hank Hill.mkv`` inside ``The Arlen School of Drawing``
+    parses as season 2 episode 0 unless the folder disqualifies it.
+    """
+    if path.suffix.lower() not in VIDEO_EXTENSIONS:
+        return True, "not a video file"
+    lowered = str(path).lower().replace("\\", "/")
+    for token in _JUNK_TOKENS:
+        if token in lowered:
+            return True, f"looks like {token}"
+    # Directory names that mark a disc-extras folder. Real folders are decorated
+    # ("ATHF Xtras", "Season 2 Featurettes"), so the last word is what is
+    # compared -- matching any word would disqualify a show whose title happens
+    # to contain "extras".
+    for part in path.parts[:-1]:
+        words = re.findall(r"[a-z]+", part.lower())
+        if words and words[-1] in _EXTRA_DIRS:
+            return True, f"inside a {part!r} folder"
+    return False, ""
+
+
+def _episode_size_verdict(
+    path: Path,
+    size: int,
+    min_bytes: int,
+    min_bytes_extra: int | None,
+    ffprobe: str | None,
+) -> tuple[bool, tuple[str, str]]:
+    """Whether a parsed episode is big enough to be one.
+
+    A byte floor cannot tell an episode from a bumper. The Brak Show's 240p TV
+    rips are 9-17 MB for a full 11-minute episode, while a 30-second promo can be
+    larger, so ``--min-mb`` alone silently discarded 28 real episodes. Runtime
+    settles it, and is measured only for files the floor already flagged, so an
+    ordinary import does not probe the whole tree.
+
+    Returns ``(accepted, (status, detail))``.
+    """
+    if size >= (min_bytes or 0):
+        return True, ("", "")
+    duration = episode_duration_ms(path, ffprobe=ffprobe)
+    if duration is not None and duration >= MIN_EPISODE_MS:
+        return True, ("", "")
+    if duration is not None:
+        return False, (
+            TOO_SMALL,
+            f"{duration / 1000:.0f}s runtime -- too short to be an episode",
+        )
+    if min_bytes_extra is not None and size >= min_bytes_extra:
+        # Runtime is unknowable here (no ffprobe, no sidecar). Keeping it is the
+        # safer error: a stray promo in the library is visible and removable,
+        # whereas a discarded episode is invisible.
+        return True, ("", "")
+    return False, (TOO_SMALL, f"only {size / (1024 * 1024):.1f} MB")
+
+
+def _resolve_duplicates(
+    candidates: list[Candidate], competing: Sequence[tuple[int, str, Path, int]]
+) -> list[Candidate]:
+    """Keep the largest file per episode and report the rest.
+
+    Refusing to choose made a real library unimportable: ``01 Chambraigne.mkv``
+    beside ``01 Chambraigne-00.00.00.000-00.00.55.322.m4v`` is a cut and a
+    full-length copy of the *same* episode, not an ambiguity. The bigger file is
+    the episode. Nothing disappears quietly -- every loser is named.
+    """
+    by_key: dict[str, list[tuple[int, Path, int]]] = {}
+    for index, key, path, size in competing:
+        by_key.setdefault(key, []).append((index, path, size))
+
+    for claims in by_key.values():
+        if len(claims) < 2:
+            continue
+        winner_index, winner_path, winner_size = max(
+            claims, key=lambda claim: (claim[2], str(claim[1]))
+        )
+        for index, path, size in claims:
+            if index == winner_index:
+                continue
+            candidates[index] = replace(
+                candidates[index],
+                status=DUPLICATE,
+                detail=(
+                    f"same episode as {winner_path.name} "
+                    f"({winner_size / (1024 * 1024):.1f} MB against "
+                    f"{size / (1024 * 1024):.1f} MB); not imported"
+                ),
+            )
     return candidates
+
 
 
 def apply_import(
@@ -422,6 +657,7 @@ __all__ = [
     "COLLISION",
     "Candidate",
     "DUPLICATE",
+    "EXTRA",
     "ImportReport",
     "OK",
     "TOO_SMALL",

@@ -66,10 +66,17 @@ def test_targets_use_the_library_naming(drop, tmp_path) -> None:
 
 
 def test_junk_and_undersized_files_are_skipped(drop, tmp_path) -> None:
+    """Neither is imported, but they are reported differently on purpose.
+
+    ``sample.mkv`` is an *extra*: a real video that is deliberately not an
+    episode, and saying so is more useful than "too small", which reads like a
+    failed download.
+    """
     candidates = mediaimport.plan_import(drop, _shows(), tmp_path / "shows", min_bytes=50)
     by_source = {c.source.name: c for c in candidates}
 
-    assert by_source["sample.mkv"].status == mediaimport.TOO_SMALL
+    assert by_source["sample.mkv"].status == mediaimport.EXTRA
+    assert not by_source["sample.mkv"].actionable
 
 
 def test_an_unknown_show_is_reported_not_filed(tmp_path) -> None:

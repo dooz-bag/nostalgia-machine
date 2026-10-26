@@ -8,13 +8,22 @@
 #
 # Shows are addressed by `id` (the YAML key) in continuity templates, day files
 # and bump tags. Keep ids lowercase -- they appear in bump filenames.
+#
+# `slot` is the programme length the show's episodes fit, and it is the single
+# most important field: a 22-minute episode in a 15-minute slot overruns and the
+# planner refuses to emit. `short` = 15 min, `half` = 30 min, `hour` = 58 min.
+#
+# `airing_from` dates are the real [adult swim] first-run dates, so the default
+# `window` eligibility reproduces the network's actual accumulation rather than
+# airing a 2007 show during a 2003 recreation. Set `channel.era_year` to choose
+# which year you are re-creating.
 shows:
   aqua-teen-hunger-force:
     title: "Aqua Teen Hunger Force"
     folder: shows/aqua-teen-hunger-force
     family: comedy
     slot: short                 # ~11 min episodes -> 15-minute slots
-    # Ran from the 2001 launch. No airing_from needed.
+    # Launch show, 2001. No airing_from needed.
     aliases: ["ATHF", "Aqua Teen"]
     order: episode
     weight: 1.4
@@ -24,15 +33,102 @@ shows:
     folder: shows/sealab-2021
     family: comedy
     slot: short
-    aliases: ["SeaLab"]
+    # Launch show, 2001.
+    aliases: ["SeaLab", "Sealab"]
     order: episode
     weight: 1.0
+
+  the-brak-show:
+    title: "The Brak Show"
+    folder: shows/the-brak-show
+    family: comedy
+    slot: short
+    # Launch show, 2001 -- the same 11-minute block as ATHF and Sealab.
+    aliases: ["Brak", "Brak Show"]
+    order: episode
+    weight: 1.0
+
+  space-ghost-coast-to-coast:
+    title: "Space Ghost Coast to Coast"
+    folder: shows/space-ghost-coast-to-coast
+    family: talk
+    # Median episode 11.9 min, so `short` fits almost all of them. Two episodes run
+    # 44 min; those cannot air in 15 minutes and the planner substitutes a
+    # different episode of the same show and says so, rather than breaking the day.
+    slot: short
+    # The show [adult swim] grew out of. Its 1994-99 Cartoon Network run predates
+    # the block; new episodes aired on [as] from 2001.
+    aliases: ["SGC2C", "Space Ghost"]
+    order: episode
+    weight: 1.0
+
+  harvey-birdman:
+    title: "Harvey Birdman, Attorney at Law"
+    folder: shows/harvey-birdman
+    family: comedy
+    slot: short
+    airing_from: "2002-09-01"   # [as] premiere, September 2002
+    aliases: ["Harvey Birdman", "Birdman"]
+    order: episode
+    weight: 1.0
+
+  home-movies:
+    title: "Home Movies"
+    folder: shows/home-movies
+    family: comedy
+    slot: half                  # ~22 min episodes -> 30-minute slots
+    airing_from: "2001-09-09"   # picked up by [as] after UPN dropped it
+    aliases: ["Home Movies"]
+    order: episode
+    weight: 0.9
+
+  the-venture-bros:
+    title: "The Venture Bros."
+    folder: shows/the-venture-bros
+    family: comedy
+    slot: half
+    airing_from: "2003-08-17"   # [as] premiere, August 2003
+    aliases: ["Venture Bros", "VBros"]
+    order: episode
+    weight: 1.1
+
+  squidbillies:
+    title: "Squidbillies"
+    folder: shows/squidbillies
+    family: comedy
+    slot: short                 # 11-minute episodes
+    airing_from: "2005-10-16"   # [as] premiere, October 2005
+    aliases: ["Squidbillies"]
+    order: episode
+    weight: 0.9
+
+  perfect-hair-forever:
+    title: "Perfect Hair Forever"
+    folder: shows/perfect-hair-forever
+    family: comedy
+    slot: short
+    airing_from: "2004-11-07"   # [as] premiere, November 2004
+    aliases: ["PHF", "Perfect Hair"]
+    order: episode
+    weight: 0.6                 # a seven-episode oddity; keep it off the clock
+
+  cartoon-planet:
+    title: "Cartoon Planet"
+    folder: shows/cartoon-planet
+    family: variety
+    slot: half
+    # A Cartoon Network show (1995-98) that never aired on [adult swim]. It is in
+    # the roster because this is your channel: no window means `always`.
+    aliases: ["Cartoon Planet"]
+    order: episode
+    weight: 0.6
 
   futurama:
     title: "Futurama"
     folder: shows/futurama
     family: sitcom
-    slot: half                  # ~22 min episodes -> 30-minute slots
+    slot: half
+    airing_from: "2003-01-01"   # [as] syndication run began January 2003
     aliases: ["Futurama"]
     order: episode
     weight: 1.2
@@ -42,25 +138,14 @@ shows:
     folder: shows/king-of-the-hill
     family: sitcom
     slot: half
-    # KotH joined [adult swim] in 2009 syndication, i.e. OUTSIDE the 2001-2008
-    # window this channel re-creates. Two honest options, pick one:
+    # KotH reached [adult swim] in 2009 syndication, i.e. OUTSIDE the 2003 era
+    # this channel re-creates. Two honest options, pick one:
     #
-    #   1. Let it phase in at its real date (eligibility: window)
-    #   2. Just play it anyway -- it's your channel (eligibility: always)
+    #   1. Let it phase in at its real date:   airing_from: "2009-01-01"
+    #   2. Just play it anyway -- it's your channel:  eligibility: always
     #
     # Default is (2) with no window, so the seed schedule works out of the box.
     eligibility: always
     aliases: ["KotH", "King of the Hill"]
     order: episode
     weight: 0.9
-
-  # Add more without touching code:
-  #
-  # home-movies:
-  #   title: "Home Movies"
-  #   folder: shows/home-movies
-  #   family: comedy
-  #   slot: half
-  #   airing_from: "2004-11-01"   # joined [as] in late 2004
-  #   eligibility: window
-  #   weight: 0.8

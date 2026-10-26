@@ -484,6 +484,32 @@ def _plan_slot(
     if episode is None:
         return
 
+    # An episode longer than its slot cannot be made to fit by any arrangement of
+    # breaks: the timeline would cross the boundary and take every later slot with
+    # it. A long-running show accumulates a double-length episode eventually, so
+    # this is not a config error to refuse over -- it is one episode that cannot
+    # air in this slot. Try another that fits; only if none does, give the slot to
+    # the pod. Letting it through took the whole day down with "timeline is
+    # invalid", which named neither the show nor the fix.
+    if episode.duration_ms >= slot.length_ms:
+        replacement = _fitting_episode(assigned, episode, context)
+        if replacement is None:
+            _fill_bare_slot(plan, assigned, context, ad_tracker, mark)
+            plan.warnings.append(
+                f"{prefix}: no {assigned.show_id} episode fits a "
+                f"{slot.length_ms / 60_000:.0f}-minute slot (the one selected ran "
+                f"{episode.duration_ms / 60_000:.1f} min); slot filled with breaks -- "
+                f"give the show a larger 'slot' family in shows.yaml"
+            )
+            return
+        plan.warnings.append(
+            f"{prefix}: {assigned.show_id} S{episode.season:02d}E{episode.episode:02d} "
+            f"runs {episode.duration_ms / 60_000:.1f} min and cannot fit "
+            f"{slot.length_ms / 60_000:.0f} minutes; airing "
+            f"S{replacement.season:02d}E{replacement.episode:02d} instead"
+        )
+        episode = replacement
+
     # A slot that is mostly break time means the episode length does not match
     # the slot family. That is a config mistake, and silently airing minutes of
     # commercials hides it.
@@ -782,6 +808,70 @@ def _plan_slot(
         )
     if emitted == 0:
         plan.warnings.append(f"{prefix}: produced no items")
+
+def _fitting_episode(
+    assigned: AssignedSlot, rejected, context: PlanContext
+):
+    """Another episode of the same show that fits this slot, or ``None``.
+
+    Deterministic: the ring is walked in order from the rejected episode, so the
+    same day always makes the same substitution. A show whose episodes are all
+    too long for its declared family gets ``None`` and the slot falls back to
+    breaks, which is visible in the warnings rather than silent.
+    """
+    ring = context.rings.get(assigned.show_id)
+    if ring is None or not ring.episodes:
+        return None
+    limit = assigned.slot.length_ms
+    start = 0
+    for index, candidate in enumerate(ring.episodes):
+        if candidate.key == rejected.key:
+            start = index + 1
+            break
+    for offset in range(len(ring.episodes)):
+        candidate = ring.episodes[(start + offset) % len(ring.episodes)]
+        if candidate.duration_ms < limit:
+            return candidate
+    return None
+
+
+def _fill_bare_slot(
+    plan: Plan,
+    assigned: AssignedSlot,
+    context: PlanContext,
+    ad_tracker: CooldownTracker,
+    mark: "WatermarkRule | None",
+) -> None:
+    """Cover a slot that has no programme with commercials and cards.
+
+    A gap in the timeline is not an option -- every later slot would shift -- so
+    the slot is filled with break material. It is a poor hour of television, but
+    it is a *continuous* hour, and the warning says why.
+    """
+    slot = assigned.slot
+    root = context.root
+    try:
+        filler = fill_gap(
+            context.ads,
+            target_ms=slot.length_ms,
+            on_cooldown=ad_tracker.cooling([], slot.start_ms),
+            trim_slop_ms=root.ads.trim_slop_ms,
+            seed_parts=(plan.day.isoformat(), slot.index, "bare", slot.start_ms),
+            short_pool=_promo_pool(context.bumps, (), context.idents),
+        )
+    except PodError as exc:
+        plan.warnings.append(f"{plan.day} slot {slot.index}: {exc}")
+        return
+    _emit_pod(
+        plan,
+        filler,
+        cursor_ms=slot.start_ms,
+        slot=slot,
+        suffix="x",
+        tracker=ad_tracker,
+        root=root,
+    )
+
 
 def _emit_pod(
     plan: Plan,

@@ -152,7 +152,27 @@ def _parser() -> argparse.ArgumentParser:
         "--overwrite", action="store_true", help="replace a target that already exists"
     )
     import_cmd.add_argument(
-        "--min-mb", type=int, default=20, help="ignore videos smaller than this (default 20)"
+        "--min-mb",
+        type=float,
+        default=20,
+        help=(
+            "size floor for a file to count as an episode (default 20). Files "
+            "below it are checked by runtime instead, so a low-bitrate 240p "
+            "episode is still imported"
+        ),
+    )
+    import_cmd.add_argument(
+        "--ffprobe", default=None, help="path to ffprobe (default: search PATH)"
+    )
+    import_cmd.add_argument(
+        "--show-root",
+        action="append",
+        default=[],
+        metavar="FOLDER=SHOW_ID",
+        help=(
+            "declare that a top-level source folder holds one show, for releases "
+            "whose folder or filenames do not name it (repeatable)"
+        ),
     )
     import_cmd.add_argument(
         "--recursive", action="store_true", default=True, help=argparse.SUPPRESS
@@ -510,12 +530,25 @@ def _cmd_import(args, config, paths: Paths) -> int:
         return 1
 
     try:
+        show_roots: dict[str, str] = {}
+        for declaration in args.show_root:
+            folder, _, show_id = declaration.partition("=")
+            if not (folder and show_id):
+                print(
+                    f"error: --show-root needs FOLDER=SHOW_ID, got {declaration!r}",
+                    file=sys.stderr,
+                )
+                return 1
+            show_roots[folder] = show_id
+
         candidates = mediaimport.plan_import(
             source,
             config.shows,
             paths.media_root / "shows",
-            min_bytes=max(0, args.min_mb) * 1024 * 1024,
+            min_bytes=int(max(0.0, args.min_mb) * 1024 * 1024),
+            ffprobe=args.ffprobe or config.channel.ffmpeg_path,
             default_show=args.show,
+            show_roots=show_roots,
         )
     except (NotADirectoryError, OSError) as exc:
         print(f"error: {exc}", file=sys.stderr)

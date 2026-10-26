@@ -2,6 +2,8 @@
 #
 # Weekends get marathons: one show runs for a long block, which is how the channel
 # avoids feeling like the same shuffle every day.
+#
+# Families follow the measured episode lengths -- see weekday.yaml.
 days:
   - name: weekend
     days: [sat, sun]
@@ -10,28 +12,34 @@ days:
         end: "06:00"
         title: "Night Marathon"
         family: short
-        shows: [aqua-teen-hunger-force]
+        shows: [aqua-teen-hunger-force, the-brak-show]
 
       - start: "06:00"
         end: "12:00"
         title: "Morning Block"
         family: half
-        shows: [futurama]
+        shows: [futurama, home-movies]
 
       - start: "12:00"
-        end: "18:00"
+        end: "16:00"
         title: "Afternoon Block"
         family: half
-        shows: [king-of-the-hill]
+        shows: [king-of-the-hill, cartoon-planet]
 
-      - start: "18:00"
+      - start: "16:00"
+        end: "20:00"
+        title: "Talk Block"
+        family: short
+        shows: [space-ghost-coast-to-coast, harvey-birdman, perfect-hair-forever]
+
+      - start: "20:00"
         end: "22:00"
         title: "Prime Time"
         family: half
-        shows: [futurama, king-of-the-hill]
+        shows: [futurama, the-venture-bros]
 
       - start: "22:00"
         end: "00:00"
         title: "Late Shorts"
         family: short
-        shows: [sealab-2021, aqua-teen-hunger-force]
+        shows: [sealab-2021, squidbillies, aqua-teen-hunger-force]
