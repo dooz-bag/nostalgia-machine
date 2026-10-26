@@ -122,6 +122,41 @@ Anything else is reported by `nostalgia doctor` rather than guessed at.
 fixtures), a `<file>.json` sidecar with `{"duration_ms": 660000}` works:
 `nostalgia scan --sidecars` writes them for you.
 
+Probing runs in parallel (ffprobe is one process per file). `NOSTALGIA_SCAN_WORKERS`
+overrides the count; the default is CPU count, clamped to 4–16. A 1,482-file
+library scans in ~4 s.
+
+### Importing a bumper archive
+
+The Internet Archive **`AdultswimBumps`** collection is 7,385 bumpers — the classic
+typographic [adult swim] cards — but it is a flat dump with names like
+`2003_HowTo___ATHF_Next.mp4`, so nothing is organised the way the planner reads:
+
+| What | Where the planner looks |
+|---|---|
+| subject | the **folder** under `media/bumps/` |
+| era | any **directory** in the path containing a year |
+| position | `_Next` / `_Into` / `_After` in the **filename** |
+
+```powershell
+.\scripts\import-bumps.ps1 -Source C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps -DryRun
+.\scripts\import-bumps.ps1 -Source C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps
+```
+
+It maps filenames onto your roster (`ATHF`, `AQUA_TEEN` → `aqua-teen-hunger-force`,
+`KOTH`/`KING_OF_THE_HILL` → `king-of-the-hill`, plus `SEALAB` and `FUTURAMA`),
+writes a `.tags.json` sidecar recording the position and any year *prefix*, and
+files everything else under `neutral/`.
+
+Two things worth knowing:
+
+* **`-MaxNeutral` caps the generic pool** (default 400 of 7,194). The archive is
+  ~28 GB of generic cards and the planner cannot use more than a few hundred;
+  selection is deterministic and spread across the alphabet, so eras are covered.
+* **Bump cards run 15 s, not 10.** The archive's text bumps are almost all
+  15.0–15.4 s, so `continuity.yaml` uses `max_seconds: 16`. A 12 s cap silently
+  rejects ~350 of 600 imported cards.
+
 ## 2. Configure the channel
 
 Edit `config/channel.yaml`:

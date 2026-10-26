@@ -67,7 +67,10 @@ services:
     volumes:
       # Exactly the folders the streamer needs. `lineup/` holds lineup.json and
       # channels/<n>/channel.json, which is what `emit` writes.
-      - ./lineup:/app/config:ro
+      # NOT read-only: ErsatzTV writes runtime state (the heartbeat that drives the
+      # 90s no-viewer timeout) and a `channels/` scratch dir next to lineup.json.
+      # A :ro mount here makes it crash-loop with "io error Read-only file system".
+      - ./lineup:/app/config
       - ./playout:/app/playout:ro
       - ./xmltv:/app/xmltv:ro
       - ${MEDIA_DIR:-./media}:/app/media:ro

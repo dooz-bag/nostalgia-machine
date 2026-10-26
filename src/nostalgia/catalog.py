@@ -10,7 +10,9 @@ rescans.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,7 +31,12 @@ from .probe import (
     write_sidecar,
 )
 from .rotation import EpisodeRef
-from .sidecars import RESERVED_BUMP_FOLDERS, SidecarError, subject_from_folder
+from .sidecars import (
+    RESERVED_BUMP_FOLDERS,
+    SIDECAR_SUFFIX,
+    SidecarError,
+    subject_from_folder,
+)
 from .sidecars import read as read_tags
 
 SCHEMA_VERSION = 1
@@ -100,6 +107,19 @@ CREATE TABLE IF NOT EXISTS scan_issues (
 """
 
 
+def _scan_workers() -> int:
+    """How many ffprobe processes to run at once.
+
+    Bounded rather than unbounded: a scan of 7,000 files should not spawn 7,000
+    processes, and ffprobe is fast enough that CPU count is the useful ceiling.
+    ``NOSTALGIA_SCAN_WORKERS`` overrides it for a slow disk or a shared machine.
+    """
+    override = os.environ.get("NOSTALGIA_SCAN_WORKERS")
+    if override and override.isdigit() and int(override) > 0:
+        return int(override)
+    return max(4, min(16, (os.cpu_count() or 4)))
+
+
 @dataclass
 class ScanReport:
     scanned: int = 0
@@ -127,17 +147,36 @@ class Catalog:
 
     def connect(self) -> sqlite3.Connection:
         if self._connection is None:
-            connection = sqlite3.connect(self.path)
+            # timeout: the scheduler container writes this file on a loop while a
+            # human may run `doctor`/`review` alongside it. Without a timeout,
+            # SQLite gives up after 5s with "database is locked" and the second
+            # process dies for no good reason.
+            connection = sqlite3.connect(self.path, timeout=30.0)
             connection.row_factory = sqlite3.Row
             connection.execute("PRAGMA journal_mode=WAL")
+            # WAL lets one writer and many readers coexist, but a writer still
+            # blocks another writer, so wait rather than fail.
+            connection.execute("PRAGMA busy_timeout=30000")
             connection.execute("PRAGMA foreign_keys=ON")
-            connection.executescript(_SCHEMA)
-            connection.execute(
-                "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
-                (str(SCHEMA_VERSION),),
-            )
+            # Only write the schema when it is actually missing. `executescript`
+            # implicitly COMMITs and takes a write lock, so running it on every
+            # connection made even a read-only command (`doctor`, `review`) contend
+            # with the scheduler's emit loop and fail with "database is locked".
+            if not self._schema_present(connection):
+                connection.executescript(_SCHEMA)
+                connection.execute(
+                    "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
+                    (str(SCHEMA_VERSION),),
+                )
             self._connection = connection
         return self._connection
+
+    @staticmethod
+    def _schema_present(connection: sqlite3.Connection) -> bool:
+        row = connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone()
+        return row is not None
 
     def close(self) -> None:
         if self._connection is not None:
@@ -182,15 +221,24 @@ class Catalog:
         ffprobe = find_ffprobe(ffprobe_path)
 
         rows: list[tuple] = []
-        for show_id, folder in sorted(show_folders.items()):
-            if not Path(folder).is_dir():
-                report.note(Path(folder), f"show folder for {show_id!r} is missing")
-                continue
-            rows.extend(self._scan_show(show_id, Path(folder), ffprobe, report, write_sidecars))
+        # Probe in parallel. ffprobe is a process per file and a library of a few
+        # thousand bumps made a scan take 37s, essentially all of it spawn cost.
+        # Threads are the right tool: each call blocks on a subprocess, so there is
+        # no GIL contention, and the workers touch no shared state.
+        with ThreadPoolExecutor(max_workers=_scan_workers()) as pool:
+            for show_id, folder in sorted(show_folders.items()):
+                if not Path(folder).is_dir():
+                    report.note(Path(folder), f"show folder for {show_id!r} is missing")
+                    continue
+                rows.extend(
+                    self._scan_show(show_id, Path(folder), ffprobe, report, write_sidecars, pool)
+                )
 
-        for root, kind in ((bump_root, "bump"), (ad_root, "ad"), (ident_root, "ident")):
-            if root and Path(root).is_dir():
-                rows.extend(self._scan_flat(Path(root), kind, ffprobe, report, write_sidecars))
+            for root, kind in ((bump_root, "bump"), (ad_root, "ad"), (ident_root, "ident")):
+                if root and Path(root).is_dir():
+                    rows.extend(
+                        self._scan_flat(Path(root), kind, ffprobe, report, write_sidecars, pool)
+                    )
 
         if rows:
             with self.transaction() as connection:
@@ -240,17 +288,38 @@ class Catalog:
             row["key"]: row["confirmed"]
             for row in connection.execute("SELECT key, confirmed FROM asset_tags")
         }
+        pending: list[tuple] = []
         for key, kind, path in connection.execute(
             "SELECT key, kind, path FROM media WHERE kind = 'bump'"
         ).fetchall():
             if existing.get(key):
                 continue
+            media = Path(path)
+            # Cheap existence check before parsing JSON: a scan touches every
+            # bump, and most have no sidecar at all.
+            if not Path(str(media) + SIDECAR_SUFFIX).is_file():
+                continue
             try:
-                sidecar = read_tags(Path(path))
+                sidecar = read_tags(media)
             except SidecarError:
                 continue
             if sidecar is None or not sidecar.confirmed:
                 continue
+            pending.append(
+                (
+                    key,
+                    sidecar.subject,
+                    sidecar.position,
+                    sidecar.era,
+                    sidecar.era_to,
+                    sidecar.family,
+                    sidecar.source,
+                    sidecar.confidence,
+                )
+            )
+
+        for row in pending:
+            key = row[0]
             connection.execute(
                 """
                 INSERT INTO asset_tags
@@ -282,15 +351,24 @@ class Catalog:
         ffprobe: str | None,
         report: ScanReport,
         write_sidecars: bool,
+        pool: "ThreadPoolExecutor | None" = None,
     ) -> list[tuple]:
         rows: list[tuple] = []
-        for path in _walk_media(folder):
+        candidates = list(_walk_media(folder))
+        futures = {}
+        if pool is not None and ffprobe:
+            for path in candidates:
+                if not sidecar_duration_ms(path):
+                    futures[path] = pool.submit(probe, path, ffprobe)
+        for path in candidates:
             stat = path.stat()
             parsed = parse_episode(path.name, season_dir=path.parent.name)
             if parsed is None:
                 report.note(path, "cannot determine season/episode from the filename")
                 continue
-            info, probed_by = self._info(path, stat.st_mtime_ns, ffprobe, report, write_sidecars)
+            info, probed_by = self._info(
+                path, stat.st_mtime_ns, ffprobe, report, write_sidecars, futures.get(path)
+            )
             if info is None:
                 continue
             key = f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}"
@@ -325,11 +403,26 @@ class Catalog:
         ffprobe: str | None,
         report: ScanReport,
         write_sidecars: bool,
+        pool: "ThreadPoolExecutor | None" = None,
     ) -> list[tuple]:
         rows: list[tuple] = []
-        for path in _walk_media(root):
-            stat = path.stat()
-            info, probed_by = self._info(path, stat.st_mtime_ns, ffprobe, report, write_sidecars)
+        # Submit every probe first, then collect. Calling .result() straight after
+        # .submit() would serialise the pool back to one-at-a-time, which is the
+        # mistake that made the first attempt at this change pointless.
+        paths = list(_walk_media(root))
+        stats = {path: path.stat() for path in paths}
+        futures = {}
+        if pool is not None and ffprobe:
+            for path in paths:
+                # Sidecar-only files need no subprocess at all.
+                if not sidecar_duration_ms(path):
+                    futures[path] = pool.submit(probe, path, ffprobe)
+
+        for path in paths:
+            stat = stats[path]
+            info, probed_by = self._info(
+                path, stat.st_mtime_ns, ffprobe, report, write_sidecars, futures.get(path)
+            )
             if info is None:
                 continue
             relative = path.relative_to(root)
@@ -365,6 +458,7 @@ class Catalog:
         ffprobe: str | None,
         report: ScanReport,
         write_sidecars: bool,
+        future=None,
     ) -> tuple[MediaInfo | None, str]:
         sidecar = sidecar_duration_ms(path)
         if sidecar and not ffprobe:
@@ -374,7 +468,7 @@ class Catalog:
             report.note(path, "no duration: install ffmpeg or add a .json sidecar")
             return None, "missing"
         try:
-            info = probe(path, ffprobe)
+            info = future.result() if future is not None else probe(path, ffprobe)
         except ProbeError as exc:
             if sidecar:
                 report.from_sidecar += 1
