@@ -18,7 +18,7 @@ services:
     # loop instead, so the entrypoint is cleared.
     entrypoint: []
     environment:
-      TZ: ${TZ:-America/New_York}
+      TZ: ${TZ:-Asia/Tokyo}
       # Emit paths as the *streamer* sees them. Without this, playout JSON would
       # contain host paths (C:/Projects/...) that do not exist inside the
       # ersatztv container.
@@ -69,7 +69,7 @@ services:
     container_name: nostalgia-ersatztv
     restart: unless-stopped
     environment:
-      TZ: ${TZ:-America/New_York}
+      TZ: ${TZ:-Asia/Tokyo}
     ports:
       - "${ETV_PORT:-8409}:8409"
     volumes:
@@ -126,7 +126,7 @@ services:
     container_name: nostalgia-dispatcharr
     restart: unless-stopped
     environment:
-      TZ: ${TZ:-America/New_York}
+      TZ: ${TZ:-Asia/Tokyo}
     ports:
       - "${DISPATCHARR_PORT:-9191}:9191"
     volumes:

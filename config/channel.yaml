@@ -10,7 +10,10 @@ channel:
     anchor: "2001-09-02"
     # Every slot boundary lands on :00/:15/:30/:45.
     quantum_minutes: 15
-    timezone: "America/New_York"
+    # Japan Standard Time. The grid aligns to this wall clock, so it decides
+    # what "23:30" means for you. JST has no DST, so every day is exactly 24h
+    # and the DST branch in the grid builder never has to do anything.
+    timezone: "Asia/Tokyo"
 
   # The wall-clock date that maps to the channel's "start". Leave commented to
   # use today, which is what you want on a live channel.
@@ -24,6 +27,11 @@ channel:
 
   # Plan this many days ahead. ErsatzTV Next picks up new files without a restart.
   horizon_days: 3
+
+  # Which broadcast test pattern the web UI wears. NTSC is correct here: [adult
+  # swim] was a US NTSC channel and Japan broadcast NTSC-J, the same 525/60
+  # system. Set "pal" only for a PAL variant of the channel.
+  test_card: ntsc
 
   # Optional: a logo shown in client guides.
   # logo: "https://example.invalid/adult-swim.png"

@@ -338,6 +338,53 @@ continuity:
 Resolution order is **daypart `template:` → show `slot:` → slot `family`**. A
 `template:` naming something that does not exist falls back rather than failing.
 
+### Telling a generated bump from a real one
+
+A generated card sits in the same pool as the archive. If it were
+indistinguishable it would quietly rewrite history — you could no longer tell
+what actually aired in 2003 from what the renderer invented last week. Every
+generated card therefore carries a small tag in the **top-right**, the corner the
+real cards never used ([adult swim] kept its own bug bottom-right):
+
+```yaml
+# config/bumps-era.yaml
+artifact: true
+artifact_text: "SG"       # Space Ghost, the [adult swim] mascot
+artifact_opacity: 0.32    # reads as grime; unmistakable when you look
+artifact_box: true        # thin tag; no archive card ever had one
+```
+
+Three properties make it the right kind of tell:
+
+* **It is drawn into the picture**, not added by the player — so it survives any
+  transcode and appears in a screenshot, which is exactly where you would check.
+* **It is quiet.** A third opacity, small. A viewer reads compression grime.
+* **No real card had a bordered tag**, so it is unambiguous once you know.
+
+Declared once at the top level and inherited by every era style; a style may
+override any of the keys if one era should read differently.
+
+### The web UI wears a broadcast test card
+
+`nostalgia serve` renders a SMPTE NTSC test pattern as its chrome — the seven 75%
+colour bars, the castellation strip, and the PLUGE/black-level band — over a CRT
+with scanlines.
+
+The bars use the **75% amplitude** levels from SMPTE ECR 1-1978, not the
+fully-saturated primaries people remember from a set pushed too far; a monitor
+fed real 100% bars looks wrong, and so would the page.
+
+PAL is available but not the default:
+
+```yaml
+# config/channel.yaml
+test_card: pal     # EBU bars: white lead, no castellations
+```
+
+NTSC is correct for this channel — [adult swim] was a US 525/60 NTSC service, and
+**Japan broadcast NTSC-J, which is the same system**. PAL exists for a PAL variant
+of the channel, not because it would be more accurate here.
+
 ## 2. Configure the channel
 
 Edit `config/channel.yaml`:
@@ -347,9 +394,18 @@ channel:
   grid:
     anchor: "2001-09-02"      # day 0
     quantum_minutes: 15       # :00/:15/:30/:45
-    timezone: America/New_York
+    timezone: Asia/Tokyo
   horizon_days: 3
 ```
+
+The timezone is declared **twice** and the two must agree: `grid.timezone` decides
+what "23:30" means for the schedule, and `TZ` in `.env` sets the container clock
+that timestamps the logs. A `.env` left over from the template silently overrides
+the compose default, so check both if the schedule and the logs disagree.
+
+JST has no DST, so every day is exactly 24 hours and the grid's DST handling never
+fires. `tests/test_web_theme.py` asserts this, since a wrong zone id would resolve
+to something with DST and produce 23- and 25-hour days twice a year.
 
 Edit `config/shows.yaml` to match your library. The `id` (the YAML key) must match
 the folder name under `media/shows/`.

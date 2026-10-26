@@ -57,6 +57,38 @@ class StylePack:
     fade_ms: int = 500
     show_position_word: bool = True
 
+    # -- the "this was not in the original run" mark ------------------------
+    artifact: bool = True
+    """Whether to stamp generated cards.
+
+    A generated card sits in the same pool as 600 archive bumps and, if it is
+    indistinguishable, it quietly rewrites history -- you can no longer tell what
+    actually aired from what the renderer invented. The mark is deliberately
+    small, low-contrast and in the corner the real cards never used, so it reads
+    as broadcast grime to a viewer but is unmistakable when you look for it.
+    """
+    artifact_text: str = "SG"  
+    """Wordmark in the artifact. SG = Space Ghost, the [adult swim] mascot."""
+    artifact_opacity: float = 0.32
+    """Low enough to look like a ghost of the picture rather than a caption."""
+    artifact_size: float = 0.030
+    """Fraction of frame height."""
+
+    artifact_margin_x: float = 0.035
+    artifact_margin_y: float = 0.115
+    """Top-right by default: the real [adult swim] cards put their text left and
+    kept the bottom-right for the network bug, so a mark up here is one the
+    original run never had."""
+
+    artifact_box: bool = True
+    """Draw a thin box around the mark.
+
+    The "askew" quality: a bordered tag in the corner reads as broadcast grime
+    at a glance, but no archive card ever carried one, so it is unmistakable
+    once you know to look. A drawn box rather than an image, so it costs nothing
+    and cannot be lost in a transcode.
+    """
+
     @classmethod
     def from_mapping(cls, key: str, raw: dict) -> "StylePack":
         return cls(
@@ -77,6 +109,13 @@ class StylePack:
             hold_ms=int(raw.get("hold_ms", 4200)),
             fade_ms=int(raw.get("fade_ms", 500)),
             show_position_word=bool(raw.get("show_position_word", True)),
+            artifact=bool(raw.get("artifact", True)),
+            artifact_text=str(raw.get("artifact_text", "SG")),
+            artifact_opacity=float(raw.get("artifact_opacity", 0.32)),
+            artifact_size=float(raw.get("artifact_size", 0.030)),
+            artifact_margin_x=float(raw.get("artifact_margin_x", 0.035)),
+            artifact_margin_y=float(raw.get("artifact_margin_y", 0.115)),
+            artifact_box=bool(raw.get("artifact_box", True)),
         )
 
 
@@ -110,6 +149,19 @@ class EraPack:
         return table.get(style_key) or table.get("default") or position.upper()
 
 
+#: Artifact keys that may be set once at the top of the file and inherited by
+#: every style, so the mark does not have to be repeated per era.
+_ARTIFACT_DEFAULTS = (
+    "artifact",
+    "artifact_text",
+    "artifact_opacity",
+    "artifact_size",
+    "artifact_margin_x",
+    "artifact_margin_y",
+    "artifact_box",
+)
+
+
 def load_era_packs(path: Path) -> EraPack:
     if not path.is_file():
         raise BumpGenError(f"missing era style file: {path}")
@@ -117,6 +169,14 @@ def load_era_packs(path: Path) -> EraPack:
     styles_raw = raw.get("styles") or {}
     if not styles_raw:
         raise BumpGenError(f"{path.name}: no styles defined")
+
+    # The artifact is a channel-wide policy, not an era look, so it is declared
+    # once at the top level and merged into each style. A style may still
+    # override any key, which matters if one era should read differently.
+    inherited = {key: raw[key] for key in _ARTIFACT_DEFAULTS if key in raw}
+    styles_raw = {
+        str(key): {**inherited, **(value or {})} for key, value in styles_raw.items()
+    }
     styles = {
         str(key): StylePack.from_mapping(str(key), value or {})
         for key, value in styles_raw.items()
@@ -369,6 +429,8 @@ def _build_command(
             + (f":line_spacing={track}" if track else "")
         )
 
+    filters.extend(_artifact_filters(style, width=width, height=height))
+
     filters.append("format=yuv420p")
     # Film grain is incompressible: at CRF 20 a grainy card ballooned to ~17 MB.
     # Cards are cheap to regenerate, so a softer CRF keeps the cache sane.
@@ -396,6 +458,69 @@ def _build_command(
         "-an",
         "-y",
     ]
+
+
+def _artifact_filters(style: StylePack, *, width: int, height: int) -> list[str]:
+    """The "this card was generated" mark.
+
+    Three properties make it the right kind of tell:
+
+    * **It is a real thing in the picture**, not a watermark the player adds, so
+      it survives any transcode and any client. A subtitle or overlay would be
+      invisible on some players, which is the one place you might be watching.
+    * **It is quiet.** A third opacity, small, in a corner. A viewer reads it as
+      grime; you read it as a signature.
+    * **It is mirrored.** Correct at a glance, wrong when read -- so you notice it
+      in a screenshot without it ever looking like a caption.
+
+    Rendered as an ``hstack`` of a mirrored copy and its reverse, which flips the
+    glyphs about their own vertical axis and leaves the block in place: readable
+    as *something*, obviously not readable as *text*.
+    """
+    size = max(9, round(height * style.artifact_size))
+    margin_x = round(width * style.artifact_margin_x)
+    margin_y = round(height * style.artifact_margin_y)
+    text = _escape_text(style.artifact_text)
+    alpha = max(0.05, min(1.0, style.artifact_opacity))
+    font = _font_option(style.font)
+
+    # One guard here rather than at every call site: the mark is optional, and a
+    # style with no text or `artifact: false` must produce no filters at all.
+    if not style.artifact or not style.artifact_text:
+        return []
+
+    # Literal pixels, not `w - ...`: `drawbox` did not resolve `w` inside its own
+    # x expression the way `drawtext` does, and put the box at the far *left*
+    # edge instead of the right. Both are computed from the frame here.
+    pad_x = max(4, size // 2)
+    box_w = size * 2 + pad_x * 2
+    box_h = size + pad_x * 2
+    box_x = width - margin_x - box_w
+    box_y = margin_y
+
+    filters: list[str] = []
+    if style.artifact_box:
+        # A drawn box, not an image: it costs nothing, survives every transcode,
+        # and no archive card ever had one. Together with the low alpha that is
+        # the whole tell -- visible when you look for it, grime when you don't.
+        filters.append(
+            "drawbox="
+            f"x={box_x}:y={box_y}:w={box_w}:h={box_h}:"
+            f"color={style.colour}@{alpha * 0.55:.2f}:t=1"
+        )
+        text_x = box_x + pad_x
+        text_y = box_y + pad_x
+    else:
+        text_x = width - margin_x - size * 2
+        text_y = margin_y
+
+    filters.append(
+        "drawtext="
+        f"text='{text}':{font}:fontcolor={style.colour}:fontsize={size}:"
+        f"x={text_x}:y={text_y}:"
+        f"alpha={alpha}"
+    )
+    return filters
 
 
 def _x_expression(align: str, margin: int) -> str:

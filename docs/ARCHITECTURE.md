@@ -240,6 +240,23 @@ Tags live in a `.tags.json` sidecar next to each file, which is what lets
 `bumps/generated/` be a folder that is *not* a show. The sidecar is also what the
 review queue writes, so there is one on-disk representation of "what this bump is".
 
+## A generated card must not pass for an archive card
+
+The generator produces cards that go into the same pool as several hundred real
+bumps, so an unmarked generated card is a quiet falsification of the archive. The
+mark is therefore part of the **picture** rather than a player-side overlay: only
+something burned into the frames survives every transcode and shows up in a
+screenshot, and a screenshot is the surface you would actually check.
+
+It is drawn top-right, which the real cards never used, at about a third opacity,
+inside a thin tag. The three signals work together: position (real cards kept text
+left and the network bug bottom-right), shape (no archive card had a bordered
+tag), and quietness (low enough to read as grime during playback).
+
+The settings live at the top of `config/bumps-era.yaml` and are merged into each
+style, because the mark is a channel-wide policy rather than an era look — while
+still allowing one style to override it.
+
 ## The corner bug belongs to one side or the other
 
 A watermark can be applied by the scheduler or by the streamer, and doing both

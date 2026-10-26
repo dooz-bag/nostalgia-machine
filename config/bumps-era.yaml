@@ -9,6 +9,25 @@
 # Sizes are fractions of the frame so one pack works at 480p, 720p and 1080p.
 # `drawtext` filter syntax uses ':' as a separator, so any literal ':' in a value
 # must be escaped -- the renderer handles that for you.
+# The generated-card artifact.
+#
+# A generated card sits in the same pool as ~600 archive bumps. If it is
+# indistinguishable, it quietly rewrites history: you can no longer tell what
+# actually aired from what the renderer invented. Every generated card therefore
+# carries a small low-contrast tag in the top-right -- the corner the real cards
+# never used, because [adult swim] kept its own bug bottom-right.
+#
+# It is drawn into the picture rather than added by the player, so it survives
+# any transcode and shows up in a screenshot. A third opacity means a viewer
+# reads grime; you read a signature.
+artifact: true
+artifact_text: "SG"          # Space Ghost, the [adult swim] mascot
+artifact_opacity: 0.32
+artifact_size: 0.030         # fraction of frame height
+artifact_margin_x: 0.035
+artifact_margin_y: 0.115
+artifact_box: true           # thin tag around it; no archive card had one
+
 styles:
   "2001":
     name: "Launch era"

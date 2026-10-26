@@ -319,6 +319,14 @@ class ChannelConfig(_Model):
     horizon_days: int = Field(default=3, ge=1, le=14)
     ffmpeg_path: str | None = None
 
+    test_card: Literal["ntsc", "pal"] = "ntsc"
+    """Which broadcast test pattern the web UI uses as its chrome.
+
+    NTSC is the default and the correct one: [adult swim] was a US 525/60 NTSC
+    channel, and Japan broadcast NTSC-J, which is the same system. PAL exists for
+    a PAL variant of the channel, not because it would be more accurate here.
+    """
+
 
 class Resolution(_Model):
     width: int = 1280
