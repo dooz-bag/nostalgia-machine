@@ -385,6 +385,51 @@ NTSC is correct for this channel — [adult swim] was a US 525/60 NTSC service, 
 **Japan broadcast NTSC-J, which is the same system**. PAL exists for a PAL variant
 of the channel, not because it would be more accurate here.
 
+### Programming the channel from the web page
+
+Open `nostalgia serve` and go to **Schedule** (`/schedule`). This is the one place
+you can change *what the channel is* without editing YAML.
+
+Three modes, and they are exclusive:
+
+| Mode | What airs | When to use it |
+|---|---|---|
+| **Day files** | `config/days/*.yaml` | Recreating a real broadcast block |
+| **Lineup** | Shows you pick, cycled | "Just play these shows" |
+| **Shuffle all** | The whole collection, continuously | Leave it running |
+
+**Lineup** is the interesting one. Add shows, and pick how each one's episodes
+come out:
+
+- `random` — any episode
+- `by season` — pick a season first, then an episode inside it, so a show with one
+  long season cannot dominate its own airtime
+- `sequential` — in order, wrapping, so you watch the show progress
+
+You can also **pin specific episodes** (`S` and `E` boxes). Pinned episodes play
+verbatim and in the order listed, then the cycle repeats.
+
+**Shuffle all** takes one turn per show per pass. Turn order is by show id and is
+deliberately *not* weighted by episode count: a ten-season show would otherwise
+swallow a stream that is meant to feel varied. Leave every box unticked to mean
+the whole roster — that also keeps working as you add shows.
+
+Two things worth knowing:
+
+- **Slot sizes follow the content.** A lineup cannot inherit the day files' slot
+  sizes: a 22-minute episode in a 15-minute slot overruns and the planner will
+  refuse to emit. In lineup and shuffle modes the grid is generated from each
+  show's own `slot` family and filled to the millisecond, ending with a shorter
+  slot if the day needs one.
+- **Saving replans immediately.** The page writes `config/programming.yaml` and
+  rebuilds the channel horizon, so the playout files and the guide change under
+  you. Nothing is saved if the form is invalid — the page shows the error and
+  leaves the file alone.
+
+The mode is recorded in a file rather than in a database, so a wipe of
+`data/catalog.db` does not forget your schedule, and `git diff` shows what you
+changed.
+
 ## 2. Configure the channel
 
 Edit `config/channel.yaml`:

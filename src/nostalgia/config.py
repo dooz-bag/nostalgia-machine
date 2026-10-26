@@ -165,6 +165,86 @@ class WatermarkConfig(_Model):
         return self.mode != "none"
 
 
+OrderMode = Literal["random", "by_season", "sequential"]
+"""How a show's episodes are picked when the channel is programmed by hand.
+
+``random``      any episode, uniformly.
+``by_season``   pick a season, then an episode inside it -- so a 10-season show
+                does not drown in its largest season.
+``sequential``  in order, wrapping. The "just play it in order" option.
+"""
+
+ProgrammingMode = Literal["dayparts", "lineup", "shuffle"]
+"""What decides the schedule.
+
+``dayparts``  the hand-written day files (the original behaviour, default).
+``lineup``    an explicit list of shows -- or individual episodes -- cycled
+              deterministically.
+``shuffle``   a continuous stream drawn from the whole collection.
+"""
+
+
+class ProgrammingEntry(_Model):
+    """One show in a hand-built lineup, with how its episodes are chosen."""
+
+    show_id: str
+    order: OrderMode = "random"
+    weight: float = Field(default=1.0, gt=0)
+
+    @property
+    def is_show(self) -> bool:
+        return not self.show_id.startswith("episode:")
+
+
+class ProgrammingConfig(_Model):
+    """The channel's schedule, when it is not the day files.
+
+    Kept as *data in a file* rather than hidden runtime state, so it is diffable,
+    reviewable, and survives a wiped catalog -- the same reason bump tags live in
+    sidecars. The web page is a form over this file, not a separate database.
+    """
+
+    mode: ProgrammingMode = "dayparts"
+
+    lineup: list[ProgrammingEntry] = Field(default_factory=list)
+    """For ``lineup``: the shows (and pinned episodes) to cycle."""
+
+    pinned: list[str] = Field(default_factory=list)
+    """Episode keys played verbatim, cycling after the lineup entries.
+
+    Kept separate from ``lineup`` because a pinned episode is an exact statement
+    ("this one"), while a lineup entry is a category ("anything from SeaLab").
+    """
+
+    shuffle_shows: list[str] = Field(default_factory=list)
+    """For ``shuffle``: which shows take part. Empty means the whole roster."""
+
+    shuffle_order: OrderMode = "random"
+    """How ``shuffle`` picks within each show."""
+
+    @field_validator("lineup", "pinned", "shuffle_shows", mode="before")
+    @classmethod
+    def _empty_for_none(cls, value: Any) -> Any:
+        # An entirely commented-out YAML block parses as null, which is how a
+        # template ships. Treating that as "no entries" is friendlier than an
+        # error naming a field the owner has not filled in yet.
+        return [] if value is None else value
+
+    def active(self) -> bool:
+        return self.mode != "dayparts"
+
+    @model_validator(mode="after")
+    def _check(self) -> "ProgrammingConfig":
+        if self.mode == "lineup" and not self.lineup and not self.pinned:
+            raise ValueError(
+                "mode 'lineup' needs at least one show in `lineup` or `pinned`"
+            )
+        for entry in self.lineup:
+            if entry.order not in ("random", "by_season", "sequential"):
+                raise ValueError(f"unknown order {entry.order!r} for {entry.show_id}")
+        return self
+
+
 class ShowConfig(_Model):
     title: str
     folder: str
@@ -343,6 +423,7 @@ class RootConfig(_Model):
     ads: AdsConfig = Field(default_factory=AdsConfig)
     bumps: BumpConfig = Field(default_factory=BumpConfig)
     watermark: WatermarkConfig = Field(default_factory=WatermarkConfig)
+    programming: ProgrammingConfig = Field(default_factory=ProgrammingConfig)
     encoding: Resolution = Field(default_factory=Resolution)
     media_root: str = "media"
 
@@ -475,6 +556,9 @@ def load_config(config_dir: Path) -> RootConfig:
     raw_watermark = load("watermark.yaml", required=False)
     if raw_watermark:
         payload["watermark"] = raw_watermark.get("watermark", raw_watermark)
+    raw_programming = load("programming.yaml", required=False)
+    if raw_programming:
+        payload["programming"] = raw_programming.get("programming", raw_programming)
 
     try:
         return RootConfig.model_validate(payload)
@@ -518,6 +602,10 @@ __all__ = [
     "FAMILY_QUANTA",
     "GridConfig",
     "Resolution",
+    "OrderMode",
+    "ProgrammingConfig",
+    "ProgrammingEntry",
+    "ProgrammingMode",
     "RootConfig",
     "ShowConfig",
     "WatermarkConfig",

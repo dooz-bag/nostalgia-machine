@@ -26,6 +26,7 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `grid` | Dayparts → grid-aligned slots, DST-correct | pure |
 | `rotation` | Date → episode, via an ordinal rather than a cursor | pure |
 | `schedule` | Slot → show, honouring dayparts and airing windows | pure |
+| `programming` | Hand-built lineup / whole-collection shuffle, and the grid they imply | pure |
 | `continuity` | Template → ordered segment specs, budget math | pure |
 | `bumps` | Scoring, cooldown, fallback ladder | pure |
 | `ads` | Pod filling: whole-spot tolerance, promo top-up, black-card fallback | pure |

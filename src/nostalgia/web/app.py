@@ -10,12 +10,22 @@ Python environment as the scheduler.
 
 from __future__ import annotations
 
+from collections import Counter
 from dataclasses import asdict
-from typing import Any
+from typing import Any, Sequence
+from urllib.parse import quote_plus
 
 from ..catalog import Catalog
 from ..config import RootConfig
 from ..paths import Paths
+from ..pipeline import build
+from ..rotation import EpisodeRef
+from .schedule import (
+    ScheduleFormError,
+    load_schedule,
+    parse_form,
+    write_schedule,
+)
 from .view import apply_tag, now_playing, pending_tags
 
 _CSS = """
@@ -284,6 +294,72 @@ footer {
   text-transform: uppercase;
 }
 
+/* -- schedule editor ------------------------------------------------------
+   The modes are exclusive, so only the panel for the chosen mode is shown.
+   Done with :checked rather than script, so the page works before -- and
+   without -- any JavaScript. */
+.modes { display: flex; gap: 0; margin: 0 0 16px; border: 1px solid var(--line); }
+.modes label {
+  flex: 1;
+  padding: 11px 12px;
+  text-align: center;
+  cursor: pointer;
+  font-size: 11px;
+  letter-spacing: .16em;
+  text-transform: uppercase;
+  color: var(--dim);
+  border-right: 1px solid var(--line);
+}
+.modes label:last-child { border-right: 0; }
+.modes input { position: absolute; opacity: 0; pointer-events: none; }
+.modes input:checked + span { color: var(--fg); }
+.modes label:has(input:checked) {
+  background: var(--navy);
+  color: var(--fg);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+.panel { display: none; }
+.panel.show { display: block; }
+/* Mode switching with no script: each radio drives its own panel through
+   :has(), falling back to the server-rendered .show class where :has() is
+   unavailable -- the page still works, it just needs a save to switch. */
+body:has(.modes input[value="lineup"]:checked) .panel[data-mode="dayparts"],
+body:has(.modes input[value="shuffle"]:checked) .panel[data-mode="dayparts"],
+body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="lineup"],
+body:has(.modes input[value="shuffle"]:checked) .panel[data-mode="lineup"],
+body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="shuffle"],
+body:has(.modes input[value="lineup"]:checked) .panel[data-mode="shuffle"] {
+  display: none;
+}
+body:has(.modes input[value="lineup"]:checked) .panel[data-mode="lineup"],
+body:has(.modes input[value="shuffle"]:checked) .panel[data-mode="shuffle"],
+body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
+  display: block;
+}
+
+.row { display: flex; gap: 8px; align-items: center; margin-bottom: 8px; }
+.row select, .row input { flex: 1; min-width: 0; }
+.row .num { flex: 0 0 78px; }
+.row button { flex: 0 0 auto; }
+
+.hint { color: var(--dim); font-size: 12px; margin: 0 0 12px; max-width: 62ch; }
+.hint code { color: var(--accent); }
+.warn { color: var(--yellow); font-size: 12px; }
+
+.shows { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 4px 14px; }
+.shows label { font-size: 13px; color: var(--fg); display: flex; gap: 7px; align-items: center; }
+.shows input { flex: 0 0 auto; }
+
+.saved {
+  border-left: 4px solid var(--green);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  background: var(--panel);
+  font-size: 13px;
+}
+.saved.bad { border-left-color: var(--red); }
+
 @media (max-width: 620px) {
   main, header, footer { padding-left: 16px; padding-right: 16px; }
   .now-title { font-size: 22px; }
@@ -333,7 +409,7 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
 {_test_card(card)}
 <header>
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
-  <nav>{nav("/", "On now")}{nav("/bumps", "Bump review")}</nav>
+  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}</nav>
 </header>
 <main>{body}</main>
 <footer>Nostalgia Machine &middot; {standard}</footer>
@@ -423,6 +499,75 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
 </div>"""
         return _render(_page("On now", body, active="/", card=_card(config)))
 
+    @app.get("/schedule", response_class=HTMLResponse)
+    def schedule(saved: str = "", built: str = "") -> Any:
+        # Read what is on disk rather than what was loaded at startup: a save -- or
+        # a hand edit -- happens after this process starts, and rendering the
+        # stale values would make the page look like it ignored the change.
+        current = _reload(config, paths)
+        with Catalog(paths.catalog) as catalog:
+            episodes = catalog.episodes()
+        return _render(
+            _schedule_page(
+                current, episodes, card=_card(current), saved=saved, built=built
+            )
+        )
+
+    @app.post("/schedule")
+    def save_schedule(
+        mode: str = Form("dayparts"),
+        lineup_show: list[str] = Form(default=[]),
+        lineup_order: list[str] = Form(default=[]),
+        pinned_show: list[str] = Form(default=[]),
+        pinned_season: list[str] = Form(default=[]),
+        pinned_episode: list[str] = Form(default=[]),
+        shuffle_shows: list[str] = Form(default=[]),
+        shuffle_order: str = Form("random"),
+    ) -> Any:
+        current = _reload(config, paths)
+        # "Every show ticked" is the same instruction as "no restriction", and the
+        # second survives a show being added later. Collapse it before saving.
+        if set(shuffle_shows) >= set(current.shows):
+            shuffle_shows = []
+        try:
+            form = parse_form(
+                mode=mode,
+                lineup_show=lineup_show,
+                lineup_order=lineup_order,
+                pinned_show=pinned_show,
+                pinned_season=pinned_season,
+                pinned_episode=pinned_episode,
+                shuffle_shows=shuffle_shows,
+                shuffle_order=shuffle_order,
+            )
+            # Validate the whole config before writing: a saved file that cannot
+            # be loaded would break the channel at the next plan, and the user
+            # would have no idea which of their edits did it.
+            new_config = current.model_copy(update={"programming": form.to_config()})
+        except (ScheduleFormError, ValueError) as exc:
+            return _render(
+                _schedule_page(
+                    current,
+                    _episodes(paths),
+                    card=_card(current),
+                    error=str(exc),
+                )
+            )
+
+        write_schedule(paths.config_dir / "programming.yaml", form)
+        # Rebuild immediately so the page's "on now" matches what was just saved;
+        # waiting for a cron run would look like the edit was ignored.
+        message = ""
+        try:
+            with Catalog(paths.catalog) as catalog:
+                result = build(new_config, catalog, paths)
+            message = f"{len(result.plans)} day(s) replanned"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            message = f"saved, but replanning failed: {exc}"
+        return RedirectResponse(
+            f"/schedule?saved=1&built={quote_plus(message)}", status_code=303
+        )
+
     @app.get("/bumps", response_class=HTMLResponse)
     def bumps() -> Any:
         with Catalog(paths.catalog) as catalog:
@@ -504,6 +649,215 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         }
 
     return app
+
+
+def _reload(config: RootConfig, paths: Paths) -> RootConfig:
+    """Re-read ``config/`` so a page reflects edits made since startup.
+
+    Falls back to the startup config if the files are mid-write or briefly
+    invalid: a stale page is much better than a crashed one.
+    """
+    from ..config import ConfigError, load_config
+
+    try:
+        return load_config(paths.config_dir)
+    except ConfigError:
+        return config
+
+
+def _episodes(paths: Paths) -> list[EpisodeRef]:
+    with Catalog(paths.catalog) as catalog:
+        return catalog.episodes()
+
+
+_ORDERS = (
+    ("random", "random"),
+    ("by_season", "by season"),
+    ("sequential", "sequential"),
+)
+
+
+def _order_options(selected: str) -> str:
+    return "".join(
+        f'<option value="{value}"{" selected" if value == selected else ""}>'
+        f"{label}</option>"
+        for value, label in _ORDERS
+    )
+
+
+def _schedule_page(
+    config: RootConfig,
+    episodes: Sequence[EpisodeRef],
+    *,
+    card: str,
+    saved: str = "",
+    built: str = "",
+    error: str = "",
+) -> str:
+    """The schedule editor.
+
+    Everything the page needs is derived here: the roster comes from
+    ``shows.yaml`` and the per-show episode counts come from the catalog, so a
+    show with nothing downloaded is visibly unplayable rather than silently
+    dropped when the plan is built.
+    """
+    shows = sorted(config.shows)
+    counts = Counter(episode.show_id for episode in episodes)
+    form = load_schedule(config)
+
+    # When everything is ticked the selection is not a *choice*, it is the default,
+    # so store "no restriction" and keep the roster open to shows added later.
+    shuffle_all = len(form.shuffle_shows) == len(shows)
+
+    def label(show_id: str) -> str:
+        title = config.shows[show_id].title if show_id in config.shows else show_id
+        return f"{title} ({counts.get(show_id, 0)})"
+
+    def pick(selected: str, blank: str = "") -> str:
+        head = f'<option value="">{_h(blank)}</option>' if blank else ""
+        return head + "".join(
+            f'<option value="{_h(show)}"{" selected" if show == selected else ""}>'
+            f"{_h(label(show))}</option>"
+            for show in shows
+        )
+
+    def lineup_rows() -> str:
+        rows = [
+            '<div class="row">'
+            f'<select name="lineup_show">{pick(entry.show_id)}</select>'
+            f'<select name="lineup_order">{_order_options(entry.order)}</select>'
+            "</div>"
+            for entry in form.lineup
+        ]
+        # One blank row, so a new entry can be added without any script.
+        rows.append(
+            '<div class="row">'
+            f'<select name="lineup_show">{pick("", "— add a show —")}</select>'
+            f'<select name="lineup_order">{_order_options("random")}</select>'
+            "</div>"
+        )
+        return "".join(rows)
+
+    def pinned_rows() -> str:
+        rows = []
+        for key in form.pinned:
+            show_id, _, code = key.partition(":")
+            season = episode = ""
+            if code.startswith("s") and "e" in code:
+                raw_season, _, raw_episode = code[1:].partition("e")
+                if raw_season.isdigit() and raw_episode.isdigit():
+                    season, episode = str(int(raw_season)), str(int(raw_episode))
+            rows.append(
+                '<div class="row">'
+                f'<select name="pinned_show">{pick(show_id)}</select>'
+                f'<input class="num" name="pinned_season" value="{_h(season)}" '
+                'placeholder="S" inputmode="numeric">'
+                f'<input class="num" name="pinned_episode" value="{_h(episode)}" '
+                'placeholder="E" inputmode="numeric">'
+                "</div>"
+            )
+        rows.append(
+            '<div class="row">'
+            f'<select name="pinned_show">{pick("", "— pin an episode —")}</select>'
+            '<input class="num" name="pinned_season" placeholder="S" inputmode="numeric">'
+            '<input class="num" name="pinned_episode" placeholder="E" inputmode="numeric">'
+            "</div>"
+        )
+        return "".join(rows)
+
+    # Rendered exactly as configured. An empty list already means "the whole
+    # roster", so pre-ticking everything would rewrite the file with every show
+    # named and quietly turn "anything" into a frozen list.
+    selected_shows = set(shows) if shuffle_all else set(form.shuffle_shows)
+    shuffle_boxes = "".join(
+        f'<label><input type="checkbox" name="shuffle_shows" value="{_h(show)}"'
+        f'{" checked" if show in selected_shows else ""}>'
+        f"<span>{_h(label(show))}</span></label>"
+        for show in shows
+    )
+
+    empty = [show for show in shows if counts.get(show, 0) == 0]
+    warnings = (
+        f'<p class="warn">Nothing downloaded for: {_h(", ".join(empty))}. '
+        f"Those shows cannot air until media is added.</p>"
+        if empty
+        else ""
+    )
+
+    banner = ""
+    if error:
+        banner = f'<div class="saved bad">{_h(error)}</div>'
+    elif saved:
+        banner = (
+            f'<div class="saved">Schedule saved &middot; {_h(built or "not replanned")}'
+            f"</div>"
+        )
+
+    def mode_radio(value: str, text: str) -> str:
+        checked = " checked" if form.mode == value else ""
+        return (
+            f'<label><input type="radio" name="mode" value="{value}"{checked}>'
+            f"<span>{text}</span></label>"
+        )
+
+    body = f"""
+{banner}
+<div class="card">
+  <form method="post" action="/schedule">
+    <p class="label">Programming mode</p>
+    <div class="modes">
+      {mode_radio("dayparts", "Day files")}
+      {mode_radio("lineup", "Lineup")}
+      {mode_radio("shuffle", "Shuffle all")}
+    </div>
+    {warnings}
+    <div class="panel {"show" if form.mode == "dayparts" else ""}" data-mode="dayparts">
+      <p class="hint">The hand-written day files in <code>config/days/</code>
+      decide what airs and when. This is the mode that reproduces a real
+      broadcast block: set start times, dayparts and per-daypart shows, and the
+      planner fills each slot from that show's rotation.</p>
+    </div>
+
+    <div class="panel {"show" if form.mode == "lineup" else ""}" data-mode="lineup">
+      <p class="hint">Shows take turns, one slot each, cycling. Slots are sized
+      from each show's own <code>slot</code> family, so a 22-minute show gets a
+      30-minute slot and an 11-minute show gets 15. <code>by season</code>
+      weighs seasons equally, so one long season cannot dominate a show's own
+      airtime.</p>
+      <p class="label">Lineup</p>
+      {lineup_rows()}
+      <p class="label" style="margin-top:16px">Pinned episodes</p>
+      <p class="hint">Played verbatim, in this order, then the cycle repeats.</p>
+      {pinned_rows()}
+    </div>
+
+    <div class="panel {"show" if form.mode == "shuffle" else ""}" data-mode="shuffle">
+      <p class="hint">A continuous stream from the whole collection. Each show
+      takes one turn per pass, in id order &mdash; deliberately not weighted by
+      episode count, or a ten-season show would swallow the channel. Untick
+      everything to mean the whole roster.</p>
+      <p class="label">Shows in the shuffle</p>
+      <div class="shows">{shuffle_boxes}</div>
+      <p class="hint" style="margin-top:8px">None ticked means the whole roster,
+      including shows added later.</p>
+      <p class="label" style="margin-top:16px">Episode order within a show</p>
+      <div class="row">
+        <select name="shuffle_order">{_order_options(form.shuffle_order)}</select>
+      </div>
+    </div>
+
+    <p style="margin-top:18px"><button type="submit">Save &amp; replan</button></p>
+  </form>
+</div>
+
+<div class="card">
+  <p class="label">How this is stored</p>
+  <p class="hint">Saved to <code>config/programming.yaml</code>, so the schedule
+  is diffable and survives a wiped catalog. Saving replans the channel horizon
+  immediately: playout files and the guide are rewritten in place.</p>
+</div>
+"""
+    return _page("Schedule", body, active="/schedule", card=card)
 
 
 def _card(config: RootConfig) -> str:

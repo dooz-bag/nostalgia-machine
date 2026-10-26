@@ -23,6 +23,7 @@ from datetime import date
 from .config import DayConfig, Daypart, RootConfig, ShowConfig
 from .grid import Slot
 from .rng import rng_for, shuffled, weighted_choice
+from .rotation import EpisodeRef
 
 
 class ScheduleError(ValueError):
@@ -38,6 +39,13 @@ class AssignedSlot:
 
     of_same_show: int
     """How many times this show airs today (for rotation spans)."""
+
+    episode: EpisodeRef | None = None
+    """The exact episode, when hand programming already chose it.
+
+    ``None`` means "derive it from the show's rotation ring", which is what the
+    day-file scheduler does. Set by :mod:`nostalgia.programming`.
+    """
 
 
 @dataclass

@@ -178,6 +178,60 @@ or to build a "what if [adult swim] picked it up in 2004" timeline:
 | `config/watermark.yaml` | The corner bug: mode, typeface, placement, which shows |
 | `config/bumps.yaml` | Match strictness, cooldowns, generated-bump limits |
 | `config/bumps-era.yaml` | The look of generated cards, by year |
+| `config/programming.yaml` | Whether the day files, a hand-built lineup, or a whole-collection shuffle decides the schedule |
+
+## Programming: let the day files decide, or don't
+
+The day files answer *"what runs at 21:00"*, which is the model for recreating a
+real broadcast block. They are the wrong tool for "just play these shows", so
+`config/programming.yaml` offers three modes:
+
+| Mode | What airs |
+|---|---|
+| `dayparts` | The hand-written day files. The default, and the accurate one |
+| `lineup` | An explicit list of shows (plus pinned episodes), cycled |
+| `shuffle` | A continuous stream drawn from the whole collection |
+
+Change it on `<http://localhost:8099/schedule>`, or edit the file directly.
+Either way the result is data in a file, so the schedule diffs, survives a wiped
+catalog, and can be committed.
+
+**Lineup.** Shows take turns, one slot each, cycling. Per show, `order` decides
+how episodes are chosen:
+
+```yaml
+programming:
+  mode: lineup
+  lineup:
+    - {show_id: futurama, order: sequential}    # in order, wrapping
+    - {show_id: king-of-the-hill, order: by_season}
+    - {show_id: aqua-teen-hunger-force, order: random}
+  pinned:
+    - aqua-teen-hunger-force:s02e003            # exact episode, verbatim
+```
+
+`by_season` weighs **seasons** equally rather than episodes, so a show with one
+long season cannot dominate its own airtime — which is what picking uniformly
+over episodes does, and what viewers notice.
+
+**Shuffle.** Each show takes one turn per pass, in id order. Turn order is
+deliberately *not* weighted by episode count: a ten-season show would otherwise
+swallow a stream that is supposed to feel varied. `shuffle_shows: []` means the
+whole roster, and keeps meaning that as you add shows. `shuffle_order` picks how
+each show's episodes come out.
+
+```yaml
+programming:
+  mode: shuffle
+  shuffle_shows: []          # empty = every show in the roster
+  shuffle_order: by_season
+```
+
+**Slots follow the content.** A lineup cannot inherit day-file slot sizes — a
+22-minute episode in a 15-minute slot overruns and the planner refuses to emit —
+so in `lineup`/`shuffle` modes the grid is generated from each show's own `slot`
+family and filled to the millisecond. Episodes are a pure function of
+`(day, position, config)`, so previewing tomorrow cannot consume tomorrow.
 
 ## Generated bumps (Phase 2)
 
@@ -213,7 +267,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia review` | List bumps awaiting subject confirmation |
 | `nostalgia tag` | Confirm one bump's subject from the terminal |
 | `nostalgia bumps` | Render generated bump cards (`--dry-run`, `--style`) |
-| `nostalgia serve` | Web UI: what's on now and the bump review queue, styled as a broadcast test card |
+| `nostalgia serve` | Web UI: what's on now, the schedule editor and the bump review queue, styled as a broadcast test card |
 | `scripts/import-breaks.ps1` | Bulk-import commercial breaks from archive.org and split them into spots |
 
 ## Layout

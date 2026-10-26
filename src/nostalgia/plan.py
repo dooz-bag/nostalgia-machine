@@ -20,6 +20,7 @@ from datetime import date
 from pathlib import Path
 from typing import Iterator, Sequence
 
+from . import programming
 from .ads import PodError, PodFill, fill_gap, fill_pod
 from .assets import NEUTRAL, Asset
 from .bumps import BumpRequest, choose
@@ -216,13 +217,22 @@ def build_plan(
         day_end_ms=day_end,
     )
 
-    slots = build_day(day, day_config, channel.grid)
-    schedule = assign_day(slots, day_config, root, day)
-    plan.warnings.extend(schedule.warnings)
-
-    assignments: dict[str, AssignedSlot] = {}
-    for assigned in schedule.slots:
-        assignments[slot_key(assigned.slot)] = assigned
+    # Two ways to decide what airs, and they produce the same AssignedSlot shape
+    # so everything downstream -- bumps, pods, era filtering, the watermark --
+    # works without knowing which mode produced the schedule.
+    if root.programming.active():
+        try:
+            slots, placed = programming.build_programmed_day(
+                root, context.catalog.episodes(), day=day
+            )
+        except programming.ProgrammingError as exc:
+            raise PlanError(f"{day}: {exc}") from exc
+        assignments = _assignments_from_programming(placed)
+    else:
+        slots = build_day(day, day_config, channel.grid)
+        schedule = assign_day(slots, day_config, root, day)
+        plan.warnings.extend(schedule.warnings)
+        assignments = {slot_key(a.slot): a for a in schedule.slots}
 
     generated_enabled = (
         root.bumps.generated.enabled if allow_generated is None else allow_generated
@@ -280,6 +290,34 @@ def build_plan(
     if problems:
         raise PlanError(f"{day}: timeline is invalid\n  - " + "\n  - ".join(problems))
     return plan
+
+
+def _assignments_from_programming(placed: Sequence) -> dict[str, AssignedSlot]:
+    """Turn hand-programmed slots into the map the planner consumes.
+
+    ``of_same_show`` comes from the actual line-up rather than being assumed to be
+    one: a show appearing three times in a day must not restart its episode ring
+    at each appearance, or a marathon would play episode one three times. The
+    episode is carried through directly, because the point of a hand-built lineup
+    is that a human said exactly what plays.
+    """
+    totals: dict[str, int] = {}
+    for entry in placed:
+        totals[entry.show_id] = totals.get(entry.show_id, 0) + 1
+
+    seen: dict[str, int] = {}
+    assignments: dict[str, AssignedSlot] = {}
+    for entry in placed:
+        position = seen.get(entry.show_id, 0)
+        seen[entry.show_id] = position + 1
+        assignments[slot_key(entry.slot)] = AssignedSlot(
+            slot=entry.slot,
+            show_id=entry.show_id,
+            slot_in_day=position,
+            of_same_show=totals[entry.show_id],
+            episode=entry.episode,
+        )
+    return assignments
 
 
 def watermark_rule(root: RootConfig) -> "WatermarkRule | None":
@@ -812,6 +850,12 @@ def _emit_pod(
 
 
 def _episode_for(plan: Plan, assigned: AssignedSlot, context: PlanContext):
+    # Hand programming already chose the exact episode, so re-deriving it from the
+    # ring here would discard the lineup (and make "random overall" reproducible
+    # in the wrong way).
+    if assigned.episode is not None:
+        return assigned.episode
+
     ring = context.rings.get(assigned.show_id)
     if ring is None or not ring.episodes:
         plan.warnings.append(

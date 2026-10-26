@@ -1,0 +1,19 @@
+# What decides the schedule.
+#
+# This file is edited by the web page (nostalgia serve) and by hand. The page
+# rewrites only the keys below, so comments elsewhere survive.
+#
+#   dayparts  the hand-written day files in config/days/ -- the original mode
+#   lineup    cycle the shows listed under `lineup`, plus any `pinned` episodes
+#   shuffle   a continuous stream drawn from the whole collection
+#
+# `order` per show is how that show's episodes are chosen:
+#   random      any episode
+#   by_season   pick a season first, then an episode inside it
+#   sequential  in order, wrapping -- watch the show progress
+programming:
+  mode: dayparts
+  lineup: []
+  pinned: []
+  shuffle_shows: []
+  shuffle_order: random
