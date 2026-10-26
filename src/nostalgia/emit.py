@@ -92,8 +92,13 @@ def _zone_hint(plan: Plan) -> str:
     return _ZONE_CACHE.get("name", "America/New_York")
 
 
-def to_playout_json(plan: Plan) -> dict:
-    """Serialise a plan to the ErsatzTV Next playout document."""
+def to_playout_json(plan: Plan, *, watermark_layer: dict | None = None) -> dict:
+    """Serialise a plan to the ErsatzTV Next playout document.
+
+    *watermark_layer* is a ready-made ``graphics`` layer (see
+    :func:`nostalgia.watermark.graphics_layer`). It is only attached to items the
+    planner flagged, so a commercial never gets a programme's corner bug.
+    """
     zone = tz(_zone_hint(plan))
     items = []
     for item in plan.items:
@@ -107,14 +112,15 @@ def to_playout_json(plan: Plan) -> dict:
                 source["in_point_ms"] = item.in_point_ms
             if item.out_point_ms is not None:
                 source["out_point_ms"] = item.out_point_ms
-        items.append(
-            {
-                "id": item.item_id,
-                "start": rfc3339(start),
-                "finish": rfc3339(finish),
-                "source": source,
-            }
-        )
+        entry: dict = {
+            "id": item.item_id,
+            "start": rfc3339(start),
+            "finish": rfc3339(finish),
+            "source": source,
+        }
+        if item.watermark and watermark_layer is not None:
+            entry["graphics"] = [watermark_layer]
+        items.append(entry)
     return {
         "$schema": PLAYOUT_SCHEMA,
         "version": PLAYOUT_VERSION,
@@ -122,10 +128,12 @@ def to_playout_json(plan: Plan) -> dict:
     }
 
 
-def write_playout(plan: Plan, paths: EmitPaths) -> Path:
+def write_playout(
+    plan: Plan, paths: EmitPaths, *, watermark_layer: dict | None = None
+) -> Path:
     paths.playout_dir.mkdir(parents=True, exist_ok=True)
     target = paths.playout_dir / playout_filename(plan)
-    payload = to_playout_json(plan)
+    payload = to_playout_json(plan, watermark_layer=watermark_layer)
     _write_atomic(target, json.dumps(payload, indent=2) + "\n")
     return target
 

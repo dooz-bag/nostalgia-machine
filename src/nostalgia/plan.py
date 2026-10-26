@@ -35,6 +35,7 @@ from .continuity import (
 from .grid import Slot, build_day, day_bounds_ms, format_wall
 from .rotation import NoEpisodesError, RotationRing, build_rings, select
 from .schedule import AssignedSlot, assign_day
+from .watermark import WatermarkRule
 
 
 class PlanError(RuntimeError):
@@ -70,6 +71,14 @@ class PlannedItem:
 
     lavfi_params: str | None = None
     """Set when the item is rendered by ffmpeg instead of read from a file."""
+
+    watermark: bool = False
+    """True when the streamer should composite the corner bug over this item.
+
+    Only ever set in overlay mode. Burn mode replaces the *path* instead, because
+    a pre-composited file is just a file and needs no cooperation from the
+    streamer.
+    """
 
     @property
     def duration_ms(self) -> int:
@@ -245,6 +254,7 @@ def build_plan(
         disabled=ignore_cooldowns,
     )
 
+    mark = watermark_rule(root)
     ordered = sorted(assignments.values(), key=lambda a: a.slot.start_ms)
     for position, assigned in enumerate(ordered):
         nxt = ordered[position + 1] if position + 1 < len(ordered) else None
@@ -260,6 +270,7 @@ def build_plan(
             real_bumps=real_bumps,
             generated_pool=generated_pool,
             generated_budget=budget,
+            mark=mark,
         )
 
     if not plan.items:
@@ -269,6 +280,23 @@ def build_plan(
     if problems:
         raise PlanError(f"{day}: timeline is invalid\n  - " + "\n  - ".join(problems))
     return plan
+
+
+def watermark_rule(root: RootConfig) -> "WatermarkRule | None":
+    """The active overlay rule, or ``None`` when the streamer should not be asked.
+
+    Only ``overlay`` mode returns a rule: in ``burn`` mode the file on disk
+    already carries the mark, so asking the streamer to add a second one would
+    double it, and in ``off`` mode there is nothing to do.
+    """
+    config = root.watermark
+    if config.mode != "overlay":
+        return None
+    return WatermarkRule(
+        enabled=True,
+        shows=tuple(config.shows),
+        skip_when_burned_in=False,
+    )
 
 
 def slot_key(slot: Slot) -> str:
@@ -399,6 +427,7 @@ def _plan_slot(
     real_bumps: Sequence[Asset],
     generated_pool: Sequence[Asset],
     generated_budget: GeneratedBudget,
+    mark: "WatermarkRule | None" = None,
 ) -> None:
     """Resolve one slot in two passes.
 
@@ -583,6 +612,14 @@ def _plan_slot(
                     in_point_ms=spec.offset_ms if spec.of_parts > 1 else None,
                     out_point_ms=(spec.offset_ms + part_len) if spec.of_parts > 1 else None,
                     guide=True,
+                    watermark=bool(
+                        mark is not None
+                        and mark.applies_to(
+                            kind="episode",
+                            show_id=assigned.show_id,
+                            era_year=root.era_year,
+                        )
+                    ),
                 ),
             )
             cursor_ms += part_len

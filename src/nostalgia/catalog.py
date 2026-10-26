@@ -215,8 +215,15 @@ class Catalog:
         ffprobe_path: str | None = None,
         force: bool = False,
         write_sidecars: bool = False,
+        derived_root: Path | None = None,
     ) -> ScanReport:
-        """Walk every media root and (re)build the ``media`` table."""
+        """Walk every media root and (re)build the ``media`` table.
+
+        *derived_root* holds composited copies keyed by asset key
+        (``watermark/aqua-teen-hunger-force_s01e001.mkv``). When one exists it is
+        catalogued *instead of* the original, so the marked copy is what airs
+        without anything downstream needing to know about watermarks.
+        """
         report = ScanReport()
         ffprobe = find_ffprobe(ffprobe_path)
 
@@ -231,7 +238,15 @@ class Catalog:
                     report.note(Path(folder), f"show folder for {show_id!r} is missing")
                     continue
                 rows.extend(
-                    self._scan_show(show_id, Path(folder), ffprobe, report, write_sidecars, pool)
+                    self._scan_show(
+                        show_id,
+                        Path(folder),
+                        ffprobe,
+                        report,
+                        write_sidecars,
+                        pool,
+                        derived_root=derived_root,
+                    )
                 )
 
             for root, kind in ((bump_root, "bump"), (ad_root, "ad"), (ident_root, "ident")):
@@ -352,19 +367,33 @@ class Catalog:
         report: ScanReport,
         write_sidecars: bool,
         pool: "ThreadPoolExecutor | None" = None,
+        derived_root: Path | None = None,
     ) -> list[tuple]:
         rows: list[tuple] = []
         candidates = list(_walk_media(folder))
+
+        # A composited copy replaces the original for that episode. Resolved
+        # before probing so only the file that will actually air is measured.
+        chosen: list[tuple[Path, Path]] = []
+        for path in candidates:
+            parsed = parse_episode(path.name, season_dir=path.parent.name)
+            key = f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}" if parsed else None
+            derived = _derived_for(derived_root, key) if key else None
+            chosen.append((derived or path, path))
+
         futures = {}
         if pool is not None and ffprobe:
-            for path in candidates:
-                if not sidecar_duration_ms(path):
-                    futures[path] = pool.submit(probe, path, ffprobe)
-        for path in candidates:
+            for media_path, _original in chosen:
+                if not sidecar_duration_ms(media_path):
+                    futures[media_path] = pool.submit(probe, media_path, ffprobe)
+
+        for path, original in chosen:
+            # Identity always comes from the *original* name, so a derived file's
+            # own naming can never change which episode it is.
             stat = path.stat()
-            parsed = parse_episode(path.name, season_dir=path.parent.name)
+            parsed = parse_episode(original.name, season_dir=original.parent.name)
             if parsed is None:
-                report.note(path, "cannot determine season/episode from the filename")
+                report.note(original, "cannot determine season/episode from the filename")
                 continue
             info, probed_by = self._info(
                 path, stat.st_mtime_ns, ffprobe, report, write_sidecars, futures.get(path)
@@ -843,6 +872,23 @@ def _era_from_path(path: Path) -> int | None:
         match = re.search(r"\b(19[5-9]\d|20[0-4]\d)\b", part)
         if match:
             return int(match.group(1))
+    return None
+
+
+def derived_key(asset_key: str) -> str:
+    """Filename stem for an asset's composited copy (``show:s01e001`` -> a file)."""
+    return asset_key.replace(":", "_")
+
+
+def _derived_for(root: Path | None, asset_key: str) -> Path | None:
+    """The composited copy for *asset_key*, if one has been made."""
+    if root is None:
+        return None
+    stem = derived_key(asset_key)
+    for suffix in (".mkv", ".mp4"):
+        candidate = root / f"{stem}{suffix}"
+        if candidate.is_file():
+            return candidate
     return None
 
 

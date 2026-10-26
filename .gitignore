@@ -21,6 +21,9 @@ logs/
 # media is never committed
 media/
 
+# `build/`: scratch from manual verification runs
+build/
+
 # editors / os
 .vscode/
 .idea/

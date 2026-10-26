@@ -112,6 +112,59 @@ class AdsConfig(_Model):
     )
 
 
+class WatermarkConfig(_Model):
+    """The corner bug.
+
+    ``mode`` decides who does the work::
+
+        none    no mark anywhere
+        overlay ask the streamer to composite it per item (cheapest, needs a
+                build whose playout schema has ``graphics``)
+        burn    composite a marked copy into the media tree with ffmpeg, then
+                air that copy (works everywhere, costs disk and one encode)
+
+    Deliberately *not* called ``off``: unquoted YAML reads ``off`` as boolean
+    false, which would fail validation with a message about ``mode`` that gives
+    no hint why.
+    """
+
+    mode: Literal["none", "overlay", "burn"] = "none"
+
+    @field_validator("mode", mode="before")
+    @classmethod
+    def _forgive_yaml_booleans(cls, value: Any) -> Any:
+        # `mode: off` / `mode: no` / `mode: false` all arrive as Python False.
+        if value is False or value is None:
+            return "none"
+        if value is True:
+            return "burn"
+        return value
+    text: str = "[adult swim]"
+    font: str = "Helvetica Neue Condensed Bold"
+    """Requested face. Resolved through a fallback chain; see FONT_CHAIN."""
+    condense: float = Field(default=0.84, gt=0.5, le=1.0)
+    """Horizontal squeeze applied when the resolved face is not condensed."""
+    font_size: float = Field(default=0.026, gt=0, le=0.2)
+    """As a fraction of frame height. A corner bug is small."""
+    colour: str = "white"
+    opacity: float = Field(default=0.88, gt=0, le=1.0)
+    margin_x_percent: float = Field(default=2.4, ge=0, le=40)
+    margin_y_percent: float = Field(default=4.2, ge=0, le=40)
+    width_percent: float = Field(default=11.0, gt=0, le=60)
+    """Overlay mode only: the mark's width as a percent of content width."""
+    uppercase: bool = False
+
+    shows: list[str] = Field(default_factory=list)
+    """Empty means every show."""
+
+    skip_when_burned_in: bool = True
+    """Leave an episode alone when it already carries a corner mark."""
+
+    @property
+    def enabled(self) -> bool:
+        return self.mode != "none"
+
+
 class ShowConfig(_Model):
     title: str
     folder: str
@@ -281,6 +334,7 @@ class RootConfig(_Model):
     days: list[DayConfig]
     ads: AdsConfig = Field(default_factory=AdsConfig)
     bumps: BumpConfig = Field(default_factory=BumpConfig)
+    watermark: WatermarkConfig = Field(default_factory=WatermarkConfig)
     encoding: Resolution = Field(default_factory=Resolution)
     media_root: str = "media"
 
@@ -410,6 +464,9 @@ def load_config(config_dir: Path) -> RootConfig:
         payload["ads"] = raw_ads.get("ads", raw_ads)
     if raw_bumps:
         payload["bumps"] = raw_bumps.get("bumps", raw_bumps)
+    raw_watermark = load("watermark.yaml", required=False)
+    if raw_watermark:
+        payload["watermark"] = raw_watermark.get("watermark", raw_watermark)
 
     try:
         return RootConfig.model_validate(payload)
@@ -455,6 +512,7 @@ __all__ = [
     "Resolution",
     "RootConfig",
     "ShowConfig",
+    "WatermarkConfig",
     "dump_config",
     "load_config",
     "parse_duration_ms",

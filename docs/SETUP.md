@@ -193,6 +193,54 @@ Two things worth knowing:
   15.0–15.4 s, so `continuity.yaml` uses `max_seconds: 16`. A 12 s cap silently
   rejects ~350 of 600 imported cards.
 
+### The corner bug (watermark)
+
+[adult swim] ran a persistent ``[adult swim]`` mark bottom-right of every
+programme, and library rips almost never have it — one of the fastest ways to
+tell a media server from a broadcast. `config/watermark.yaml` puts it back, three
+ways:
+
+```yaml
+watermark:
+  mode: "overlay"   # none | overlay | burn
+```
+
+| Mode | How | Cost |
+|---|---|---|
+| `none` | nothing | — |
+| `overlay` | the streamer composites a card per item during the transcode it already runs | free; needs a build whose playout schema has `graphics` |
+| `burn` | ffmpeg writes a marked copy to `media/derived/watermark/`, and that copy airs | one encode per episode + disk |
+
+**The typeface.** The wordmark is Helvetica Neue Condensed Bold. That font ships
+with nothing and is not redistributable, so it is resolved through a chain: the
+real face if present, otherwise a bold Helvetica-metric face (Arial on Windows,
+Liberation Sans in a container) squeezed horizontally by `condense: 0.84` — the
+ratio between the condensed and plain cuts. Set `font:` to an absolute path to
+use a specific file.
+
+**Which items.** Only episodes. Commercials and bumpers were never bugged, so
+they are excluded structurally rather than by a filter. `shows: []` means every
+show; list ids to restrict it.
+
+**Overlay vs burn.** `overlay` sets `within_source_content: true`, so the mark
+stays inside the visible picture and moves inward when letterbox or pillarbox
+bars appear — which a fixed pixel offset cannot do. `burn` instead asks a
+question per episode: `skip_when_burned_in` looks at the corner and leaves the
+file alone if a mark is already there, so you never get two stacked in the same
+corner.
+
+```powershell
+.\run.ps1 watermark            # burn mode: dry run, says what it would encode
+.\run.ps1 watermark --apply    # actually encode into media/derived/watermark/
+```
+
+> The card lives in `media/derived/`, **not** `data/`. The streamer mounts only
+> the media tree, so a card written to `data/` is created by the scheduler and
+> then unreadable by the process that has to composite it — which showed up as
+> `/app/data/watermark.png: No such file or directory` and every episode
+> replaced by black. `media/` is mounted read-only for the scheduler, so
+> `media/derived` is remounted writable on its own.
+
 ## 2. Configure the channel
 
 Edit `config/channel.yaml`:

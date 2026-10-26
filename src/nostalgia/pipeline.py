@@ -42,6 +42,48 @@ class BuildResult:
     lineup: Path | None = None
 
 
+def watermark_card_path(paths: Paths) -> Path:
+    """Folder holding the rendered mark card.
+
+    Deliberately under ``media/`` rather than ``data/``: the streamer only mounts
+    the media tree, so a card in ``data/`` is written by the scheduler and then
+    invisible to the process that has to composite it -- which showed up as
+    ``/app/data/watermark.png: No such file or directory`` and every episode
+    silently replaced by black. It is not catalogued because the scanner only
+    walks the shows/bumps/commercials/idents roots.
+    """
+    return paths.media("derived")
+
+
+def _overlay_layer(config: RootConfig, paths: Paths) -> dict | None:
+    """Build the playout ``graphics`` layer, or ``None`` when not in overlay mode.
+
+    The card is rendered lazily and cached under ``media/derived/``, which is the
+    one tree the streamer is guaranteed to have mounted.
+    """
+    from .watermark import WatermarkError, card_asset, graphics_layer, look_from_config
+
+    if config.watermark.mode != "overlay":
+        return None
+    look = look_from_config(config.watermark)
+    try:
+        card = card_asset(
+            look,
+            width=config.encoding.width,
+            height=config.encoding.height,
+            ffmpeg=config.channel.ffmpeg_path,
+            # The *folder*, not its parent: taking `.parent` wrote the card into
+            # the media root, which is read-only in the container.
+            cache_dir=watermark_card_path(paths),
+        )
+    except WatermarkError:
+        return None
+    return graphics_layer(
+        look,
+        path=str(paths.saw(card)).replace("\\", "/"),
+    )
+
+
 def _is_video(path: Path) -> bool:
     from .probe import VIDEO_EXTENSIONS
 
@@ -81,6 +123,8 @@ def scan(
         ident_root=paths.media("idents"),
         ffprobe_path=ffprobe_path or config.channel.ffmpeg_path,
         write_sidecars=write_sidecars,
+        # Composited watermark copies, when burn mode has produced any.
+        derived_root=paths.media("derived", "watermark"),
     )
 
 
@@ -127,6 +171,9 @@ def build(
 
     result = BuildResult()
     emit_paths = EmitPaths(paths.playout_dir, paths.xmltv_dir)
+    # Overlay mode only. Burn mode already replaced the paths during scan, so a
+    # layer here would double the mark; `plan.watermark_rule` enforces that.
+    watermark_layer = _overlay_layer(config, paths)
 
     for offset in range(horizon):
         day = start_day + timedelta(days=offset)
@@ -148,7 +195,9 @@ def build(
         result.fallback_reasons.extend(plan.bump_fallback_reasons)
 
         if emit:
-            result.playout_files.append(write_playout(plan, emit_paths))
+            result.playout_files.append(
+                write_playout(plan, emit_paths, watermark_layer=watermark_layer)
+            )
             result.xmltv_files.append(write_xmltv(plan, emit_paths))
 
     if emit:

@@ -32,6 +32,7 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `plan` | Ties the above into one timeline; enforces invariants | pure |
 | `emit` | Plan → playout JSON, XMLTV, lineup/channel config | writes files |
 | `mediaimport` | Download → library layout: alias match, filename parse, dry-run plan | pure |
+| `watermark` | The corner bug: card render, placement layer, burn compositing | writes files |
 | `catalog` | Scan, tags, airing history (SQLite) | I/O |
 | `probe` | ffprobe with a sidecar fallback | I/O |
 | `bumpgen` | Render typographic cards with ffmpeg | I/O |
@@ -213,6 +214,32 @@ broadcaster does, and what makes "9pm" mean 9pm.
 Tags live in a `.tags.json` sidecar next to each file, which is what lets
 `bumps/generated/` be a folder that is *not* a show. The sidecar is also what the
 review queue writes, so there is one on-disk representation of "what this bump is".
+
+## The corner bug belongs to one side or the other
+
+A watermark can be applied by the scheduler or by the streamer, and doing both
+gives you two bugs in the corner. So `plan.watermark_rule` returns a rule **only**
+in `overlay` mode: in `burn` mode the file on disk already carries the mark and
+the planner must not also flag the item.
+
+`burn` swaps the *path* during scan (`media/derived/watermark/<key>.mkv` replaces
+the original, resolved before probing so only the file that will air is
+measured). `overlay` sets a `graphics` layer per item instead. Neither requires
+anything downstream to know what a watermark is.
+
+Two facts this rests on, both verified against the running image rather than
+assumed:
+
+* The playout schema's `graphics[].location` accepts `bottom_right`, and
+  `within_source_content` keeps the mark inside the visible picture when bars
+  appear. That is why overlay is preferred over a fixed pixel offset.
+* Rendering the mark as a card with alpha needs `colorkey`. Neither
+  `color=c=black@0.0` nor a `geq` alpha channel survives ffmpeg — both came back
+  with alpha 255 when measured, which would have painted an opaque black box over
+  every episode.
+
+The card lives under `media/derived/` because the streamer mounts only the media
+tree; a copy in `data/` is written but unreadable by the compositor.
 
 ## Guessing happens once, in one place
 

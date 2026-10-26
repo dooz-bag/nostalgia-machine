@@ -1,0 +1,55 @@
+# The corner bug -- the [adult swim] mark in the bottom-right of every programme.
+#
+# Library rips usually do not have it, which is one of the fastest ways to notice
+# that a channel is a media server rather than a broadcast. Two ways to put it
+# back, and they cost different things:
+#
+#   none      no mark (default: stay out of the way until you ask)
+#   overlay   the streamer composites it per item during the transcode it is
+#             already running. Cheapest, nothing re-encoded, nothing to store.
+#             Needs a build whose playout schema has `graphics` -- confirm with
+#             `nostalgia doctor`, which checks the running image.
+#   burn      ffmpeg composites a marked copy into the media tree
+#             (media/derived/watermark/), and the copy is what airs. Works on any
+#             streamer, costs disk and one encode per episode, and is fully
+#             reversible by deleting that folder.
+#
+# `burn` respects skip_when_burned_in: it looks at the bottom-right corner of
+# each episode and leaves it alone if a mark is already there, so you never get
+# two bugs stacked in the corner.
+watermark:
+  mode: "overlay"
+
+  # The mark itself. Kept as fractions of the frame so a 4:3 rip and a 16:9
+  # episode each get a mark sized to their own picture rather than one fixed
+  # pixel size that looks wrong on half the library.
+  text: "[adult swim]"
+
+  # The wordmark was set in Helvetica Neue Condensed Bold. That font ships with
+  # nothing and is not free to redistribute, so this is resolved through a chain
+  # (see FONT_CHAIN in src/nostalgia/watermark.py): the real face if the machine
+  # has it, otherwise a bold Helvetica-metric face -- Liberation Sans in a
+  # container, Arial on Windows -- squeezed by `condense` to condensed width.
+  # A plain bold face is 0.84 the width of the condensed cut, which is what makes
+  # the fallback read as the real thing rather than as plain bold.
+  font: "Helvetica Neue Condensed Bold"
+  condense: 0.84
+
+  font_size: 0.026        # fraction of frame height; a bug is small
+  colour: "white"
+  opacity: 0.88
+  uppercase: false
+
+  # Distance from the corner, in percent of frame width/height.
+  margin_x_percent: 2.4
+  margin_y_percent: 4.2
+
+  # overlay mode only: scale the mark to this percent of the content width.
+  width_percent: 11.0
+
+  # Which shows get it. Empty = every show. Commercials and bumpers never do,
+  # because [adult swim] did not bug them.
+  shows: []
+
+  # burn mode: skip an episode that already has a corner mark burned in.
+  skip_when_burned_in: true

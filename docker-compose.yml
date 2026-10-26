@@ -32,6 +32,11 @@ services:
       - ./lineup:/app/lineup
       # The bump renderer writes here, so the media mount must expose it.
       - ${GENERATED_BUMP_DIR:-./media/bumps/generated}:/app/media/bumps/generated
+      # The watermark card is rendered here (overlay mode). It has to live under
+      # media/ -- the streamer mounts only that tree, so a card in data/ is
+      # written but never readable by the process that composites it -- yet the
+      # media mount itself is read-only, so this one subfolder is remounted rw.
+      - ./media/derived:/app/media/derived
     # Regenerate the plan on a loop. `emit` is idempotent, so re-running is safe
     # and is what keeps the horizon rolling without a restart.
     command:

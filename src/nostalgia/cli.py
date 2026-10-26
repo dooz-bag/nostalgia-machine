@@ -46,6 +46,7 @@ def main(argv: list[str] | None = None) -> int:
         "bumps": _cmd_bumps,
         "autotag": _cmd_autotag,
         "import": _cmd_import,
+        "watermark": _cmd_watermark,
         "tag": _cmd_tag,
         "serve": _cmd_serve,
     }[args.command]
@@ -115,6 +116,24 @@ def _parser() -> argparse.ArgumentParser:
         "--min-confidence", type=float, default=0.3, help="threshold for --write"
     )
     autotag_cmd.add_argument("--limit", type=int, default=None, help="examine at most N bumps")
+
+    mark_cmd = sub.add_parser(
+        "watermark", help="composite the corner bug into the media (burn mode)"
+    )
+    mark_cmd.add_argument(
+        "--apply", action="store_true", help="actually encode (default is a dry run)"
+    )
+    mark_cmd.add_argument(
+        "--force", action="store_true", help="re-encode episodes already composited"
+    )
+    mark_cmd.add_argument(
+        "--no-skip",
+        action="store_true",
+        help="composite even when a mark is already burned in",
+    )
+    mark_cmd.add_argument(
+        "--only", default=None, help="just this show id"
+    )
 
     import_cmd = sub.add_parser(
         "import", help="file a downloaded show into media/shows/<show-id>/Season NN/"
@@ -418,6 +437,68 @@ def _cmd_autotag(args, config, paths: Paths) -> int:
     else:
         print("\nProposals saved as unconfirmed sidecars; confirm them with 'nostalgia review'.")
     return 0
+
+
+def _cmd_watermark(args, config, paths: Paths) -> int:
+    from .watermark import (
+        WatermarkError,
+        composite_library,
+        look_from_config,
+        render_text_card,
+        rule_from_config,
+    )
+
+    if config.watermark.mode != "burn":
+        print(
+            f"watermark mode is {config.watermark.mode!r}; nothing to composite.\n"
+            "  set `mode: burn` in config/watermark.yaml to bake the mark in,\n"
+            "  or `mode: overlay` to have the streamer add it (no re-encode)."
+        )
+        return 0
+
+    look = look_from_config(config.watermark)
+    rule = rule_from_config(config.watermark)
+    if args.no_skip:
+        rule = type(rule)(
+            enabled=rule.enabled,
+            shows=rule.shows,
+            era_from=rule.era_from,
+            era_to=rule.era_to,
+            skip_when_burned_in=False,
+        )
+
+    with Catalog(paths.catalog) as catalog:
+        episodes = catalog.episodes(args.only)
+        if not episodes:
+            print("no episodes catalogued; run 'nostalgia scan' first", file=sys.stderr)
+            return 1
+        items = [(episode.key, Path(episode.path)) for episode in episodes]
+        out_dir = paths.media("derived", "watermark")
+        report = composite_library(
+            items,
+            look=look,
+            out_dir=out_dir,
+            rule=rule,
+            era_year=config.era_year,
+            ffmpeg=config.channel.ffmpeg_path,
+            force=args.force,
+            dry_run=not args.apply,
+        )
+
+    if not args.apply:
+        print(f"{len(items)} episode(s) checked; {report.made} would be composited")
+        print("This is a dry run. Re-run with --apply to encode.")
+        return 0
+
+    print(report.line())
+    for error in report.errors[:8]:
+        print(f"  error: {error}", file=sys.stderr)
+    if report.made or report.reused:
+        print(
+            f"\ncomposited copies are in {out_dir}"
+            "\nnext: nostalgia scan   # the catalog picks the marked copies up"
+        )
+    return 1 if report.failed else 0
 
 
 def _cmd_import(args, config, paths: Paths) -> int:

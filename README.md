@@ -175,6 +175,7 @@ or to build a "what if [adult swim] picked it up in 2004" timeline:
 | `config/days/*.yaml` | Dayparts: which shows run at which hours |
 | `config/continuity.yaml` | Break structure per slot family: bumps, pods (`share`/`seconds`), mid-rolls |
 | `config/ads.yaml` | Pod targets, era drift, pod tolerance, trim slop |
+| `config/watermark.yaml` | The corner bug: mode, typeface, placement, which shows |
 | `config/bumps.yaml` | Match strictness, cooldowns, generated-bump limits |
 | `config/bumps-era.yaml` | The look of generated cards, by year |
 
@@ -208,6 +209,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia doctor` | Check config, ffmpeg, library and catalog |
 | `nostalgia shows` | List shows and episode counts (`--verbose`) |
 | `nostalgia import` | File a download into `media/shows/<id>/Season NN/` (dry run by default, never overwrites) |
+| `nostalgia watermark` | Composite the `[adult swim]` corner bug into the media (burn mode) |
 | `nostalgia review` | List bumps awaiting subject confirmation |
 | `nostalgia tag` | Confirm one bump's subject from the terminal |
 | `nostalgia bumps` | Render generated bump cards (`--dry-run`, `--style`) |
