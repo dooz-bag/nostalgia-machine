@@ -38,6 +38,7 @@ class BuildResult:
     xmltv_files: list[Path] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     fallbacks: int = 0
+    fallback_reasons: list[str] = field(default_factory=list)
     lineup: Path | None = None
 
 
@@ -138,6 +139,7 @@ def build(
         result.plans.append(plan)
         result.warnings.extend(plan.warnings)
         result.fallbacks += len(plan.bump_fallbacks)
+        result.fallback_reasons.extend(plan.bump_fallback_reasons)
 
         if emit:
             result.playout_files.append(write_playout(plan, emit_paths))

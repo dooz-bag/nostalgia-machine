@@ -16,6 +16,12 @@ channel:
   # use today, which is what you want on a live channel.
   # on_air_date: "2003-06-15"
 
+  # The year the channel is pretending to be in. This is what decides which
+  # commercials are eligible and what the generated bumps look like -- it must
+  # NOT follow the wall clock, or a 2003 channel airs 2026's ads. Leave
+  # commented to derive it from on_air_date, then bumps.generated.era_year.
+  era_year: 2003
+
   # Plan this many days ahead. ErsatzTV Next picks up new files without a restart.
   horizon_days: 3
 

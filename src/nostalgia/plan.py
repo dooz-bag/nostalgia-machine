@@ -85,7 +85,13 @@ class Plan:
     items: list[PlannedItem] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     bump_fallbacks: list[str] = field(default_factory=list)
-    """Item ids where a neutral bump stepped in for a missing show-specific one."""
+    """Item ids where a neutral bump stepped in for a missing show-specific one.
+
+    These are *emitted* item ids, so a caller can look the card up in ``items``.
+    """
+
+    bump_fallback_reasons: list[str] = field(default_factory=list)
+    """Why each fallback happened, in the same order as :attr:`bump_fallbacks`."""
 
     day_start_ms: int = 0
     day_end_ms: int = 0
@@ -357,11 +363,9 @@ def render_generated_bumps(
         raise PlanError(f"unknown style pack {style_pack!r}; available: {available}")
 
     titles = {show_id: show.title for show_id, show in context.root.shows.items()}
-    # The era decides the look: a channel pinned to a date renders that decade's
-    # cards, and an unpinned nostalgia channel falls back to the configured year
-    # rather than "now".
-    channel = context.root.channel
-    year = channel.on_air_date.year if channel.on_air_date else context.root.bumps.generated.era_year
+    # The era decides the look. Never "now": a nostalgia channel that renders
+    # this year's cards for a 2003 season is the wrong channel.
+    year = context.root.era_year
     specs = specs_for_schedule(
         shows=[show_id for show_id, show in context.root.shows.items() if show.enable],
         titles=titles,
@@ -430,11 +434,15 @@ def _plan_slot(
     plan.warnings.extend(f"{prefix}: {warning}" for warning in script.warnings)
 
     show = root.shows.get(assigned.show_id)
+    # The timeline's date is a real date so the stream is consumable today, but
+    # era matching is about the year being *recreated*. Using plan.day.year here
+    # would score every 2003 card as 23 years stale.
+    era_year = root.era_year
     request_base = dict(
         this_show=assigned.show_id,
         next_show=next_assigned.show_id if next_assigned else None,
         prev_show=prev_assigned.show_id if prev_assigned else None,
-        year=plan.day.year,
+        year=era_year,
         family=show.family if show else None,
         era_drift=root.ads.era_drift_years,
     )
@@ -480,7 +488,15 @@ def _plan_slot(
         bump_assets[index] = asset
         bump_reasons[index] = choice.reason
         if choice.fallback:
-            plan.bump_fallbacks.append(f"{plan.day:%Y%m%d}-{slot.index:04d}-b{index}")
+            # The same id the item is emitted under below, so a caller can
+            # actually find the card that fell back.
+            plan.bump_fallbacks.append(
+                f"{plan.day:%Y%m%d}-{slot.index:04d}-b{index:02d}"
+            )
+            plan.bump_fallback_reasons.append(
+                f"{plan.day} slot {slot.index}: {spec.subject}:{spec.position} "
+                f"had no show-specific card ({choice.reason})"
+            )
         if asset.is_generated:
             generated_budget.take()
 
@@ -531,20 +547,20 @@ def _plan_slot(
     cursor_ms = slot.start_ms
     emitted = 0
 
-    # Only spots whose era covers this day may air, so a 2000 tape does not turn
-    # up in a 2008 break. Untagged spots stay eligible.
-    ad_pool, widened = era_ad_pool(context.ads, plan.day.year, root.ads.era_drift_years)
+    # Only spots whose era covers the channel's era may air, so a 2000 tape does
+    # not turn up in a 2008 break. Untagged spots stay eligible.
+    ad_pool, widened = era_ad_pool(context.ads, era_year, root.ads.era_drift_years)
     if widened and not any("match era" in warning for warning in plan.warnings):
         matching = sum(
             1
             for asset in context.ads
             if asset.era_from is not None
-            and asset.era_covers(plan.day.year, root.ads.era_drift_years)
+            and asset.era_covers(era_year, root.ads.era_drift_years)
         )
         plan.warnings.append(
-            f"{prefix}: only {matching} commercial(s) match era {plan.day.year} "
+            f"{prefix}: only {matching} commercial(s) match era {era_year} "
             f"+/-{root.ads.era_drift_years}y; widened to the whole pool -- add "
-            f"spots under media/commercials/{plan.day.year}/"
+            f"spots under media/commercials/{era_year}/"
         )
 
     for index, spec in enumerate(script.specs):

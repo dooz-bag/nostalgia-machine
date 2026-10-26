@@ -254,6 +254,15 @@ class ChannelConfig(_Model):
     on_air_date: date | None = None
     """Wall-clock date that maps to the channel's "start"; defaults to today."""
 
+    era_year: int | None = Field(default=None, ge=1900, le=2999)
+    """The year the channel is *pretending* to be in.
+
+    The timeline has to carry a real date so the stream and the EPG can be
+    consumed today, but every era decision -- which spots, which bump look, which
+    card style -- must use the year being recreated. Left unset it falls back to
+    ``on_air_date``, then to ``bumps.generated.era_year``.
+    """
+
     horizon_days: int = Field(default=3, ge=1, le=14)
     ffmpeg_path: str | None = None
 
@@ -274,6 +283,19 @@ class RootConfig(_Model):
     bumps: BumpConfig = Field(default_factory=BumpConfig)
     encoding: Resolution = Field(default_factory=Resolution)
     media_root: str = "media"
+
+    @property
+    def era_year(self) -> int:
+        """The year the channel is pretending to be in.
+
+        Never "this year": a nostalgia channel whose era follows the wall clock
+        airs the wrong decade's spots and renders the wrong decade's cards.
+        """
+        if self.channel.era_year is not None:
+            return self.channel.era_year
+        if self.channel.on_air_date is not None:
+            return self.channel.on_air_date.year
+        return self.bumps.generated.era_year
 
     @model_validator(mode="after")
     def _cross_reference(self) -> "RootConfig":

@@ -123,11 +123,18 @@ remaining break budget, not by a fixed number of seconds, because a library's
 "up next" card or leave a long tail.
 
 **Commercials respect their era.** A spot filed under `media/commercials/2003/` can
-air on a 2003 day; `ads.era_drift_years` (default 2) widens that window, and
+air on a 2003 channel; `ads.era_drift_years` (default 2) widens that window, and
 untagged spots stay eligible because "unknown year" is not "wrong year". If the
 era-appropriate pool is too thin to fill breaks, the planner widens to the whole
 pool rather than airing the same handful of spots twelve times — and says so in
 `plan.warnings`.
+
+Note that the era is `channel.era_year` (2003), *not* the date being planned. The
+timeline carries a real date so the stream and its guide are consumable today, but
+a nostalgia channel whose era followed the wall clock would air 2026's commercials
+and render 2026's cards for a 2003 season. `era_year` falls back to `on_air_date`,
+then to `bumps.generated.era_year`, and `tests/test_era_year.py` pins the
+distinction.
 
 **Pod filling is bounded.** Subset-sum runs on real, ragged durations (15.015 s,
 30.021 s, 60.26 s), where a naive search over ~50 spots needs tens of millions of

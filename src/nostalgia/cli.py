@@ -220,10 +220,20 @@ def _run_build(args, config, paths: Paths, *, emit: bool, show: bool, quiet: boo
             print(f"  ... and {len(result.warnings) - 25} more")
 
     if result.fallbacks:
-        print(
-            f"\n{result.fallbacks} bump slot(s) fell back to a neutral bump "
-            f"(see 'nostalgia review')"
-        )
+        # Only point at the review queue when there is something in it. A
+        # fallback on a fully-tagged library means the archive has no card for
+        # that show at that moment, which is ordinary operation.
+        print(f"\n{result.fallbacks} bump slot(s) fell back to a neutral bump")
+        for reason in result.fallback_reasons[:5]:
+            print(f"  {reason}")
+        pending = _pending_tag_count(paths)
+        if pending:
+            print(f"  {pending} card(s) are awaiting a subject: 'nostalgia review'")
+        else:
+            print(
+                "  every bump is tagged; add more cards under media/bumps/<show-id>/ "
+                "for more variety"
+            )
 
     if emit:
         print(f"\nwrote {len(result.playout_files)} playout file(s) to {paths.playout_dir}")
@@ -235,6 +245,15 @@ def _run_build(args, config, paths: Paths, *, emit: bool, show: bool, quiet: boo
             "http://localhost:8409/channels.m3u"
         )
     return 0
+
+
+def _pending_tag_count(paths: Paths) -> int:
+    """How many bumps are still waiting for a human, or 0 if it cannot be read."""
+    try:
+        with Catalog(paths.catalog) as catalog:
+            return len(catalog.tags_pending_review())
+    except Exception:  # noqa: BLE001 - a hint must never fail the build
+        return 0
 
 
 def _cmd_doctor(args, config, paths: Paths) -> int:
@@ -300,11 +319,7 @@ def _cmd_bumps(args, config, paths: Paths) -> int:
 
         era_file = paths.config_dir / "bumps-era.yaml"
         pack = load_era_packs(era_file)
-        year = (
-            config.channel.on_air_date.year
-            if config.channel.on_air_date
-            else config.bumps.generated.era_year
-        )
+        year = config.era_year
         style = pack.style_for(year) if not args.style else pack.styles.get(args.style)
         if style is None:
             print(f"error: unknown style pack {args.style!r}", file=sys.stderr)

@@ -140,8 +140,12 @@ The ladder, in order:
 2. If every such asset is cooling down, the best one anyway (`all-cooling`). A
    recycled correct bump beats a generic one.
 3. A **generated** card naming the target show, if `max_share` allows.
-4. A **neutral** card (`neutral-fallback`) — logged in `plan.bump_fallbacks` so it
-   can be counted, surfaced in the UI, and fixed by adding assets.
+4. A **neutral** card (`neutral-fallback`) — logged in `plan.bump_fallbacks`
+   (emitted item ids) and `plan.bump_fallback_reasons` (why), so it can be counted,
+   surfaced in the UI, and fixed by adding assets.
+
+Note the ids match the emitted `PlannedItem.item_id` exactly: an id that cannot be
+looked up in `plan.items` is worse than no id at all.
 
 A wrong *specific* show scores below zero and is never eligible. `bumps.strictness:
 off` relaxes that into "prefer correct, tolerate wrong", which is occasionally
@@ -150,6 +154,28 @@ useful when building a pool and is never the default.
 Position (`INTO`/`OUT`/`NEXT`/`AFTER`) comes from the break template, not the
 asset, which is what makes `next` mean *the show that actually follows*. The tail
 bump is resolved with the following slot's show in hand.
+
+## The era is not the date
+
+The timeline must carry a **real date** — a player and an EPG cannot be asked for
+"some evening in 2003" — but the era being recreated is a separate fact, and it is
+the one every era decision must use:
+
+| Decision | Uses |
+|---|---|
+| Slot boundaries, EPG timestamps, rotation ordinal | `plan.day` (the real date) |
+| Which commercials are eligible | `RootConfig.era_year` |
+| Which bump card style is rendered | `RootConfig.era_year` |
+| How a bump is scored against its era | `RootConfig.era_year` |
+
+They are the same number only when the channel is airing on its own launch date.
+Conflating them is a quiet failure rather than a loud one: a 2003 channel built
+from today's date filters every spot out (nothing matches 2026), widens to the whole
+pool, and renders 2020s-looking cards — while still producing a valid timeline. So
+`era_year` is a first-class config field, resolved once on `RootConfig`
+(`channel.era_year` → `on_air_date.year` → `bumps.generated.era_year`), and
+`tests/test_era_year.py` asserts a plan built for 2026 still only airs 2003-era
+spots.
 
 ## Slot families
 
