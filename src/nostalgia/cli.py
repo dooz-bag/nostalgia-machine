@@ -235,7 +235,6 @@ def _cmd_scan(args, config, paths: Paths) -> int:
             ffprobe_path=args.ffprobe,
             write_sidecars=args.sidecars,
             detect_burned_in=args.detect_marks,
-            ffmpeg_path=config.channel.ffmpeg_path,
         )
     print(f"scanned {report.total} files ({report.probed} probed, {report.from_sidecar} from sidecars)")
     if args.detect_marks:

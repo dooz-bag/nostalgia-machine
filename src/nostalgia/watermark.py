@@ -35,10 +35,10 @@ MARKABLE_KINDS = ("episode",)
 
 #: Fraction of the frame height reserved for the mark's own box, by era. The
 #: burned-in [adult swim] wordmark was small and tight to the corner.
-DEFAULT_WIDTH_PERCENT = 14.0
+DEFAULT_WIDTH_PERCENT = 20.0
 DEFAULT_MARGIN_X_PERCENT = 2.4
 DEFAULT_MARGIN_Y_PERCENT = 4.2
-DEFAULT_OPACITY_PERCENT = 72.0
+DEFAULT_OPACITY_PERCENT = 92.0
 
 #: How many of an episode's opening seconds to check when asking "is it already
 #: there?". A bug is present from the first frame, so a few seconds is enough.
@@ -283,22 +283,132 @@ def mark_filter(look: WatermarkLook, *, font_path: Path | None) -> str:
     if look.condense < 0.999 and not _is_condensed(font_path):
         # Horizontally squeeze, keeping the height: that is what turns a
         # Helvetica-metric bold into Helvetica Neue Condensed Bold.
-        filters.append(f"scale=iw*{look.condense:.3f}:ih")
-    # Trim to the ink, so the card is exactly the wordmark and the placement
-    # margins in the output are the real ones.
-    #
-    # `bbox` finds the ink, rather than cropping a fixed fraction. The previous
-    # `crop=iw*0.96:ih*0.96` cropped *symmetrically about the centre* while the
-    # text is drawn at x=0, so it removed ~31px from the left and ate the opening
-    # "[" entirely -- the mark rendered as "adult swim]" with a fragment of the
-    # closing bracket.
-    #
-    # The trailing `crop` is what makes the card's aspect ratio match the ink,
-    # which matters because the streamer scales the card to `width_percent`.
-    # A canvas far wider than the text therefore rendered a mark at roughly half
-    # the size it was asked for.
-    filters.append("bbox=min_val=40")
+        #
+        # `setsar=1` is not optional. Compressing the width makes ffmpeg set a
+        # compensating sample aspect ratio (2002:1681 here) to preserve the display
+        # shape -- correct for video, wrong for an overlay card, which the streamer
+        # scales by width alone. The result was a mark stretched ~19% wider than
+        # it should be.
+        filters.append(f"scale=iw*{look.condense:.3f}:ih,setsar=1")
+    # No crop here on purpose. Trimming to the ink has to be a *separate* pass,
+    # because there is no single-pass way to do it: `bbox` measures the ink and
+    # prints the box, but passes the frame through untouched (verified -- an
+    # 800x200 input comes out 800x200). See `_trim_to_ink`.
     return ",".join(filters)
+
+
+def _ink_extent(source: Path, *, threshold: int = 16) -> tuple[int, int, int, int] | None:
+    """The drawn pixels' bounding box, as ``(left, top, width, height)``.
+
+    Trimmed here rather than inside the filter chain because ffmpeg offers no
+    single-pass way to do it on an image with an alpha channel:
+
+    * ``cropdetect`` ignores alpha, and this card's background is *transparent
+      black*, so every row looks black and it detects the whole frame.
+    * ``bbox`` does measure alpha correctly, but it only **prints** the box and
+      passes the frame through untouched -- an 800x200 input comes out 800x200.
+      Using it as if it cropped left the card as wide as its canvas, so the
+      streamer's ``width_percent`` was scaling mostly empty space and the mark
+      rendered at about half the size it was asked for. That is why "make it
+      bigger" barely moved it.
+
+    Nothing else here needs image libraries (the container has none), and a PNG
+    with a known bit depth is cheap to walk, so this decodes just the alpha
+    channel.
+    """
+    import struct
+    import zlib
+
+    try:
+        data = source.read_bytes()
+    except OSError:
+        return None
+    if data[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+
+    width = height = depth = colour_type = None
+    compressed = bytearray()
+    position = 8
+    while position + 8 <= len(data):
+        (length,) = struct.unpack(">I", data[position : position + 4])
+        kind = data[position + 4 : position + 8]
+        body = data[position + 8 : position + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour_type = struct.unpack(">IIBB", body[:10])
+        elif kind == b"IDAT":
+            compressed += body
+        elif kind == b"IEND":
+            break
+        position += 12 + length
+
+    if not width or not height or depth not in (8, 16) or colour_type != 6:
+        return None
+    step = depth // 8
+    channels = 4
+    try:
+        raw = zlib.decompress(bytes(compressed))
+    except zlib.error:
+        return None
+
+    stride = width * channels * step
+    # Undo the per-row filters. Only the alpha byte of each pixel is needed, but
+    # the filters are defined on whole bytes, so the row has to be reconstructed
+    # before it can be read.
+    previous = bytearray(stride)
+    rows: list[bytearray] = []
+    offset = 0
+    for _ in range(height):
+        if offset >= len(raw):
+            return None
+        kind = raw[offset]
+        offset += 1
+        line = bytearray(raw[offset : offset + stride])
+        offset += stride
+        if len(line) < stride:
+            return None
+        if kind == 1:
+            for index in range(channels * step, stride):
+                line[index] = (line[index] + line[index - channels * step]) & 0xFF
+        elif kind == 2:
+            for index in range(stride):
+                line[index] = (line[index] + previous[index]) & 0xFF
+        elif kind == 3:
+            for index in range(stride):
+                left = line[index - channels * step] if index >= channels * step else 0
+                line[index] = (line[index] + ((left + previous[index]) >> 1)) & 0xFF
+        elif kind == 4:
+            for index in range(stride):
+                left = line[index - channels * step] if index >= channels * step else 0
+                up = previous[index]
+                upleft = previous[index - channels * step] if index >= channels * step else 0
+                estimate = left + up - upleft
+                pa, pb, pc = abs(estimate - left), abs(estimate - up), abs(estimate - upleft)
+                predictor = left if (pa <= pb and pa <= pc) else (up if pb <= pc else upleft)
+                line[index] = (line[index] + predictor) & 0xFF
+        elif kind != 0:
+            return None
+        rows.append(line)
+        previous = line
+
+    alpha_offset = 3 * step
+    top = height
+    bottom = -1
+    left = width
+    right = -1
+    for y, line in enumerate(rows):
+        for x in range(width):
+            if line[x * channels * step + alpha_offset] > threshold:
+                if x < left:
+                    left = x
+                if x > right:
+                    right = x
+                if y < top:
+                    top = y
+                if y > bottom:
+                    bottom = y
+    if right < left or bottom < top:
+        return None
+    return left, top, right - left + 1, bottom - top + 1
 
 
 def _font_option_path(path: Path | None, family: str) -> str:
@@ -807,6 +917,40 @@ def render_text_card(
             f"cannot render the watermark card (font {font_path}): "
             f"{result.stderr.strip()[:300]}"
         )
+
+    # Trim to the ink, so the card *is* the wordmark. The streamer scales the card
+    # to `width_percent` of the frame, so any empty canvas left in the card is a
+    # straight loss of visible size -- which is exactly what made "bigger" feel
+    # like it did nothing.
+    extent = _ink_extent(temporary)
+    if extent is not None:
+        left, top, ink_width, ink_height = extent
+        cropped = target.with_name(f".{target.name}.ink.png")
+        trim = subprocess.run(
+            [
+                binary,
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-i",
+                str(temporary),
+                "-vf",
+                f"crop={ink_width}:{ink_height}:{left}:{top},setsar=1",
+                "-frames:v",
+                "1",
+                "-y",
+                str(cropped),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        if trim.returncode == 0 and cropped.is_file():
+            cropped.replace(temporary)
+        else:
+            cropped.unlink(missing_ok=True)
+
     temporary.replace(target)
     return target
 

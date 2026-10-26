@@ -176,10 +176,10 @@ class WatermarkConfig(_Model):
     font_size: float = Field(default=0.033, gt=0, le=0.2)
     """As a fraction of frame height. A corner bug is small."""
     colour: str = "white"
-    opacity: float = Field(default=0.72, gt=0, le=1.0)
+    opacity: float = Field(default=0.92, gt=0, le=1.0)
     margin_x_percent: float = Field(default=2.4, ge=0, le=40)
     margin_y_percent: float = Field(default=4.2, ge=0, le=40)
-    width_percent: float = Field(default=14.0, gt=0, le=60)
+    width_percent: float = Field(default=20.0, gt=0, le=60)
     """Overlay mode only: the mark's width as a percent of content width."""
     uppercase: bool = False
 
