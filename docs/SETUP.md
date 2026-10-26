@@ -139,17 +139,54 @@ being told. Every file is classified and the count is printed:
 | Status | Meaning |
 |---|---|
 | `ok` | will be filed as `media/shows/<id>/Season NN/<id> - SxxExx.ext` |
-| `unknown-show` | folder matches no roster entry — add one to `shows.yaml`, or use `--show <id>` |
-| `unparsed` | it is a video but no season/episode can be found; rename it |
+| `unknown-show` | folder matches no roster entry — add one to `shows.yaml`, use `--show <id>`, or `--show-root FOLDER=ID` |
+| `unparsed` | it is a video but no season/episode can be found; usually a special or an extra |
 | `collision` | the target already exists — **never overwritten**, even with `--apply` |
-| `duplicate` | two files claim the same episode |
-| `too-small` | under `--min-mb` (default 20), i.e. a sample |
+| `duplicate` | the same episode claimed twice; the **larger** file wins, the other is named |
+| `extra` | a real video that is not an episode: a featurette, a deleted scene, a music video |
+| `too-small` | below `--min-mb` *and* too short to be an episode |
+
+`too-small` and `extra` are both "not imported" but they mean different things, and
+the distinction matters when reading a dry run: `extra` is a deliberate non-episode,
+`too-small` is a file that could not be identified.
+
+**Size is not a good test for "is this an episode".** A 240p TV rip of an 11-minute
+show is 9–17 MB, while a 30-second promo can be larger — an earlier version of this
+command discarded 28 real Brak Show episodes that way. Files under `--min-mb` are
+therefore checked by *runtime* (via ffprobe, or a `.json` sidecar): anything over
+four minutes is treated as a low-bitrate episode and imported. Only files under the
+floor are probed, so a normal import does not spend minutes probing the whole tree.
+
+Two other rules earn their keep on real downloads:
+
+- **Featurettes are excluded by folder, not filename.** `2) Hank Hill.mkv` inside
+  `The Arlen School of Drawing` would otherwise parse as season 2 episode 0, and a
+  74 MB "animatic" can outbid the 40 MB broadcast cut for the same slot. A folder
+  named `Specials` is *not* excluded — it holds real `S00E01 - Pilot.mkv` content.
+- **`1001 - Title.mkv` in `Season 10` is season 10, episode 1.** Read naively that
+  is episode 100; the season folder is what splits the digits. A leading number that
+  *disagrees* with the folder is reported rather than guessed, so a multi-season
+  release is visible instead of silently mis-filed.
 
 Three deliberate safeguards: it **copies** unless you pass `--move`, it **never
 overwrites** a file already in the library unless you pass `--overwrite`, and it
 rewrites names to the library's own `SxxExx` form instead of preserving whatever
 the release group used. Use `--show <id>` when a folder name is unhelpful and
 `--min-mb 0` only for a test library.
+
+When importing several series at once, declare the ones whose folder or filenames
+do not name them:
+
+```powershell
+.\run.ps1 import "D:\Video Library\Nostalgia Machine Shows" `
+    --show-root "King of the Hill=king-of-the-hill" `
+    --show-root "Harvey.Birdman.Attorney.At.Law.Complete=harvey-birdman" `
+    --apply
+```
+
+`--show-root` is repeatable and beats every heuristic, which is what you want for a
+release with an ordinary inner folder name (`King of the Hill/King of the Hill/…`)
+or one that only identifies the show in a mangled filename.
 
 Then, as always: `.\run.ps1 scan`, then `.\run.ps1 plan --show` to confirm the
 episode actually lands in the schedule.
