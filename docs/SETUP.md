@@ -424,8 +424,26 @@ of the channel, not because it would be more accurate here.
 
 ### Programming the channel from the web page
 
-Open `nostalgia serve` and go to **Schedule** (`/schedule`). This is the one place
-you can change *what the channel is* without editing YAML.
+Docker runs the page as its own service, so it is up whenever the stack is:
+
+| Page | URL |
+|---|---|
+| On now | `http://<host>:8099/` |
+| Schedule | `http://<host>:8099/schedule` |
+| Bump review | `http://<host>:8099/bumps` |
+
+Published on `${WEB_PORT:-8099}`, and bound to `0.0.0.0` inside the container —
+a `127.0.0.1` bind there is the *container's* loopback, so it would be
+unreachable from the network however the port is published.
+
+Running natively instead:
+
+```bash
+nostalgia serve --host 0.0.0.0 --port 8099
+```
+
+Go to **Schedule** (`/schedule`). This is the one place you can change *what the
+channel is* without editing YAML.
 
 Three modes, and they are exclusive:
 
