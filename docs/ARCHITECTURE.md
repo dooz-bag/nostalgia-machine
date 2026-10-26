@@ -110,8 +110,19 @@ difference. A template decides the *shape* of that break -- where the bumps and
 pods sit, and how much of it each pod claims -- and the tail pod absorbs the
 remainder. Consequently no combination of `share`/`seconds` can change how much
 of the day is commercials: only the slot family (or which show occupies a slot)
-can. `doctor` reports the resulting figure so it is a number you read rather than
-one you infer from a plan.
+can.
+
+`doctor` reports two numbers, and the distinction matters:
+
+* **ad minutes/hour** -- what a real plan spends on spots. This is the figure
+  with a real-world reference point (US cable ≈14-16 min/hour), and it needs an
+  actual plan because pod filling is a subset-sum over ragged durations.
+* **break minutes/hour** -- the arithmetic `slot - episode` total that templates
+  divide. The difference between the two is bumps.
+
+They are not interchangeable. Quoting only the second reads as "27% of the
+channel is commercials" when the spots are 14.5 min/hour and the remainder is
+continuity, which on [adult swim] was the point rather than the padding.
 
 The resolution order for a slot's template is daypart `template:` → show `slot:`
 → slot `family`. The daypart is the most specific statement about *this block of

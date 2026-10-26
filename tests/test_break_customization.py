@@ -156,6 +156,73 @@ def test_a_template_can_ask_for_a_fixed_total_in_seconds() -> None:
     assert budget.reserved_ms == 180_000
 
 
+# -- the reported figures ---------------------------------------------------
+
+
+def test_the_summary_separates_commercials_from_bumps(config, catalog) -> None:
+    """Conflating them overstates the ad load by ~1.5 min/hour and makes an
+    authentic channel look wrong. Spots and continuity are different things."""
+    from nostalgia.pipeline import break_budget_summary
+
+    summary = break_budget_summary(config, catalog)
+    assert summary["ad_minutes"] > 0
+    assert summary["bump_minutes"] > 0
+    assert summary["ad_minutes"] < summary["break_minutes"]
+    assert summary["ad_minutes"] + summary["bump_minutes"] <= summary["break_minutes"] + 1
+
+
+def test_the_ad_rate_is_computed_per_hour_not_per_cent(config, catalog) -> None:
+    from nostalgia.pipeline import break_budget_summary
+
+    summary = break_budget_summary(config, catalog)
+    assert summary["ad_per_hour"] == pytest.approx(
+        summary["ad_minutes"] / 24, rel=0.01
+    )
+
+
+def test_a_realistic_configuration_sits_inside_the_cable_band(config, catalog) -> None:
+    """US cable ran ~14-16 min/hour of spots; the default config must too."""
+    from nostalgia.pipeline import break_budget_summary
+
+    rate = break_budget_summary(config, catalog)["ad_per_hour"]
+    assert 8 <= rate <= 20, f"{rate:.1f} min/hour looks like a misconfiguration"
+
+
+def test_doctor_reports_both_figures(config, catalog, paths) -> None:
+    from nostalgia.pipeline import doctor
+
+    lines = [message for _l, area, message in doctor(config, catalog, paths) if area == "breaks"]
+    assert any("commercials" in line for line in lines), lines
+    assert any("break budget" in line for line in lines), lines
+
+
+def test_doctor_warns_when_the_ad_load_is_far_too_high(config, catalog, paths) -> None:
+    """An hour slot around a 22-minute episode is ~63% break; that must flag."""
+    from nostalgia.pipeline import doctor
+
+    library = catalog
+    # Rebuild the day file with hour slots so the ratio is unmistakable.
+    day_file = next((paths.config_dir / "days").glob("*.yaml"))
+    original = day_file.read_text(encoding="utf-8")
+    try:
+        import yaml
+
+        data = yaml.safe_load(original)
+        for part in data["days"][0]["dayparts"]:
+            part["family"] = "hour"
+            part["slots"] = None
+            part.pop("slots", None)
+        day_file.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+        from nostalgia.config import load_config
+
+        loud = load_config(paths.config_dir)
+        findings = [f for f in doctor(loud, library, paths) if f[1] == "breaks"]
+        assert any(level == "warn" for level, _a, _m in findings), findings
+    finally:
+        day_file.write_text(original, encoding="utf-8")
+
+
 def test_an_overlong_explicit_pod_is_shrunk_not_overflowed() -> None:
     """A 90s pod in a slot with only 60s of break must not push the grid."""
     from nostalgia.continuity import build_script, plan_budget

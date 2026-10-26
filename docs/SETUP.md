@@ -275,12 +275,21 @@ bumps sit *inside* that break — the tail pod absorbs whatever the template doe
 not spend, so **no template can change the total**. Measured on the default
 config: 347.7 min/day (24%) whatever the shares are.
 
-`nostalgia doctor` prints the number so you never have to guess:
+`nostalgia doctor` prints **two** figures, because they answer different questions
+and conflating them makes an authentic channel look wrong:
 
 ```
-[ ok] breaks   384 min/day of break (16.0 min per hour, 27% of the day)
-               -- slot minus episode, so pod shares only redistribute it
+[ ok] breaks   commercials 347 min/day (14.5 min/hour, in the US 14-16 min/hour band);
+               bumps a further 36 min/day
+[ ok] breaks   break budget 384 min/day (16.0 min/hour, 27% of the day)
+               = slot minus episode, so pod shares only redistribute it
 ```
+
+**Commercial load** is what matters for authenticity: US cable ran roughly
+14–16 min/hour of spots. **Break budget** is the arithmetic total that templates
+divide; the difference is bumps, which on [adult swim] were signature continuity
+rather than overhead. The default config lands at 14.5 min/hour — inside the band
+— and `doctor` escalates to `warn` outside 12–17.
 
 To actually change it, pick one of:
 

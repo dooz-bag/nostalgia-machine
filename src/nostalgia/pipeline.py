@@ -230,12 +230,18 @@ def _streamer_binary(paths: Paths) -> Path | None:
 
 
 def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
-    """How much of the day is break time, for a representative weekday.
+    """How much of the day is break, and how much of that is actual commercials.
 
-    Worth reporting because the number is *not* a setting: a slot is fixed and an
-    episode is a fixed cost, so ``break = slot - episode``. Tuning pod shares in
-    ``continuity.yaml`` redistributes the break but cannot change this total,
-    which is easy to spend an afternoon discovering.
+    The two figures differ and are easy to conflate. ``break`` is arithmetic
+    (``slot - episode``, which is what templates divide); ``ad`` is what a real
+    plan actually spends on spots, the rest going to bumps. Reporting only the
+    first invites the reading "27% of my channel is commercials!" when the spots
+    are in fact ~14 min/hour and the remainder is [adult swim]'s own continuity,
+    which was a signature rather than overhead.
+
+    The ad figures cost one day's planning, which is fine for a diagnostic and is
+    the only way to be exact: pod filling is a subset-sum over real ragged
+    durations, not a multiplication.
     """
     from .grid import build_day
     from .rotation import build_rings, select as _select
@@ -276,14 +282,32 @@ def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
     day_ms = sum(slot.length_ms for slot in slots)
     if not day_ms:
         return {}
-    return {
+    hours = day_ms / 3_600_000
+
+    summary = {
         "day": day,
         "slots": len(slots),
         "episode_minutes": episode_ms / 60_000,
         "break_minutes": break_ms / 60_000,
         "break_percent": break_ms / day_ms * 100,
-        "break_per_hour": break_ms / 60_000 / (day_ms / 3_600_000),
+        "break_per_hour": break_ms / 60_000 / hours,
     }
+
+    # Ad-only figures need a real plan: pod filling is a subset-sum over ragged
+    # durations, so it cannot be derived arithmetically.
+    try:
+        from .plan import PlanContext, build_plan
+
+        context = PlanContext.load(config, catalog)
+        plan = build_plan(day, day_config, context, allow_generated=False)
+    except Exception:  # noqa: BLE001 - the arithmetic figures still stand alone
+        return summary
+
+    for kind in ("ad", "bump"):
+        total = sum(item.duration_ms for item in plan.items if item.kind == kind)
+        summary[f"{kind}_minutes"] = total / 60_000
+        summary[f"{kind}_per_hour"] = total / 60_000 / hours
+    return summary
 
 
 def _is_video(path: Path) -> bool:
@@ -529,16 +553,46 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
 
     summary = break_budget_summary(config, catalog)
     if summary:
-        findings.append(
-            (
-                "ok",
-                "breaks",
-                f"{summary['break_minutes']:.0f} min/day of break "
-                f"({summary['break_per_hour']:.1f} min per hour, "
-                f"{summary['break_percent']:.0f}% of the day) -- slot minus episode, "
-                f"so pod shares only redistribute it",
+        if "ad_per_hour" in summary:
+            # Ad load is the figure that matters for authenticity: US cable ran
+            # ~14-16 min/hour of spots. Bumps are [adult swim] continuity, not
+            # commercials, so lumping them together overstates the ad load by
+            # about 1.5 min/hour.
+            ad_rate = summary["ad_per_hour"]
+            verdict = "in the US 14-16 min/hour band" if 12 <= ad_rate <= 17 else (
+                "above the usual 14-16 min/hour" if ad_rate > 17
+                else "below the usual 14-16 min/hour"
             )
-        )
+            findings.append(
+                (
+                    "ok" if 12 <= ad_rate <= 17 else "warn",
+                    "breaks",
+                    f"commercials {summary['ad_minutes']:.0f} min/day "
+                    f"({ad_rate:.1f} min/hour, {verdict}); "
+                    f"bumps a further {summary['bump_minutes']:.0f} min/day",
+                )
+            )
+            findings.append(
+                (
+                    "ok",
+                    "breaks",
+                    f"break budget {summary['break_minutes']:.0f} min/day "
+                    f"({summary['break_per_hour']:.1f} min/hour, "
+                    f"{summary['break_percent']:.0f}% of the day) = slot minus "
+                    f"episode, so pod shares only redistribute it",
+                )
+            )
+        else:
+            findings.append(
+                (
+                    "ok",
+                    "breaks",
+                    f"break budget {summary['break_minutes']:.0f} min/day "
+                    f"({summary['break_per_hour']:.1f} min/hour, "
+                    f"{summary['break_percent']:.0f}% of the day) = slot minus "
+                    f"episode, so pod shares only redistribute it",
+                )
+            )
 
     findings.extend(_watermark_findings(config, paths))
 
