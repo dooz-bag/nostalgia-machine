@@ -211,14 +211,26 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
     if not bumps:
         findings.append(("warn", "library", "no bumps; the channel will feel unscheduled"))
 
-    untagged = [asset for asset in bumps if asset.subject is None]
-    if untagged:
-        findings.append(
-            (
-                "warn",
-                "bumps",
-                f"{len(untagged)} bumps have no subject; run 'nostalgia tag' or the /bumps page",
+    # Bumps with a subject get matched to a show; the rest are neutral fallbacks.
+    # A large neutral pool is healthy -- a channel needs generic cards -- so warn
+    # only when a *show's* coverage is genuinely thin.
+    for show_id, show in config.shows.items():
+        if not show.enable:
+            continue
+        cards = [asset for asset in bumps if asset.subject == show_id]
+        if len(cards) < 3:
+            findings.append(
+                (
+                    "warn",
+                    "bumps",
+                    f"{show_id}: only {len(cards)} bump card(s); "
+                    f"add some under media/bumps/{show_id}/",
+                )
             )
+    neutral = [asset for asset in bumps if asset.subject is None]
+    if neutral:
+        findings.append(
+            ("ok", "bumps", f"{len(neutral)} neutral card(s) available as fallback")
         )
 
     for show_id, show in config.shows.items():

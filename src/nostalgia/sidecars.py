@@ -28,7 +28,14 @@ from pathlib import Path
 SIDECAR_SUFFIX = ".tags.json"
 
 POSITIONS = ("INTO", "OUT", "NEXT", "AFTER", "ANY")
-SOURCES = ("folder", "ocr", "manual", "generated", "unknown")
+SOURCES = ("folder", "ocr", "manual", "generated", "import", "unknown")
+"""Where a tag came from.
+
+``import`` is a bulk importer that mapped album/archive filenames onto show ids.
+It is kept distinct from ``manual`` because a human did not look at these, so the
+UI can still surface them for spot-checking -- and distinct from ``folder``, which
+means the tag is *only* an inference re-derived on every scan.
+"""
 
 #: Folder names under ``media/bumps`` that are not cheat-sheet show folders.
 RESERVED_BUMP_FOLDERS = {"_review", "generated", "neutral", "_incoming"}

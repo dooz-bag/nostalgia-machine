@@ -8,6 +8,10 @@
 #   position: INTO | OUT | NEXT | AFTER | ANY
 #   max_seconds: skip the bump if it runs longer than this
 #
+# 16s, not 12: the classic [adult swim] text bumps in the Internet Archive
+# collection are almost all 15.0-15.4s. A 12s cap silently rejected ~350 of the
+# 600 imported cards, including most generic ones.
+#
 # Pod sizing, pick one per segment:
 #   share:   fraction of the slot's remaining break budget (recommended)
 #   seconds: a fixed booking length (30/60/90)
@@ -28,18 +32,18 @@ continuity:
       - kind: bump
         subject: this
         position: INTO
-        max_seconds: 12
+        max_seconds: 16
       - kind: episode
       - kind: bump
         subject: this
         position: AFTER
-        max_seconds: 12
+        max_seconds: 16
       - kind: ad_pod
         share: 0.62
       - kind: bump
         subject: next
         position: NEXT
-        max_seconds: 12
+        max_seconds: 16
 
   # 30-minute slot for a ~22-minute episode: about 7 minutes of break.
   default-half:
@@ -50,31 +54,31 @@ continuity:
       - kind: bump
         subject: this
         position: INTO
-        max_seconds: 12
+        max_seconds: 16
       - kind: episode
       - kind: bump
         subject: this
         position: AFTER
-        max_seconds: 12
+        max_seconds: 16
       - kind: ad_pod
         share: 0.66
       - kind: bump
         subject: next
         position: NEXT
-        max_seconds: 12
+        max_seconds: 16
     mid:
       - after_percent: 45
         segments:
           - kind: bump
             subject: this
             position: OUT
-            max_seconds: 12
+            max_seconds: 16
           - kind: ad_pod
             seconds: 60
           - kind: bump
             subject: this
             position: INTO
-            max_seconds: 12
+            max_seconds: 16
 
   # 60-minute block (movies, specials, marathons).
   default-hour:
@@ -85,40 +89,40 @@ continuity:
       - kind: bump
         subject: this
         position: INTO
-        max_seconds: 12
+        max_seconds: 16
       - kind: episode
       - kind: bump
         subject: this
         position: AFTER
-        max_seconds: 12
+        max_seconds: 16
       - kind: ad_pod
         share: 0.70
       - kind: bump
         subject: next
         position: NEXT
-        max_seconds: 12
+        max_seconds: 16
     mid:
       - after_percent: 33
         segments:
           - kind: bump
             subject: this
             position: OUT
-            max_seconds: 12
+            max_seconds: 16
           - kind: ad_pod
             seconds: 90
           - kind: bump
             subject: this
             position: INTO
-            max_seconds: 12
+            max_seconds: 16
       - after_percent: 66
         segments:
           - kind: bump
             subject: this
             position: OUT
-            max_seconds: 12
+            max_seconds: 16
           - kind: ad_pod
             seconds: 90
           - kind: bump
             subject: this
             position: INTO
-            max_seconds: 12
+            max_seconds: 16

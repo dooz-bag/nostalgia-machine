@@ -29,7 +29,7 @@ from .probe import (
     write_sidecar,
 )
 from .rotation import EpisodeRef
-from .sidecars import SidecarError, subject_from_folder
+from .sidecars import RESERVED_BUMP_FOLDERS, SidecarError, subject_from_folder
 from .sidecars import read as read_tags
 
 SCHEMA_VERSION = 1
@@ -216,6 +216,7 @@ class Catalog:
                     rows,
                 )
                 self._delete_stale(connection, {row[0] for row in rows})
+                self._sync_sidecar_tags(connection)
                 connection.execute("DELETE FROM scan_issues")
                 connection.executemany(
                     "INSERT OR REPLACE INTO scan_issues(path, reason) VALUES (?,?)",
@@ -225,6 +226,54 @@ class Catalog:
             report.per_kind[row[1]] = report.per_kind.get(row[1], 0) + 1
             report.scanned += 1
         return report
+
+    def _sync_sidecar_tags(self, connection: sqlite3.Connection) -> None:
+        """Copy confirmed sidecar tags into ``asset_tags``.
+
+        The sidecar is the durable record -- it survives a wiped catalog and
+        travels with the media -- but the review queue filters on the database
+        flag, so a sidecar written by an importer (or restored alongside the media)
+        would leave the file looking untagged forever. Syncing during scan keeps
+        one on-disk source of truth *and* a fast query.
+        """
+        existing = {
+            row["key"]: row["confirmed"]
+            for row in connection.execute("SELECT key, confirmed FROM asset_tags")
+        }
+        for key, kind, path in connection.execute(
+            "SELECT key, kind, path FROM media WHERE kind = 'bump'"
+        ).fetchall():
+            if existing.get(key):
+                continue
+            try:
+                sidecar = read_tags(Path(path))
+            except SidecarError:
+                continue
+            if sidecar is None or not sidecar.confirmed:
+                continue
+            connection.execute(
+                """
+                INSERT INTO asset_tags
+                    (key, subject, position, era_from, era_to, family, tag_source,
+                     confidence, confirmed)
+                VALUES (?,?,?,?,?,?,?,?,1)
+                ON CONFLICT(key) DO UPDATE SET
+                    subject=excluded.subject, position=excluded.position,
+                    era_from=excluded.era_from, era_to=excluded.era_to,
+                    family=excluded.family, tag_source=excluded.tag_source,
+                    confidence=excluded.confidence, confirmed=1
+                """,
+                (
+                    key,
+                    sidecar.subject,
+                    sidecar.position,
+                    sidecar.era,
+                    sidecar.era_to,
+                    sidecar.family,
+                    sidecar.source,
+                    sidecar.confidence,
+                ),
+            )
 
     def _scan_show(
         self,
@@ -542,6 +591,11 @@ class Catalog:
         The *guess* is resolved the same way the planner resolves it (sidecar,
         then folder, then filename), so the queue shows what the scheduler would
         actually do rather than an empty field.
+
+        Bumps in a reserved folder are excluded. ``media/bumps/neutral/`` is a
+        deliberate statement that a card names no show, so asking a human to assign
+        one is busywork -- and a bulk-imported archive contributes hundreds of
+        them, burying the few that genuinely need a decision.
         """
         rows = list(
             self.connect().execute(
@@ -558,6 +612,10 @@ class Catalog:
         out: list[dict] = []
         for row in rows:
             path = Path(row["path"])
+            # A card deliberately filed as neutral needs no subject. Checked here
+            # rather than in SQL because "reserved" is a Python-side convention.
+            if row["folder_subject"] in RESERVED_BUMP_FOLDERS:
+                continue
             guess = None
             source = "unknown"
             confidence = 0.0

@@ -299,6 +299,11 @@ def _generated_allowance(slot_count: int, max_share: float) -> int:
 #: that a break stops sounding like a real one, so the pool is widened instead.
 MIN_ERA_POOL = 12
 
+#: Fewer usable bump cards than this means the pool really is too thin and the
+#: skip is worth reporting. Above it, picking a long card and falling back to the
+#: next is ordinary operation, not a fault.
+MIN_BUMP_ALTERNATIVES = 5
+
 
 def era_ad_pool(ads: Sequence[Asset], year: int, drift: int) -> tuple[list[Asset], bool]:
     """Commercials whose era covers *year*, within *drift* years.
@@ -460,10 +465,17 @@ def _plan_slot(
             )
             continue
         if spec.max_seconds and asset.duration_ms > spec.max_seconds * 1000:
-            plan.warnings.append(
-                f"{prefix}: skipped {asset.key} "
-                f"({asset.duration_ms}ms > {spec.max_seconds}s bump cap)"
-            )
+            # Only worth a warning when the *only* cards that matched are too
+            # long. A pool with plenty of alternatives that simply picked a long
+            # one is normal operation, and warning about it buried the real
+            # problems (a genuinely missing subject) under 77 lines of noise.
+            shortlist = [candidate for candidate in real_bumps if candidate.duration_ms <= spec.max_seconds * 1000]
+            if len(shortlist) < MIN_BUMP_ALTERNATIVES:
+                plan.warnings.append(
+                    f"{prefix}: only {len(shortlist)} bump(s) fit the "
+                    f"{spec.max_seconds}s cap; {asset.key} was {asset.duration_ms}ms. "
+                    f"Raise max_seconds in continuity.yaml or add shorter cards"
+                )
             continue
         bump_assets[index] = asset
         bump_reasons[index] = choice.reason
