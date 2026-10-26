@@ -64,6 +64,46 @@ services:
       retries: 3
       start_period: 1m
 
+  web:
+    build: .
+    container_name: nostalgia-web
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-Asia/Tokyo}
+      NOSTALGIA_CONTAINER_ROOT: /app
+    # Binds 0.0.0.0 rather than the CLI's 127.0.0.1 default: inside a container
+    # loopback is the container's own, so a 127.0.0.1 bind is unreachable from the
+    # LAN no matter what is published. The port mapping below is the boundary.
+    command: ["--root", "/app", "serve", "--host", "0.0.0.0", "--port", "8099"]
+    ports:
+      - "${WEB_PORT:-8099}:8099"
+    volumes:
+      # Same mounts as the scheduler, and writable for the same reason: this page
+      # writes programming.yaml and rebuilds the plan when you save a schedule.
+      - ./config:/app/config
+      - ${MEDIA_DIR:-./media}:/app/media:ro
+      - ./data:/app/data
+      - ./playout:/app/playout
+      - ./xmltv:/app/xmltv
+      - ./lineup:/app/lineup
+      - ${GENERATED_BUMP_DIR:-./media/bumps/generated}:/app/media/bumps/generated
+    healthcheck:
+      # A TCP connect, not a page fetch. The page renders a full day's schedule and
+      # the first request after a config change rebuilds it; polling that on a timer
+      # made the container sit at "starting" whenever a rebuild outlasted the probe.
+      # Reachability is the question this asks, and it costs nothing.
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import socket
+          socket.create_connection(("127.0.0.1", 8099), timeout=5).close()
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
   ersatztv:
     image: ghcr.io/ersatztv/next:${ETV_TAG:-latest}
     container_name: nostalgia-ersatztv

@@ -60,6 +60,66 @@ def _view(plan: Plan, item, zone, titles: dict[str, str] | None = None) -> ItemV
     )
 
 
+_PLAN_CACHE: dict[tuple, Plan] = {}
+"""Most recent day plan per (day, config fingerprint).
+
+Building a day's plan takes several seconds against a real library, and the page
+was doing it on *every* request -- including the container healthcheck, which
+polled faster than a rebuild completes and so never reported healthy. The plan for
+a given day and config never changes, so caching it turns the page from a
+multi-second wait into an instant one.
+"""
+
+
+def _config_fingerprint(config: RootConfig) -> int:
+    """A hash of everything that can change a plan.
+
+    Content matters rather than identity: saving a schedule from the web page
+    rebuilds ``config`` into a new object, so an ``id()`` check would go stale in
+    exactly the case the page exists to serve.
+    """
+    return hash(config.model_dump_json())
+
+
+def plan_for_day(config: RootConfig, catalog: Catalog, paths: Paths, day: date) -> Plan:
+    """The plan for *day*, cached until the config or the catalog changes."""
+    key = (day, _config_fingerprint(config), _catalog_stamp(catalog))
+    cached = _PLAN_CACHE.get(key)
+    if cached is not None:
+        return cached
+
+    context = PlanContext.load(
+        config, catalog, config_dir=paths.config_dir, media_root=paths.media_root
+    )
+    try:
+        plan = build_plan(day, day_config_for(config, day), context)
+    except BuildError as exc:
+        raise LookupError(str(exc)) from exc
+
+    # One entry is enough: the page only ever shows today, and keeping older days
+    # would leak memory for no benefit.
+    _PLAN_CACHE.clear()
+    _PLAN_CACHE[key] = plan
+    return plan
+
+
+def _catalog_stamp(catalog: Catalog) -> object:
+    """Cheap signal that the library changed, so a rescan invalidates the cache.
+
+    There is no scan counter in the database to read, so this hashes the file
+    mtimes. A ``scan`` rewrites the rows and therefore touches the file, while
+    the scheduler's six-hourly ``emit`` commits too -- neither should serve a
+    stale lineup, and both are far cheaper to detect than a rebuild.
+    """
+    import os
+
+    try:
+        info = os.stat(catalog.path)
+        return (info.st_mtime_ns, info.st_size)
+    except OSError:
+        return None
+
+
 def now_playing(
     config: RootConfig,
     catalog: Catalog,
@@ -72,13 +132,7 @@ def now_playing(
     moment = now or datetime.now(tz=__import__("zoneinfo").ZoneInfo(zone))
     today = moment.date()
 
-    context = PlanContext.load(
-        config, catalog, config_dir=paths.config_dir, media_root=paths.media_root
-    )
-    try:
-        plan = build_plan(today, day_config_for(config, today), context)
-    except BuildError as exc:
-        raise LookupError(str(exc)) from exc
+    plan = plan_for_day(config, catalog, paths, today)
 
     now_ms = int(moment.timestamp() * 1000)
     titles = {show_id: show.title for show_id, show in config.shows.items()}
