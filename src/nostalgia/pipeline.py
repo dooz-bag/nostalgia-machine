@@ -445,11 +445,60 @@ def build(
     return result
 
 
+def _programming_findings(
+    config: RootConfig, catalog: Catalog
+) -> list[tuple[str, str, str]]:
+    """Report the active programming mode and whether it can actually air.
+
+    In ``lineup``/``shuffle`` the day files are not consulted at all, so saying
+    "N day files" and nothing else would describe a schedule that is not being
+    used. Worse, a lineup whose shows have no media plans to nothing, and this is
+    the one place that can say so before the channel goes black.
+    """
+    from .programming import ProgrammingError, build_lineup, build_shuffle
+
+    programming = config.programming
+    if not programming.active():
+        return [("ok", "schedule", "dayparts -- the day files decide what airs")]
+
+    findings: list[tuple[str, str, str]] = []
+    episodes = catalog.episodes()
+    try:
+        if programming.mode == "lineup":
+            report = build_lineup(config, episodes, slots_per_day=4)
+            shape = (
+                f"{len(programming.lineup)} show(s), "
+                f"{len(programming.pinned)} pinned episode(s)"
+            )
+        else:
+            report = build_shuffle(config, episodes, slots_per_day=4)
+            shape = (
+                "the whole roster"
+                if not programming.shuffle_shows
+                else f"{len(programming.shuffle_shows)} selected show(s)"
+            )
+    except ProgrammingError as exc:
+        return [("error", "schedule", f"{programming.mode}: {exc}")]
+
+    findings.append(
+        (
+            "ok",
+            "schedule",
+            f"{programming.mode} -- {shape}; slots are sized from each show's "
+            f"'slot' family, not the day files",
+        )
+    )
+    for warning in report.warnings:
+        findings.append(("warn", "schedule", warning))
+    return findings
+
+
 def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str, str, str]]:
     """Return ``(level, area, message)`` diagnostics."""
     findings: list[tuple[str, str, str]] = []
 
     findings.append(("ok", "config", f"{len(config.shows)} shows, {len(config.days)} day files"))
+    findings.extend(_programming_findings(config, catalog))
 
     from .probe import find_ffprobe
 
@@ -609,16 +658,20 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
             ("ok", "rotation", f"every show returns to its start after {length} plays")
         )
 
-    for day_config in config.days:
-        for part in day_config.dayparts:
-            if not any(catalog.episodes(show_id) for show_id in part.shows):
-                findings.append(
-                    (
-                        "warn",
-                        "schedule",
-                        f"{day_config.name}: daypart {part.start:%H:%M} has no episodes",
+    # Daypart emptiness only matters when the day files decide the schedule. In a
+    # hand-programmed mode these warnings describe a file nothing reads, and they
+    # would bury the lineup's own problems.
+    if not config.programming.active():
+        for day_config in config.days:
+            for part in day_config.dayparts:
+                if not any(catalog.episodes(show_id) for show_id in part.shows):
+                    findings.append(
+                        (
+                            "warn",
+                            "schedule",
+                            f"{day_config.name}: daypart {part.start:%H:%M} has no episodes",
+                        )
                     )
-                )
 
     return findings
 
