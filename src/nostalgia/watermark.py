@@ -35,10 +35,10 @@ MARKABLE_KINDS = ("episode",)
 
 #: Fraction of the frame height reserved for the mark's own box, by era. The
 #: burned-in [adult swim] wordmark was small and tight to the corner.
-DEFAULT_WIDTH_PERCENT = 11.0
+DEFAULT_WIDTH_PERCENT = 14.0
 DEFAULT_MARGIN_X_PERCENT = 2.4
 DEFAULT_MARGIN_Y_PERCENT = 4.2
-DEFAULT_OPACITY_PERCENT = 88.0
+DEFAULT_OPACITY_PERCENT = 72.0
 
 #: How many of an episode's opening seconds to check when asking "is it already
 #: there?". A bug is present from the first frame, so a few seconds is enough.
@@ -107,7 +107,7 @@ class WatermarkLook:
 
     text: str = "[adult swim]"
     font: str = WANTED_FONT
-    font_size: float = 0.026
+    font_size: float = 0.033
     """Font size as a fraction of frame height. Small: it is a corner bug."""
     colour: str = "white"
     opacity: float = DEFAULT_OPACITY_PERCENT / 100
@@ -162,10 +162,25 @@ class WatermarkRule:
 
     enabled: bool = True
     shows: tuple[str, ...] = ()
+    except_shows: tuple[str, ...] = ()
+    """Shows whose rips already carry a bug, so they must never be marked again.
+
+    This is the dependable answer. The marks in a real library are not uniform
+    enough to find automatically: the design differs between shows (a white
+    wordmark, a red one, a Cartoon Network logo) and even between episodes of one
+    show, and the corner crop always contains moving picture. Erring towards
+    marking is the wrong way to be wrong -- a second logo over a real one is
+    obviously broken, while a missing logo just looks like a clean master.
+    """
     era_from: int | None = None
     era_to: int | None = None
     skip_when_burned_in: bool = True
-    """Leave an episode alone when it already carries a corner mark."""
+    """Leave an episode alone when it already carries a corner mark.
+
+    Applies to both modes. ``burn`` checks the picture directly at composite
+    time; ``overlay`` reads the verdict the last scan recorded, because the
+    streamer composites during a transcode that must not wait on detection.
+    """
 
     def applies_to(self, *, kind: str, show_id: str | None, era_year: int) -> bool:
         if not self.enabled:
@@ -173,6 +188,8 @@ class WatermarkRule:
         if kind not in MARKABLE_KINDS:
             return False
         if self.shows and (show_id or "") not in self.shows:
+            return False
+        if (show_id or "") in self.except_shows:
             return False
         if self.era_from is not None and era_year < self.era_from:
             return False
@@ -267,9 +284,20 @@ def mark_filter(look: WatermarkLook, *, font_path: Path | None) -> str:
         # Horizontally squeeze, keeping the height: that is what turns a
         # Helvetica-metric bold into Helvetica Neue Condensed Bold.
         filters.append(f"scale=iw*{look.condense:.3f}:ih")
-    # Trim the transparent margin the glyphs sit in, so the card is all ink and
-    # the placement margins in the output are the real ones.
-    filters.append("crop=iw*0.96:ih*0.96")
+    # Trim to the ink, so the card is exactly the wordmark and the placement
+    # margins in the output are the real ones.
+    #
+    # `bbox` finds the ink, rather than cropping a fixed fraction. The previous
+    # `crop=iw*0.96:ih*0.96` cropped *symmetrically about the centre* while the
+    # text is drawn at x=0, so it removed ~31px from the left and ate the opening
+    # "[" entirely -- the mark rendered as "adult swim]" with a fragment of the
+    # closing bracket.
+    #
+    # The trailing `crop` is what makes the card's aspect ratio match the ink,
+    # which matters because the streamer scales the card to `width_percent`.
+    # A canvas far wider than the text therefore rendered a mark at roughly half
+    # the size it was asked for.
+    filters.append("bbox=min_val=40")
     return ",".join(filters)
 
 
@@ -860,6 +888,7 @@ def rule_from_config(config, *, era_year: int | None = None) -> WatermarkRule:
     return WatermarkRule(
         enabled=config.mode == "burn",
         shows=tuple(config.shows),
+        except_shows=tuple(config.except_shows),
         skip_when_burned_in=config.skip_when_burned_in,
     )
 

@@ -39,7 +39,50 @@ from .sidecars import (
 )
 from .sidecars import read as read_tags
 
-SCHEMA_VERSION = 1
+def _bug_from_row(row) -> bool | None:
+    """Read ``burned_in_mark`` defensively.
+
+    An old catalog that has not been migrated yet has no such column, and reading
+    it by name would raise on every query. ``None`` ("not examined") is also the
+    correct answer in that case.
+    """
+    try:
+        value = row["burned_in_mark"]
+    except (IndexError, KeyError):
+        return None
+    return None if value is None else bool(value)
+
+
+def _migrate(connection: sqlite3.Connection) -> None:
+    """Bring an existing catalog up to the current schema, in place.
+
+    Refusing to open an old catalog would force a full rescan after every upgrade,
+    and a rescan of this library takes minutes. Only additive changes are handled
+    here -- anything that would need a rewrite is a reason to bump the version and
+    say so instead of guessing.
+    """
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(media)")
+    }
+    if "burned_in_mark" not in columns:
+        connection.execute("ALTER TABLE media ADD COLUMN burned_in_mark INTEGER")
+        # Deliberately left NULL for existing rows: "not examined" must not be
+        # confused with "examined and absent", or every episode in a catalog that
+        # predates this column would be treated as needing a mark.
+    connection.execute(
+        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+        (str(SCHEMA_VERSION),),
+    )
+    connection.commit()
+
+
+SCHEMA_VERSION = 2
+"""Bumped for ``media.burned_in_mark``.
+
+An existing catalog is *migrated in place* rather than refused: the new column is
+added by ``ALTER TABLE`` and left NULL, which reads as "not examined yet" and
+means an un-rescanned library behaves exactly as it did before the column existed.
+"""
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS meta (
@@ -65,7 +108,11 @@ CREATE TABLE IF NOT EXISTS media (
     audio_channels INTEGER,
     size_bytes INTEGER,
     mtime_ns   INTEGER,
-    probed_by  TEXT NOT NULL DEFAULT 'ffprobe'
+    probed_by  TEXT NOT NULL DEFAULT 'ffprobe',
+    -- 1 when the picture already carries a corner bug of its own. Nullable on
+    -- purpose: NULL means "not examined", which is different from "examined and
+    -- not present", and only the latter may be marked by the channel.
+    burned_in_mark INTEGER
 );
 CREATE INDEX IF NOT EXISTS media_kind  ON media(kind);
 CREATE INDEX IF NOT EXISTS media_show  ON media(show_id, season, episode);
@@ -128,6 +175,10 @@ class ScanReport:
     skipped_existing: int = 0
     issues: list[tuple[str, str]] = field(default_factory=list)
     per_kind: dict[str, int] = field(default_factory=dict)
+    marked: int = 0
+    """Episodes found to carry their own corner bug."""
+    mark_pending: int = 0
+    """Episodes whose corner has not been examined yet."""
 
     def note(self, path: Path, reason: str) -> None:
         self.issues.append((str(path), reason))
@@ -168,6 +219,8 @@ class Catalog:
                     "INSERT OR IGNORE INTO meta(key, value) VALUES ('schema_version', ?)",
                     (str(SCHEMA_VERSION),),
                 )
+            else:
+                _migrate(connection)
             self._connection = connection
         return self._connection
 
@@ -177,6 +230,8 @@ class Catalog:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='meta'"
         ).fetchone()
         return row is not None
+
+
 
     def close(self) -> None:
         if self._connection is not None:
@@ -216,6 +271,8 @@ class Catalog:
         force: bool = False,
         write_sidecars: bool = False,
         derived_root: Path | None = None,
+        detect_burned_in: bool = False,
+        ffmpeg_path: str | None = None,
     ) -> ScanReport:
         """Walk every media root and (re)build the ``media`` table.
 
@@ -223,6 +280,12 @@ class Catalog:
         (``watermark/aqua-teen-hunger-force_s01e001.mkv``). When one exists it is
         catalogued *instead of* the original, so the marked copy is what airs
         without anything downstream needing to know about watermarks.
+
+        *detect_burned_in* examines each episode's bottom-right corner once and
+        records the verdict, which is what lets the overlay path leave an episode
+        that already carries its own bug alone. It costs several ffmpeg seeks per
+        episode, so it is done here -- once per file, cached in the catalog --
+        rather than on every plan build.
         """
         report = ScanReport()
         ffprobe = find_ffprobe(ffprobe_path)
@@ -246,6 +309,8 @@ class Catalog:
                         write_sidecars,
                         pool,
                         derived_root=derived_root,
+                        detect_burned_in=detect_burned_in,
+                        ffmpeg_path=ffmpeg_path,
                     )
                 )
 
@@ -262,8 +327,8 @@ class Catalog:
                     INSERT INTO media (key, kind, path, folder, show_id, season, episode,
                                        title, duration_ms, format_name, video_codec, width,
                                        height, audio_codec, audio_channels, size_bytes,
-                                       mtime_ns, probed_by)
-                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                       mtime_ns, probed_by, burned_in_mark)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                     ON CONFLICT(key) DO UPDATE SET
                         path=excluded.path, folder=excluded.folder,
                         show_id=excluded.show_id, season=excluded.season,
@@ -368,6 +433,8 @@ class Catalog:
         write_sidecars: bool,
         pool: "ThreadPoolExecutor | None" = None,
         derived_root: Path | None = None,
+        detect_burned_in: bool = False,
+        ffmpeg_path: str | None = None,
     ) -> list[tuple]:
         rows: list[tuple] = []
         candidates = list(_walk_media(folder))
@@ -401,6 +468,14 @@ class Catalog:
             if info is None:
                 continue
             key = f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}"
+            marked = None
+            # Only an *original* is worth examining: a composited copy carries the
+            # mark this channel drew, so detecting it there would report our own
+            # work as the show's.
+            if detect_burned_in and derived is None:
+                marked = self._detect_mark(path, ffmpeg_path)
+                if marked:
+                    report.marked += 1
             rows.append(
                 (
                     key,
@@ -421,9 +496,25 @@ class Catalog:
                     stat.st_size,
                     stat.st_mtime_ns,
                     probed_by,
+                    None if marked is None else int(marked),
                 )
             )
         return rows
+
+    @staticmethod
+    def _detect_mark(path: Path, ffmpeg_path: str | None) -> bool | None:
+        """Whether *path* already carries a corner bug, or ``None`` if unknown.
+
+        A failure to detect is reported as unknown rather than as "no mark": the
+        two lead to opposite decisions, and guessing "no mark" would stamp a
+        second bug onto an episode that already had one.
+        """
+        from .watermark import has_burned_in_mark
+
+        try:
+            return has_burned_in_mark(path, ffmpeg=ffmpeg_path)
+        except Exception:  # noqa: BLE001 - detection must never fail a scan
+            return None
 
     def _scan_flat(
         self,
@@ -476,6 +567,10 @@ class Catalog:
                     stat.st_size,
                     stat.st_mtime_ns,
                     probed_by,
+                    # Bumps, commercials and idents are never bugged by the network
+                    # and never carry a corner mark of their own, so there is
+                    # nothing to detect and a definite 0 rather than "unknown".
+                    0,
                 )
             )
         return rows
@@ -535,11 +630,15 @@ class Catalog:
                 INSERT INTO media (key, kind, path, folder, show_id, season, episode,
                                    title, duration_ms, format_name, video_codec, width,
                                    height, audio_codec, audio_channels, size_bytes,
-                                   mtime_ns, probed_by)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                                   mtime_ns, probed_by, burned_in_mark)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(key) DO UPDATE SET
                     duration_ms=excluded.duration_ms, mtime_ns=excluded.mtime_ns,
-                    size_bytes=excluded.size_bytes, probed_by=excluded.probed_by
+                    size_bytes=excluded.size_bytes, probed_by=excluded.probed_by,
+                    -- Refreshed only when this scan actually looked; a NULL means
+                    -- "not examined", and overwriting a known verdict with NULL
+                    -- would silently un-mark an episode.
+                    burned_in_mark=COALESCE(excluded.burned_in_mark, media.burned_in_mark)
                 """,
                 rows,
             )
@@ -570,6 +669,7 @@ class Catalog:
                 duration_ms=row["duration_ms"],
                 title=row["title"] or "",
                 order_key=f"{row['season'] or 0:04d}{row['episode'] or 0:04d}",
+                carries_bug=_bug_from_row(row),
             )
             for row in self.connect().execute(query, params)
         ]

@@ -334,8 +334,20 @@ def scan(
     *,
     ffprobe_path: str | None = None,
     write_sidecars: bool = False,
+    detect_burned_in: bool | None = None,
 ) -> ScanReport:
-    """Scan every configured media root into the catalog."""
+    """Scan every configured media root into the catalog.
+
+    ``detect_burned_in`` defaults to the config's ``skip_when_burned_in`` but only
+    when the watermark is actually in use: examining every episode costs several
+    ffmpeg seeks each, and it is pointless when no mark will ever be drawn. An
+    explicit value overrides the guess, so ``scan --detect-marks`` works even with
+    the watermark currently off.
+    """
+    if detect_burned_in is None:
+        detect_burned_in = (
+            config.watermark.enabled and config.watermark.skip_when_burned_in
+        )
     show_folders = {}
     for show_id, show in config.shows.items():
         folder = Path(show.folder)
@@ -351,6 +363,8 @@ def scan(
         write_sidecars=write_sidecars,
         # Composited watermark copies, when burn mode has produced any.
         derived_root=paths.media("derived", "watermark"),
+        detect_burned_in=detect_burned_in,
+        ffmpeg_path=config.channel.ffmpeg_path,
     )
 
 

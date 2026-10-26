@@ -35,9 +35,12 @@ watermark:
   font: "Helvetica Neue Condensed Bold"
   condense: 0.84
 
-  font_size: 0.026        # fraction of frame height; a bug is small
+  font_size: 0.033        # fraction of frame height; a bug is small
   colour: "white"
-  opacity: 0.88
+  # 0.72 rather than 0.88: the broadcast bug sat *in* the picture, not on top of
+  # it, so a lower opacity is what makes it read as part of the tape rather than
+  # as a sticker added afterwards.
+  opacity: 0.72
   uppercase: false
 
   # Distance from the corner, in percent of frame width/height.
@@ -45,11 +48,28 @@ watermark:
   margin_y_percent: 4.2
 
   # overlay mode only: scale the mark to this percent of the content width.
-  width_percent: 11.0
+  width_percent: 14.0
 
   # Which shows get it. Empty = every show. Commercials and bumpers never do,
   # because [adult swim] did not bug them.
   shows: []
 
-  # burn mode: skip an episode that already has a corner mark burned in.
+  # Shows whose rips ALREADY carry the network's bug, so adding ours would put
+  # two logos in the corner. This is the dependable answer: the marks in a real
+  # library are not uniform enough to detect -- they are a white wordmark on some
+  # shows, red on early The Brak Show, a Cartoon Network logo on Cartoon Planet,
+  # and one episode of a show can have it while the next does not.
+  #
+  # Erring towards marking is the wrong way to be wrong: a second logo over a
+  # real one is obviously broken, while a missing logo just looks like a clean
+  # master. Add a show here as soon as you spot its logo on screen.
+  except_shows:
+    - harvey-birdman
+    - the-brak-show
+    - perfect-hair-forever
+    - cartoon-planet
+
+  # Leave an episode alone when it already carries a corner mark. In burn mode
+  # the picture is checked directly; in overlay mode this uses the verdict from
+  # `nostalgia scan --detect-marks`, which is best-effort -- see except_shows.
   skip_when_burned_in: true

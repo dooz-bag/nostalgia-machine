@@ -43,6 +43,14 @@ class EpisodeRef:
     order_key: str = ""
     """Sort key for ``order: chronological`` (release date, else season/episode)."""
 
+    carries_bug: bool | None = None
+    """Whether the picture already has a network corner bug of its own.
+
+    ``None`` means the file has not been examined, which is not the same as
+    "no bug present": only a definite ``False`` may have one stamped over it,
+    or an episode could end up wearing two.
+    """
+
     @property
     def label(self) -> str:
         code = f"S{self.season:02d}E{self.episode:03d}"

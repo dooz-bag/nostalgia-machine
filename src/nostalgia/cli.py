@@ -80,6 +80,15 @@ def _parser() -> argparse.ArgumentParser:
         "--sidecars", action="store_true", help="write <file>.json duration sidecars"
     )
     scan_cmd.add_argument("--ffprobe", default=None, help="path to ffprobe")
+    scan_cmd.add_argument(
+        "--detect-marks",
+        action="store_true",
+        help=(
+            "check each episode's corner for an existing network bug, so the "
+            "overlay skips episodes that already have one (slow: several seeks "
+            "per episode)"
+        ),
+    )
 
     plan_cmd = sub.add_parser("plan", help="build a plan (no files written unless --emit)")
     _add_common_plan_args(plan_cmd)
@@ -225,8 +234,12 @@ def _cmd_scan(args, config, paths: Paths) -> int:
             paths,
             ffprobe_path=args.ffprobe,
             write_sidecars=args.sidecars,
+            detect_burned_in=args.detect_marks,
+            ffmpeg_path=config.channel.ffmpeg_path,
         )
     print(f"scanned {report.total} files ({report.probed} probed, {report.from_sidecar} from sidecars)")
+    if args.detect_marks:
+        print(f"  {report.marked} episode(s) already carry a corner bug of their own")
     for kind, count in sorted(report.per_kind.items()):
         print(f"  {kind:<9} {count}")
     if report.issues:

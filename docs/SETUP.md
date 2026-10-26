@@ -259,12 +259,51 @@ use a specific file.
 they are excluded structurally rather than by a filter. `shows: []` means every
 show; list ids to restrict it.
 
+**Shows that already have a logo.** Some rips carry the network's own bug, and
+marking those puts two in the corner. Name them:
+
+```yaml
+  except_shows:
+    - harvey-birdman
+    - the-brak-show
+    - perfect-hair-forever
+    - cartoon-planet
+```
+
+This is an explicit list rather than automatic detection, and that is a
+deliberate choice. In a real library the existing marks are **not uniform**:
+
+| Show | What its own bug looks like |
+|---|---|
+| Harvey Birdman, Perfect Hair Forever | a white `[adult swim]` wordmark |
+| The Brak Show (early episodes) | a **red** wordmark |
+| Cartoon Planet | a **Cartoon Network** logo |
+| The Brak Show S01E02 | no mark at all — same show, different episode |
+
+The corner crop also contains moving picture, which defeats the "is it static?"
+test that cleanly separates a bug from content elsewhere. Measured across this
+library, the best signal available scored Harvey Birdman 228–243 (has a mark) but
+Cartoon Planet 151–167 against a real Brak mark at 38–49, and Brak S01E02 at 42
+with none — no threshold separates those honestly.
+
+Erring towards marking is the wrong way to be wrong: a **missing** logo just looks
+like a clean master, while a **duplicate** is immediately, obviously broken. So add
+a show here the moment you spot its logo on screen. `shows:` still wins over
+`except_shows:` when both name the same show, since an allow-list is the narrower
+statement.
+
 **Overlay vs burn.** `overlay` sets `within_source_content: true`, so the mark
 stays inside the visible picture and moves inward when letterbox or pillarbox
 bars appear — which a fixed pixel offset cannot do. `burn` instead asks a
 question per episode: `skip_when_burned_in` looks at the corner and leaves the
 file alone if a mark is already there, so you never get two stacked in the same
-corner.
+corner. Overlay mode honours the same setting using the verdict a
+`nostalgia scan --detect-marks` recorded; an episode that has never been examined
+is treated as *not* marked, so a missing scan cannot switch the bug off channel-wide.
+
+**Size and opacity.** The defaults are a 72% opacity mark at 14% of the content
+width. Lower opacity is what makes it read as part of the tape rather than a
+sticker added afterwards, because the broadcast bug sat *in* the picture.
 
 ```powershell
 .\run.ps1 watermark            # burn mode: dry run, says what it would encode

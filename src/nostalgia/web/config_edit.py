@@ -515,6 +515,15 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         help="Space or comma separated show ids. Blank means every show.",
                     ),
                     Field(
+                        "except_shows",
+                        "Skip these shows",
+                        LIST,
+                        help="Shows whose rips already carry the network's own logo, so adding "
+                        "this one would put two in the corner. Erring towards marking is the "
+                        "wrong way to be wrong: a missing logo looks like a clean master, a "
+                        "duplicate looks broken.",
+                    ),
+                    Field(
                         "skip_when_burned_in",
                         "Skip episodes that already have one",
                         BOOL,

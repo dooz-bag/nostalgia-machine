@@ -333,7 +333,12 @@ def watermark_rule(root: RootConfig) -> "WatermarkRule | None":
     return WatermarkRule(
         enabled=True,
         shows=tuple(config.shows),
-        skip_when_burned_in=False,
+        except_shows=tuple(config.except_shows),
+        # Honoured in overlay mode too. This used to be forced False, which meant
+        # an episode that already carried the network's own bug got a second one
+        # stamped on top -- visible immediately on any Harvey Birdman or Brak Show
+        # rip, and reported as such.
+        skip_when_burned_in=config.skip_when_burned_in,
     )
 
 
@@ -681,14 +686,7 @@ def _plan_slot(
                     in_point_ms=spec.offset_ms if spec.of_parts > 1 else None,
                     out_point_ms=(spec.offset_ms + part_len) if spec.of_parts > 1 else None,
                     guide=True,
-                    watermark=bool(
-                        mark is not None
-                        and mark.applies_to(
-                            kind="episode",
-                            show_id=assigned.show_id,
-                            era_year=root.era_year,
-                        )
-                    ),
+                    watermark=_wants_mark(mark, assigned.show_id, root, episode),
                 ),
             )
             cursor_ms += part_len
@@ -813,6 +811,29 @@ def _plan_slot(
         )
     if emitted == 0:
         plan.warnings.append(f"{prefix}: produced no items")
+
+def _wants_mark(
+    mark: "WatermarkRule | None",
+    show_id: str,
+    root: RootConfig,
+    episode,
+) -> bool:
+    """Whether the streamer should composite a bug over this episode.
+
+    Three things have to hold: the rule covers this show, and the episode is not
+    already carrying a bug of its own. An episode that has never been examined
+    counts as *not* carrying one, because the alternative -- refusing to mark
+    everything until a full rescan completes -- would switch the bug off for the
+    whole channel. ``nostalgia scan --detect-marks`` fills the gaps in.
+    """
+    if mark is None:
+        return False
+    if not mark.applies_to(kind="episode", show_id=show_id, era_year=root.era_year):
+        return False
+    if mark.skip_when_burned_in and getattr(episode, "carries_bug", None):
+        return False
+    return True
+
 
 def _fitting_episode(
     assigned: AssignedSlot, rejected, context: PlanContext

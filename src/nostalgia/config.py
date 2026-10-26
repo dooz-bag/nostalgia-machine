@@ -163,21 +163,49 @@ class WatermarkConfig(_Model):
     """Requested face. Resolved through a fallback chain; see FONT_CHAIN."""
     condense: float = Field(default=0.84, gt=0.5, le=1.0)
     """Horizontal squeeze applied when the resolved face is not condensed."""
-    font_size: float = Field(default=0.026, gt=0, le=0.2)
+    font_size: float = Field(default=0.033, gt=0, le=0.2)
     """As a fraction of frame height. A corner bug is small."""
     colour: str = "white"
-    opacity: float = Field(default=0.88, gt=0, le=1.0)
+    opacity: float = Field(default=0.72, gt=0, le=1.0)
     margin_x_percent: float = Field(default=2.4, ge=0, le=40)
     margin_y_percent: float = Field(default=4.2, ge=0, le=40)
-    width_percent: float = Field(default=11.0, gt=0, le=60)
+    width_percent: float = Field(default=14.0, gt=0, le=60)
     """Overlay mode only: the mark's width as a percent of content width."""
     uppercase: bool = False
 
     shows: list[str] = Field(default_factory=list)
     """Empty means every show."""
 
+    except_shows: list[str] = Field(default_factory=list)
+    """Shows whose rips already carry the network's own bug.
+
+    The reliable answer to "does this already have a logo?", because the marks in
+    a real library are not uniform enough to detect:
+
+    * they are not one design -- the white ``[adult swim]`` wordmark on Harvey
+      Birdman and Perfect Hair Forever, a red one on early The Brak Show, a
+      Cartoon Network logo on Cartoon Planet;
+    * the same show is not consistent -- Brak S01E01 has one, S01E02 does not, so
+      the answer is per *episode* and a per-show list is already an
+      approximation;
+    * the corner crop they occupy contains moving picture, which defeats the
+      movement heuristic.
+
+    Measured across this library, a detector that flagged only "persistent bright
+    pixels" scored Birdman 228-243 and ATHF 102-118, but Cartoon Planet 151-167
+    against Real Brak-with-a-red-mark at 38-49 -- no threshold separates those
+    honestly. A false negative stamps a second logo on top of the real one, which
+    is far worse than a missing logo, so naming the shows explicitly wins.
+    """
+
     skip_when_burned_in: bool = True
-    """Leave an episode alone when it already carries a corner mark."""
+    """Leave an episode alone when it already carries a corner mark.
+
+    ``burn`` mode checks the picture directly. ``overlay`` mode relies on
+    ``except_shows`` and on the verdict a ``scan --detect-marks`` recorded; an
+    episode never examined is treated as not marked, so the bug is not silently
+    switched off channel-wide.
+    """
 
     @property
     def enabled(self) -> bool:
