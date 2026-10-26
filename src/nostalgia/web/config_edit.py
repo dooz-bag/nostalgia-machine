@@ -281,10 +281,14 @@ SETTINGS: tuple[SettingsFile, ...] = (
                     ),
                     Field(
                         "era_drift_years",
-                        "Era tolerance (years)",
+                        "Commercial era tolerance (± years)",
                         INT,
-                        help="0 is strictly the same year. Untagged spots always stay eligible.",
+                        help="How far from the channel's era year a *commercial* may be and still "
+                        "air. 0 is strictly the same year; 2 means a 2001-2005 spot can run on a "
+                        "2003 channel. Untagged spots are always eligible, because unknown year "
+                        "is not wrong year.",
                         minimum=0,
+                        maximum=10,
                         default=2,
                     ),
                 ),
@@ -371,6 +375,17 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         INT,
                         minimum=0,
                         default=6,
+                    ),
+                    Field(
+                        "era_drift_years",
+                        "Bump era tolerance (± years)",
+                        INT,
+                        help="How far from the channel's era year a *continuity card* may be. "
+                        "Kept separate from the commercial setting because the two pools are "
+                        "tagged to different depths. Untagged cards always stay eligible.",
+                        minimum=0,
+                        maximum=10,
+                        default=1,
                     ),
                 ),
             ),

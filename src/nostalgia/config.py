@@ -84,6 +84,16 @@ class BumpConfig(_Model):
     trim_slop_ms: int = Field(default=0)
     """Bumps are never trimmed by default; over-long clips are simply skipped."""
 
+    era_drift_years: int = Field(default=1, ge=0)
+    """How many years either side of the era a *card* may still air.
+
+    Separate from ``ads.era_drift_years`` on purpose. The two pools are tagged to
+    different depths -- every bump in this archive predates 2004, while commercials
+    are filed by year folder -- so one shared number forced a compromise on both.
+    Untagged cards stay eligible regardless, because "unknown year" is not "wrong
+    year".
+    """
+
     allow_other_shows: bool = True
     """Whether a card about a *different* show may stand in as a topical promo.
 

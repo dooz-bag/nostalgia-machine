@@ -497,6 +497,13 @@ channel is* without editing YAML.
 | The picture | the corner bug — mode, type, placement |
 | The schedule | which weekdays each day file applies to |
 
+Era tolerance appears **twice, separately**: `ads.era_drift_years` governs
+commercials, `bumps.era_drift_years` governs continuity cards. They are not one
+setting because the two pools are tagged to different depths — the card archive
+predates the era wholesale, while commercials are filed by year — so a shared number
+forced a compromise on both. `0` means the era year only; untagged material is always
+eligible, because "unknown year" is not "wrong year".
+
 Each file has its own save button, so a mistake in one cannot block another, and
 saving replans the channel immediately.
 
@@ -509,6 +516,29 @@ Everything is validated before anything is written: a submission the config mode
 would reject is refused with the file left untouched, because a saved file that
 cannot load would break the channel at the next plan with no clue which edit did
 it.
+
+### Bump placement
+
+The **Bump review** page carries the placement panels, one per slot length. They
+answer "how many cards, and where" directly, instead of asking you to insert
+`bump`/`ad_pod` segments into `continuity.yaml` in the right order:
+
+| Row | Position | Reads as |
+|---|---|---|
+| before the show | `INTO` | card naming the show that is about to start |
+| after the show | `AFTER` | card looking back at what just aired |
+| after the closing break | `NEXT` | "next up" card |
+| mid-break: going in / coming back | `OUT` / `INTO` | cards either side of the mid-roll pod |
+
+A mid-break with zero cards on both sides is removed rather than written as an empty
+pod, and an unmentioned mid-row is *unchanged*, not cleared — so editing the
+before/after counts never quietly deletes a hand-written mid-roll.
+
+`continuity.yaml` is mostly prose explaining why each break is shaped the way it is,
+and the heading above a template is stored at the end of the *previous* template.
+Rebuilding therefore has to carry those comments across; dropping them on every save
+would make the file progressively less explicable. `tests/test_continuity_edit.py`
+pins that at the comment-count level.
 
 Three modes, and they are exclusive:
 

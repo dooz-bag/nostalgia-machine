@@ -542,7 +542,10 @@ def _plan_slot(
         prev_show=prev_assigned.show_id if prev_assigned else None,
         year=era_year,
         family=show.family if show else None,
-        era_drift=root.ads.era_drift_years,
+        # The bump pool's own tolerance. This used to be ads.era_drift_years,
+        # which meant changing how loose the commercials were silently loosened
+        # the continuity cards too.
+        era_drift=root.bumps.era_drift_years,
         allow_other_shows=root.bumps.allow_other_shows,
     )
 

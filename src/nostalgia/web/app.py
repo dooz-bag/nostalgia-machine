@@ -36,6 +36,17 @@ from .config_edit import (
     read_values,
     save_values,
 )
+from .continuity_edit import (
+    FAMILY_LABELS,
+    MAX_MID,
+    SLOT_FAMILIES,
+    ContinuityEditError,
+    apply_form,
+    parse_form as parse_placement,
+    pod_shares,
+    read_all,
+    template_for,
+)
 from .schedule import (
     ScheduleFormError,
     load_schedule,
@@ -381,7 +392,9 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
 /* Two columns on a wide screen so a long list stays scannable, one on a
    phone. The label column is fixed so the controls line up down the page,
    which is what makes a form read as a table of settings rather than a wall. */
-.settings form { margin-top: 4px; }
+/* `block`, not the default: a flex container puts its children side by side,
+   which laid the mid-break heading alongside the field above it. */
+.settings form { margin-top: 4px; display: block; }
 .settings-group {
   border-top: 1px solid var(--line);
   padding-top: 14px;
@@ -424,6 +437,9 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
   max-width: 60ch;
   line-height: 1.45;
 }
+/* A short number does not need 620px of column. */
+.field.narrow { grid-template-columns: minmax(140px, 220px) minmax(0, 120px); }
+.field.narrow .field-help { grid-column: 2; }
 /* A checkbox reads as a sentence, not as a label above a box. */
 .field.check { grid-template-columns: minmax(0, 1fr); }
 .field.check > label {
@@ -438,6 +454,38 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
 .field.check .field-help { grid-column: 1; margin-left: 25px; }
 .settings button { margin-top: 16px; }
 .filename { margin: 10px 0 0; font-size: 11px; }
+
+/* The mid-break heading needs its own line, or `display: grid` on the field
+   above pulls it into that row. */
+.mid-heading { margin-top: 22px; grid-column: 1 / -1; }
+.mid-heading .group-title { margin-bottom: 2px; }
+
+/* A mid-break is four related numbers describing one moment, so it reads as a
+   single row rather than four more stacked fields. */
+.mid-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px solid #171719;
+}
+.mid-row:last-of-type { border-bottom: 0; }
+.mid-label {
+  flex: 0 0 108px;
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: .18em;
+  text-transform: uppercase;
+}
+.mid-row label {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: var(--dim);
+}
+.mid-row input, .mid-row select { padding: 5px 7px; font: inherit; font-size: 13px; }
 @media (max-width: 620px) {
   .field { grid-template-columns: minmax(0, 1fr); }
   .field > label { padding-top: 0; }
@@ -661,15 +709,71 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             f"/schedule?saved=1&built={quote_plus(message)}", status_code=303
         )
 
+    @app.post("/bumps/placement/{family}")
+    async def save_placement(family: str, request: Request) -> Any:
+        if family not in SLOT_FAMILIES:
+            raise HTTPException(status_code=404, detail=f"no slot family {family!r}")
+        form_data = await request.form()
+        submitted = {
+            str(key): ("" if value is None else str(value))
+            for key, value in form_data.items()
+        }
+        try:
+            form = parse_placement(family, submitted)
+
+            import io
+
+            from ruamel.yaml import YAML
+
+            path = paths.config_dir / "continuity.yaml"
+            reader = YAML()
+            reader.preserve_quotes = True
+            reader.width = 4096
+            reader.indent(mapping=2, sequence=4, offset=2)
+            document = reader.load(path.read_text(encoding="utf-8"))
+            template = template_for(document, family)
+            if template is None:
+                raise ContinuityEditError(
+                    f"continuity.yaml has no default-{family} template to edit"
+                )
+            apply_form(template, form, pod_shares=pod_shares(template))
+
+            buffer = io.StringIO()
+            reader.dump(document, buffer)
+            path.write_text(buffer.getvalue(), encoding="utf-8")
+
+            # Re-validate the whole config before claiming success: a break
+            # template that cannot load would break the channel at the next plan.
+            updated = load_config(paths.config_dir)
+        except (ContinuityEditError, ConfigError) as exc:
+            return _render(
+                _bumps_body(_reload(config, paths), paths, error=str(exc))
+            )
+
+        message = ""
+        try:
+            with Catalog(paths.catalog) as catalog:
+                result = build(updated, catalog, paths)
+            message = f"{len(result.plans)} day(s) replanned"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            message = f"saved, but replanning failed: {exc}"
+        query = f"saved={quote_plus(FAMILY_LABELS.get(family, family))}"
+        if message:
+            query += f"&built={quote_plus(message)}"
+        return RedirectResponse(f"/bumps?{query}", status_code=303)
+
     @app.get("/bumps", response_class=HTMLResponse)
-    def bumps() -> Any:
+    def bumps(saved: str = "", built: str = "") -> Any:
         with Catalog(paths.catalog) as catalog:
             pending = pending_tags(catalog)
             shows = sorted(config.shows)
 
         if not pending:
-            body = '<div class="card"><p class="empty">Every bump has a confirmed subject.</p></div>'
-            return _render(_page("Bump review", body, active="/bumps", card=_card(config)))
+            body = (
+                _bumps_body(_reload(config, paths), paths, saved=saved, built=built)
+                + '<div class="card"><p class="empty">Every bump has a confirmed subject.</p></div>'
+            )
+            return _render(_page("Bumpers", body, active="/bumps", card=_card(config)))
 
         positions = ("", "INTO", "OUT", "NEXT", "AFTER")
         cards = []
@@ -707,7 +811,14 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             f'<div class="card"><p class="label">{len(pending)} awaiting confirmation</p></div>'
             + "".join(cards)
         )
-        return _render(_page("Bump review", body, active="/bumps", card=_card(config)))
+        # Placement sits above the review queue: it is the setting people come
+        # here for, and a queue of 600 untagged cards would bury it.
+        body = (
+            _bumps_body(_reload(config, paths), paths, saved=saved, built=built)
+            + '<h2 class="category">Review queue</h2>'
+            + body
+        )
+        return _render(_page("Bumpers", body, active="/bumps", card=_card(config)))
 
     @app.post("/bumps/{key:path}")
     def confirm(
@@ -1113,18 +1224,25 @@ def _form_section(section, values, entry: SettingsFile) -> str:
 
 
 def _form_field(spec, value, entry: SettingsFile) -> str:
-    """One labelled control, drawn from its declared type."""
+    """One labelled control, drawn from its declared type.
+
+    Element ids are prefixed with the file slug: the same key can appear in more
+    than one file (``era_drift_years`` is configured separately for commercials
+    and for bumpers), and duplicate ids make the second label focus the first
+    input -- clicking "Bump era tolerance" would edit the commercial one.
+    """
     name = _h(spec.key)
+    field_id = _h(f"{entry.slug}-{spec.key}")
     help_html = f'<p class="field-help">{_h(spec.help)}</p>' if spec.help else ""
 
     if spec.kind == BOOL:
         checked = " checked" if value else ""
         control = (
-            f'<input type="checkbox" name="{name}" value="1" id="f-{name}"{checked}>'
+            f'<input type="checkbox" name="{name}" value="1" id="{field_id}"{checked}>'
         )
         return f"""
 <div class="field check">
-  <label for="f-{name}">{control}<span>{_h(spec.label)}</span></label>
+  <label for="{field_id}">{control}<span>{_h(spec.label)}</span></label>
   {help_html}
 </div>"""
 
@@ -1134,11 +1252,11 @@ def _form_field(spec, value, entry: SettingsFile) -> str:
             f"{_h(label)}</option>"
             for choice, label in spec.choices
         )
-        control = f'<select name="{name}" id="f-{name}">{options}</select>'
+        control = f'<select name="{name}" id="{field_id}">{options}</select>'
     elif spec.kind == LIST:
         shown = " ".join(str(item) for item in (value or []))
         control = (
-            f'<input type="text" name="{name}" id="f-{name}" '
+            f'<input type="text" name="{name}" id="{field_id}" '
             f'value="{_h(shown)}" placeholder="{_h(spec.placeholder or "—")}">'
         )
     else:
@@ -1152,17 +1270,173 @@ def _form_field(spec, value, entry: SettingsFile) -> str:
         kind = "number" if spec.kind in (INT, FLOAT) else "text"
         placeholder = spec.placeholder or ("—" if spec.kind == DAY else "")
         control = (
-            f'<input type="{kind}" name="{name}" id="f-{name}" '
+            f'<input type="{kind}" name="{name}" id="{field_id}" '
             f'value="{_h("" if value is None else value)}"{bump} '
             f'placeholder="{_h(placeholder)}">'
         )
 
     return f"""
 <div class="field">
-  <label for="f-{name}">{_h(spec.label)}</label>
+  <label for="{field_id}">{_h(spec.label)}</label>
   {control}
   {help_html}
 </div>"""
+
+
+def _bumps_body(
+    config: RootConfig,
+    paths: Paths,
+    *,
+    saved: str = "",
+    error: str = "",
+    built: str = "",
+) -> str:
+    """The placement panels as a fragment, for the Bumpers page to own.
+
+    Returns a fragment rather than a whole document: the Bumpers page already has
+    a shell and a review queue, and returning a full page here produced two
+    headers and two test cards stacked on top of each other.
+    """
+    """How many continuity cards air, and where.
+
+    The file behind this is ``continuity.yaml``, whose real shape is a flat list of
+    interleaved bump / pod / episode segments. That is right for the planner and
+    wrong for a person, so this page asks the question people actually have --
+    "how many cards around the show, and where?" -- and :mod:`continuity_edit`
+    translates.
+    """
+    document = _continuity_document(paths)
+    forms = read_all(document)
+
+    body = [
+        '<div class="panel-block">',
+        '<p class="label">Bump placement</p>',
+        '<p class="hint">How many [adult swim] continuity cards air around each '
+        "programme, and exactly where. One panel per slot length: the channel "
+        "picks the panel that matches how long the show's slot is. "
+        "<code>Before</code> and <code>After</code> and <code>Before the next</code> "
+        "are the three standard points; a mid-break adds a pair either side of a "
+        "commercial pod in the middle of the episode.</p>",
+        "</div>",
+    ]
+    if error:
+        body.append(f'<div class="saved bad">{_h(error)}</div>')
+    elif saved:
+        body.append(
+            f'<div class="saved">Saved {_h(saved)}'
+            + (f" &middot; {_h(built)}" if built else "")
+            + "</div>"
+        )
+
+    for form in forms:
+        body.append(_bumps_panel(form))
+
+    body.append(
+        '<div class="panel-block"><p class="label">Why these numbers matter</p>'
+        '<p class="hint">A card must fit its slot or it is skipped, so raising a '
+        "count does not guarantee it airs -- the break has to have room. The "
+        "<code>Capped at</code> length is what stops a 15-second card being rejected: "
+        "the classic [adult swim] text bumps run 15.0-15.4s, so anything below 16 "
+        "silently drops most of the archive.</p></div>"
+    )
+    return "".join(body)
+
+
+def _bumps_panel(form) -> str:
+    family = form.family
+    rows = [
+        _count_row(f"{family}.into", "Before the show starts", form.into,
+                   "The card that runs as the programme comes back from a break."),
+        _count_row(f"{family}.after", "After the show ends", form.after,
+                   "\"We now return to…\" style, immediately after the episode."),
+        _count_row(f"{family}.next", "Before the next show", form.next,
+                   "The closing \"up next\" card. Only an up-next card can close a slot."),
+    ]
+    mid_rows = []
+    for index in range(MAX_MID):
+        mid = form.mid[index] if index < len(form.mid) else None
+        mid_rows.append(_mid_row(family, index, mid))
+
+    return f"""
+<div class="panel-block settings">
+  <p class="label">{_h(FAMILY_LABELS.get(family, family))}</p>
+  <p class="hint">{form.total_cards()} card(s) per slot across all points.</p>
+  <form method="post" action="/bumps/placement/{_h(family)}">
+    {''.join(rows)}
+    <div class="field narrow">
+      <label for="f-{family}-max">Capped at (seconds)</label>
+      <input type="number" id="f-{family}-max" name="{family}.max_seconds"
+             value="{form.max_seconds:g}" min="2" max="60" step="0.5">
+      <p class="field-help">A card longer than this is skipped rather than cut short.
+      16s covers the whole classic archive.</p>
+    </div>
+    <div class="mid-heading">
+      <p class="group-title">Mid-break</p>
+      <p class="hint">A mid-roll splits the episode and returns to it. Leave the counts
+      at 0 for no mid-break.</p>
+    </div>
+    {''.join(mid_rows)}
+    <button type="submit">Save {_h(family)} slots</button>
+  </form>
+  <p class="hint filename"><code>config/continuity.yaml</code> &rarr; default-{_h(family)}</p>
+</div>"""
+
+
+def _count_row(name: str, label: str, value: int, help_text: str) -> str:
+    options = "".join(
+        f'<option value="{n}"{" selected" if n == value else ""}>{n}</option>'
+        for n in range(0, 5)
+    )
+    return f"""
+<div class="field">
+  <label for="f-{name}">{_h(label)}</label>
+  <select name="{name}" id="f-{name}" style="max-width:120px">{options}</select>
+  <p class="field-help">{_h(help_text)}</p>
+</div>"""
+
+
+def _mid_row(family: str, index: int, mid) -> str:
+    out = mid.out if mid else 0
+    into = mid.into if mid else 0
+    percent = mid.percent if mid else 50.0
+    pod = mid.pod_seconds if mid else 60
+
+    def pick(name: str, value: int) -> str:
+        return (
+            f'<select name="{name}" style="max-width:90px">'
+            + "".join(
+                f'<option value="{n}"{" selected" if n == value else ""}>{n}</option>'
+                for n in range(0, 4)
+            )
+            + "</select>"
+        )
+
+    return f"""
+<div class="mid-row">
+  <span class="mid-label">Mid-break {index + 1}</span>
+  <label>{pick(f'{family}.mid{index}.out', out)}<span>going in</span></label>
+  <label>{pick(f'{family}.mid{index}.into', into)}<span>coming back</span></label>
+  <label><input type="number" name="{family}.mid{index}.percent" value="{percent:g}"
+         min="5" max="95" step="1" style="width:74px"><span>% into the episode</span></label>
+  <label><input type="number" name="{family}.mid{index}.pod" value="{pod}"
+         min="15" max="300" step="15" style="width:74px"><span>s of ads</span></label>
+</div>"""
+
+
+def _continuity_document(paths: Paths):
+    from ruamel.yaml import YAML
+
+    path = paths.config_dir / "continuity.yaml"
+    reader = YAML()
+    reader.preserve_quotes = True
+    reader.width = 4096
+    reader.indent(mapping=2, sequence=4, offset=2)
+    if not path.is_file():
+        return {}
+    try:
+        return reader.load(path.read_text(encoding="utf-8")) or {}
+    except Exception:  # noqa: BLE001 - an unreadable file must not break the page
+        return {}
 
 
 def _card(config: RootConfig) -> str:

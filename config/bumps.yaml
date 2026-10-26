@@ -1,4 +1,7 @@
 # Bump behaviour and the Phase 2 generated-bump settings.
+#
+# How many cards air and exactly where lives in continuity.yaml; the "Bump
+# placement" panels on the /bumps page edit it without hand-writing segments.
 bumps:
   # strict   -> only a bump naming the right show, or nothing
   # semi     -> the right show, else a promo for another show, else neutral
@@ -31,6 +34,13 @@ bumps:
 
   # No bump repeats within this window.
   cooldown_hours: 6
+
+  # How many years either side of the channel's era year a card may be and still
+  # air. Separate from ads.era_drift_years on purpose: the two pools are tagged to
+  # different depths (every card in this archive predates 2004, while commercials
+  # are filed by year folder), so one shared number compromised both. 0 = same
+  # year only. Untagged cards always stay eligible.
+  era_drift_years: 1
 
   generated:
     # Render typographic cards for slots the real pool cannot fill.
