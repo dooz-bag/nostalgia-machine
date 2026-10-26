@@ -42,6 +42,12 @@ class BuildResult:
     lineup: Path | None = None
 
 
+def _is_video(path: Path) -> bool:
+    from .probe import VIDEO_EXTENSIONS
+
+    return path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
+
+
 def day_config_for(config: RootConfig, day: date) -> DayConfig:
     """Pick the day file that covers *day*."""
     weekday = day.strftime("%a").lower()[:3]
@@ -185,6 +191,37 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
         findings.append(("warn", "scan", f"{row['path']}: {row['reason']}"))
     if not issues:
         findings.append(("ok", "scan", "no scan issues"))
+
+    # A folder under media/shows/ that no roster entry points at is invisible to
+    # the scanner, so a show can sit there fully downloaded and never air. That is
+    # the most expensive silent failure in the project, so it is reported.
+    show_root = paths.media_root / "shows"
+    configured = set()
+    for show in config.shows.values():
+        folder = Path(show.folder)
+        configured.add((folder if folder.is_absolute() else paths.media_root / folder).name.lower())
+    if show_root.is_dir():
+        for folder in sorted(p for p in show_root.iterdir() if p.is_dir()):
+            if folder.name.lower() in configured:
+                continue
+            files = sum(1 for _ in folder.rglob("*") if _is_video(_))
+            if files:
+                findings.append(
+                    (
+                        "warn",
+                        "library",
+                        f"{folder.name}: {files} video file(s) but no entry in "
+                        f"shows.yaml -- this folder is never scanned",
+                    )
+                )
+            else:
+                findings.append(
+                    (
+                        "warn",
+                        "library",
+                        f"{folder.name}: empty folder under media/shows/ (ignored)",
+                    )
+                )
 
     from .catalog import summarise_by_show
 

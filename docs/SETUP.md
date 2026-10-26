@@ -118,6 +118,42 @@ Accepted episode filename forms: `S01E02`, `s1e2`, `1x02`,
 `Season 1 Episode 2`, and an episode number inside a `Season NN/` folder.
 Anything else is reported by `nostalgia doctor` rather than guessed at.
 
+### Filing a download into the library
+
+A fresh download is rarely shaped like the library — one flat folder per series,
+names varying between `S01E01`, `1x01` and `Episode 1`, extras mixed in. Since the
+scanner refuses to guess a season or episode, `nostalgia import` does the guessing
+once, up front, where you can read the proposal before anything moves:
+
+```powershell
+# always start here: nothing is written
+.\run.ps1 import D:\downloads\Futurama
+.\run.ps1 import D:\downloads\Futurama --apply         # copy into place
+.\run.ps1 import D:\downloads\Futurama --apply --move  # move instead
+```
+
+It matches the download folder against each show's id, `title` and `aliases`, so
+`Futurama 1080p WEB-DL`, `aqua.teen.hunger.force` and `ATHF` all resolve without
+being told. Every file is classified and the count is printed:
+
+| Status | Meaning |
+|---|---|
+| `ok` | will be filed as `media/shows/<id>/Season NN/<id> - SxxExx.ext` |
+| `unknown-show` | folder matches no roster entry — add one to `shows.yaml`, or use `--show <id>` |
+| `unparsed` | it is a video but no season/episode can be found; rename it |
+| `collision` | the target already exists — **never overwritten**, even with `--apply` |
+| `duplicate` | two files claim the same episode |
+| `too-small` | under `--min-mb` (default 20), i.e. a sample |
+
+Three deliberate safeguards: it **copies** unless you pass `--move`, it **never
+overwrites** a file already in the library unless you pass `--overwrite`, and it
+rewrites names to the library's own `SxxExx` form instead of preserving whatever
+the release group used. Use `--show <id>` when a folder name is unhelpful and
+`--min-mb 0` only for a test library.
+
+Then, as always: `.\run.ps1 scan`, then `.\run.ps1 plan --show` to confirm the
+episode actually lands in the schedule.
+
 **Durations** come from ffprobe. If you have no ffmpeg (or want deterministic
 fixtures), a `<file>.json` sidecar with `{"duration_ms": 660000}` works:
 `nostalgia scan --sidecars` writes them for you.
@@ -281,6 +317,10 @@ Common causes:
 
 * **"no episodes are catalogued"** — folder names under `media/shows/` must match
   the show ids in `shows.yaml`.
+* **A folder with videos is reported as "never scanned"** — it has no entry in
+  `shows.yaml`, so the scanner skips it entirely. This is the failure worth catching:
+  the show is fully downloaded and simply never airs. Add the entry (or ask
+  `nostalgia import` for a snippet) and rescan.
 * **"is not a whole number of X slots"** — a daypart spans a duration that does not
   divide by its family's slot length. Change `family` or the boundaries.
 * **"dayparts must ascend"** — reorder the dayparts in the day file.

@@ -55,6 +55,7 @@ Requires Python 3.12+ and ffmpeg on `PATH`.
 #    media\shows\aqua-teen-hunger-force\Season 01\...S01E01.mkv
 #    media\bumps\aqua-teen-hunger-force\card-01.mp4
 #    media\commercials\2003\ad-0001.mp4
+#    (a raw download can be filed for you: .\run.ps1 import D:\downloads\Futurama)
 
 # 3. catalogue it
 .\run.ps1 scan
@@ -206,6 +207,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia emit` | Write playout JSON + XMLTV + ErsatzTV lineup |
 | `nostalgia doctor` | Check config, ffmpeg, library and catalog |
 | `nostalgia shows` | List shows and episode counts (`--verbose`) |
+| `nostalgia import` | File a download into `media/shows/<id>/Season NN/` (dry run by default, never overwrites) |
 | `nostalgia review` | List bumps awaiting subject confirmation |
 | `nostalgia tag` | Confirm one bump's subject from the terminal |
 | `nostalgia bumps` | Render generated bump cards (`--dry-run`, `--style`) |
@@ -217,6 +219,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 ```
 config/          channel, shows, dayparts, continuity, ads, bumps, era styles
 src/nostalgia/   grid, rotation, schedule, continuity, ads, bumps, plan, emit
+                 mediaimport: download → library layout, tagged and dry-run first
 media/           your content (never committed)
 playout/         generated playout JSON (never committed)
 xmltv/           generated guide data (never committed)

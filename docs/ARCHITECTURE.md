@@ -31,6 +31,7 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `ads` | Pod filling: whole-spot tolerance, promo top-up, black-card fallback | pure |
 | `plan` | Ties the above into one timeline; enforces invariants | pure |
 | `emit` | Plan → playout JSON, XMLTV, lineup/channel config | writes files |
+| `mediaimport` | Download → library layout: alias match, filename parse, dry-run plan | pure |
 | `catalog` | Scan, tags, airing history (SQLite) | I/O |
 | `probe` | ffprobe with a sidecar fallback | I/O |
 | `bumpgen` | Render typographic cards with ffmpeg | I/O |
@@ -212,6 +213,25 @@ broadcaster does, and what makes "9pm" mean 9pm.
 Tags live in a `.tags.json` sidecar next to each file, which is what lets
 `bumps/generated/` be a folder that is *not* a show. The sidecar is also what the
 review queue writes, so there is one on-disk representation of "what this bump is".
+
+## Guessing happens once, in one place
+
+The scanner is deliberately strict about identity: it will not invent a season or
+episode, because airing episodes out of order is worse than not airing them. That
+means a messy download would otherwise be a silently empty show, so `mediaimport`
+is the single place where guessing is permitted — and it is built as a *plan*
+first, for three reasons:
+
+* **It is a pure function** of the source tree plus the roster, so a dry run is
+  worth reading: the same input always proposes the same targets.
+* **It never overwrites.** A colliding target is reported, because the file
+  already there is library content a person curated. `--overwrite` is explicit.
+* **It copies by default.** The download is the backup until the owner is happy.
+
+The one failure it cannot fix is the one worth guarding: a folder under
+`media/shows/` that no roster entry names is never walked at all. `doctor`
+therefore reports unrostered folders that contain video, which turns "my show
+never plays and everything looks green" into a one-line warning.
 
 ## Catalog and tag durability
 

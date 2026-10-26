@@ -45,6 +45,7 @@ def main(argv: list[str] | None = None) -> int:
         "review": _cmd_review,
         "bumps": _cmd_bumps,
         "autotag": _cmd_autotag,
+        "import": _cmd_import,
         "tag": _cmd_tag,
         "serve": _cmd_serve,
     }[args.command]
@@ -114,6 +115,29 @@ def _parser() -> argparse.ArgumentParser:
         "--min-confidence", type=float, default=0.3, help="threshold for --write"
     )
     autotag_cmd.add_argument("--limit", type=int, default=None, help="examine at most N bumps")
+
+    import_cmd = sub.add_parser(
+        "import", help="file a downloaded show into media/shows/<show-id>/Season NN/"
+    )
+    import_cmd.add_argument("source", help="folder containing the download")
+    import_cmd.add_argument(
+        "--show", default=None, help="force one show id instead of matching folder names"
+    )
+    import_cmd.add_argument(
+        "--move", action="store_true", help="move instead of copy"
+    )
+    import_cmd.add_argument(
+        "--apply", action="store_true", help="actually write files (default is a dry run)"
+    )
+    import_cmd.add_argument(
+        "--overwrite", action="store_true", help="replace a target that already exists"
+    )
+    import_cmd.add_argument(
+        "--min-mb", type=int, default=20, help="ignore videos smaller than this (default 20)"
+    )
+    import_cmd.add_argument(
+        "--recursive", action="store_true", default=True, help=argparse.SUPPRESS
+    )
 
     tag_cmd = sub.add_parser("tag", help="set a bump's subject and position")
     tag_cmd.add_argument("key")
@@ -394,6 +418,89 @@ def _cmd_autotag(args, config, paths: Paths) -> int:
     else:
         print("\nProposals saved as unconfirmed sidecars; confirm them with 'nostalgia review'.")
     return 0
+
+
+def _cmd_import(args, config, paths: Paths) -> int:
+    from . import mediaimport
+
+    source = Path(args.source)
+    if not source.is_dir():
+        print(f"error: not a folder: {source}", file=sys.stderr)
+        return 1
+
+    try:
+        candidates = mediaimport.plan_import(
+            source,
+            config.shows,
+            paths.media_root / "shows",
+            min_bytes=max(0, args.min_mb) * 1024 * 1024,
+            default_show=args.show,
+        )
+    except (NotADirectoryError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+    counts = {}
+    for item in candidates:
+        counts[item.status] = counts.get(item.status, 0) + 1
+
+    ready = [item for item in candidates if item.actionable]
+    print(f"{len(candidates)} file(s) under {source}")
+    for status in sorted(counts):
+        print(f"  {status:<12} {counts[status]}")
+
+    for status in (
+        mediaimport.UNKNOWN_SHOW,
+        mediaimport.UNPARSED,
+        mediaimport.COLLISION,
+        mediaimport.DUPLICATE,
+    ):
+        problems = [item for item in candidates if item.status == status]
+        if not problems:
+            continue
+        print(f"\n{status} ({len(problems)}):")
+        for item in problems[:15]:
+            print(f"  {item.source.relative_to(source)}")
+            print(f"    {item.detail}")
+        if len(problems) > 15:
+            print(f"  ... and {len(problems) - 15} more")
+
+    if not ready:
+        print("\nNothing to import.")
+        return 0
+
+    by_show: dict[str, list] = {}
+    for item in ready:
+        by_show.setdefault(item.show_id or "?", []).append(item)
+    print(f"\nready ({len(ready)}):")
+    for show_id in sorted(by_show):
+        items = by_show[show_id]
+        episodes = sorted({(item.season, item.episode) for item in items})
+        print(f"  {show_id:<26} {len(items):>3} file(s), {len(episodes)} unique episode(s)")
+        for season, episode in episodes[:4]:
+            print(f"      S{season:02d}E{episode:02d}")
+
+    if not args.apply:
+        print(
+            "\nThis is a dry run. Re-run with --apply to "
+            f"{'move' if args.move else 'copy'} them."
+        )
+        return 0
+
+    report = mediaimport.apply_import(
+        candidates, move=args.move, overwrite=args.overwrite
+    )
+    verb = "moved" if report.moved else "copied"
+    print(
+        f"\n{verb} {report.moved + report.copied} file(s), "
+        f"{report.bytes_done / (1024 ** 3):.2f} GB; skipped {report.skipped}"
+    )
+    if report.created_dirs:
+        print(f"created {len(report.created_dirs)} folder(s)")
+    for error in report.errors[:10]:
+        print(f"  error: {error}", file=sys.stderr)
+    print("\nnext: nostalgia scan   # then nostalgia plan --date <day> --show")
+    return 1 if report.errors else 0
 
 
 def _cmd_tag(args, config, paths: Paths) -> int:

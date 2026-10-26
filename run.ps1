@@ -20,7 +20,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Position = 0)]
-    [ValidateSet('setup', 'scan', 'emit', 'plan', 'doctor', 'bumps', 'web', 'stream', 'serve-ersatztv')]
+    [ValidateSet('setup', 'scan', 'emit', 'plan', 'doctor', 'bumps', 'import', 'web', 'stream', 'serve-ersatztv')]
     [string]$Task = 'emit',
 
     [Parameter(ValueFromRemainingArguments = $true)]
@@ -97,6 +97,11 @@ switch ($Task) {
     'bumps' {
         Ensure-Venv
         Invoke-Nostalgia (@('bumps') + $Rest)
+        break
+    }
+    'import' {
+        Ensure-Venv
+        Invoke-Nostalgia (@('import') + $Rest)
         break
     }
     'web' {
