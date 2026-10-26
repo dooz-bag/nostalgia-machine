@@ -382,6 +382,23 @@ know if you fork it for a different channel:
 * `config/shows.yaml` is the show roster. A show id that is not in `media/shows/`
   is reported by `nostalgia doctor` rather than silently skipped.
 
+### Publishing it
+
+This repository has no remote configured by default — commits live in your own
+`.git` until you add one. To create the GitHub repo and push:
+
+```powershell
+# requires the GitHub CLI (winget install GitHub.cli) and `gh auth login` once
+.\scripts\publish.ps1 -User <your-github-username>
+
+# or, publicly
+.\scripts\publish.ps1 -User <your-github-username> -Public
+```
+
+Without `gh` the script prints the two steps to do it in the browser, then pushes.
+It refuses to run if an `origin` already exists, and warns about any tracked file
+over 5 MB so an accidental media commit is caught before GitHub rejects it.
+
 ### Licence
 
 MIT — see [LICENSE](LICENSE). The licence covers the code, not the media; none is
