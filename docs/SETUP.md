@@ -539,11 +539,37 @@ into `.\ersatztv\`. It needs to sit next to its own `ffmpeg.exe`.
 
 | Purpose | URL |
 |---|---|
-| Channel list (M3U) | `http://localhost:8409/channels.m3u` |
-| Guide (XMLTV) | `http://localhost:8409/xmltv.xml` |
-| Channel 1 HLS | `http://localhost:8409/channel/1.m3u8` |
+| Channel list (M3U) | `http://<host>:8409/channels.m3u` |
+| Guide (XMLTV) | `http://<host>:8409/xmltv.xml` |
+| Channel 1 HLS | `http://<host>:8409/channel/1.m3u8` |
+
+> **Use a LAN address, not `localhost`, for anything except this machine.**
+> ErsatzTV builds the playlist from the address it was requested *by*, so
+> `channels.m3u` fetched as `localhost` returns stream URLs pointing at
+> `localhost`. On a TV that means "fetch the video from yourself" and it fails.
+> `nostalgia emit` prints the right address at the end of its run.
+>
+> The host **name** is not a substitute either: on a machine with WSL or Hyper-V
+> it resolves to several addresses, and only one of them is on your real network.
+> Reserve a DHCP lease for the machine, or use the address `emit` reports.
 
 ## 5. Connect a player
+
+**Chromecast with Google TV / Android TV**
+
+Install the IPTV app *on the TV* rather than casting from a phone or desktop —
+native playback handles a live stream better than a cast session, and you keep
+the guide.
+
+1. From the TV's app store, install **TiviMate** (nicer UI and EPG; polish needs
+   its paid tier) or **IPTV Smarters Pro** (free).
+2. *Add playlist → M3U URL* → `http://<host>:8409/channels.m3u`.
+3. If programmes show "no information", add the EPG URL by hand:
+   `http://<host>:8409/xmltv.xml`.
+
+The playlist already carries `url-tvg`, so most apps pick the guide up
+automatically. Casting from the phone app works too, but the phone has to stay
+awake, so it is a fallback rather than the intended setup.
 
 **Jellyfin / Emby**
 
@@ -568,7 +594,10 @@ In Dispatcharr (`http://localhost:9191`):
 Then in Plex: Settings → Live TV & DVR → set up a tuner at `http://<host>:9191`
 and point the guide at Dispatcharr's XMLTV URL. Plex Pass is required.
 
-**VLC**: `Media → Open Network Stream → http://<host>:8409/channels.m3u`.
+**VLC**: `Media → Open Network Stream → http://<host>:8409/channels.m3u`. Good
+for proving the stream works; it is a player rather than a TV front end, so it
+shows no guide and its Chromecast support does not handle live HLS properly. Use
+the on-TV app above for actual viewing.
 
 ## Keeping it running
 
@@ -578,6 +607,26 @@ Next picks up new playout files without a restart, so regeneration never interru
 playback.
 
 For a native install, a scheduled task running `emit` daily is enough.
+
+### Windows host settings that break a 24/7 channel
+
+Two defaults will make the channel disappear for reasons that look like a bug:
+
+```powershell
+# Windows sleeps after an hour on AC power, taking the channel with it.
+powercfg /change standby-timeout-ac 0
+powercfg /change hibernate-timeout-ac 0
+```
+
+* **Sleep** — the streamer cannot reconnect a sleeping machine, so a TV shows a
+  network error rather than the channel.
+* **DHCP** — the advertised address can change, silently orphaning every saved
+  playlist. Reserve a lease on the router.
+
+Firewall: Docker Desktop's own inbound rule already covers the Private and Public
+profiles, and the network is normally Private, so no rule usually needs adding. If
+a TV still cannot connect, check that the network is not marked **Public** and
+that the port is published (`docker ps` shows `0.0.0.0:8409->8409/tcp`).
 
 ## Tuning
 

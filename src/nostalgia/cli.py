@@ -7,6 +7,7 @@ overwrites its own outputs, and nothing deletes media or tags.
 from __future__ import annotations
 
 import argparse
+import subprocess
 import sys
 from datetime import date
 from pathlib import Path
@@ -19,6 +20,10 @@ from .paths import Paths
 from .pipeline import BuildError, build, day_config_for, doctor, scan
 from .plan import PlanContext, describe_plan
 from .probe import ProbeError
+
+#: Container name from ``docker-compose.yml``. Used only to notice that this
+#: project is deployed in Docker while the command is running on the host.
+SCHEDULER_CONTAINER = "nostalgia-scheduler"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -238,7 +243,66 @@ def _cmd_plan(args, config, paths: Paths) -> int:
 
 
 def _cmd_emit(args, config, paths: Paths) -> int:
+    # Emitting on the host of a Docker deployment silently breaks the streamer:
+    # the mount layout does not mirror the repo, so `lineup.json` and
+    # `channel.json` are rewritten with host paths that do not exist inside the
+    # container, and the channel then serves black rather than failing loudly.
+    # Refusing here is better than a working command with a broken result.
+    if _must_emit_in_container():
+        print(
+            "refusing to emit on the host: this deployment streams from Docker.\n"
+            "Run it in the container instead, which sees the paths it needs:\n\n"
+            "  docker compose exec scheduler python -m nostalgia.cli --root /app emit\n\n"
+            "or set NOSTALGIA_CONTAINER_ROOT=/app to write container paths from here.",
+            file=sys.stderr,
+        )
+        return 1
     return _run_build(args, config, paths, emit=True, show=False, quiet=False)
+
+
+def _must_emit_in_container() -> bool:
+    """Whether emitting here would write paths only this machine can read.
+
+    True only for a host run of a Docker deployment. Emitting inside the container
+    is the normal path, a native install has no container to defer to, and setting
+    ``NOSTALGIA_CONTAINER_ROOT`` means the caller has taken responsibility for the
+    remap -- all three are allowed.
+    """
+    import os
+    import shutil
+
+    if os.environ.get("NOSTALGIA_CONTAINER_ROOT"):
+        return False
+    if _running_in_docker():
+        return False
+    if shutil.which("docker") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["docker", "ps", "--filter", "name=nostalgia-scheduler", "--format", "{{.Names}}"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return SCHEDULER_CONTAINER in result.stdout
+
+
+def _running_in_docker() -> bool:
+    import os
+
+    return os.path.exists("/.dockerenv")
+
+
+def _streamer_port() -> int:
+    """The port the streamer is published on, honouring ``ETV_PORT``."""
+    import os
+
+    try:
+        return int(os.environ.get("ETV_PORT") or 8409)
+    except ValueError:
+        return 8409
 
 
 def _run_build(args, config, paths: Paths, *, emit: bool, show: bool, quiet: bool) -> int:
@@ -303,11 +367,101 @@ def _run_build(args, config, paths: Paths, *, emit: bool, show: bool, quiet: boo
         print(f"wrote {len(result.xmltv_files)} guide file(s) to {paths.xmltv_dir}")
         if result.lineup:
             print(f"wrote ErsatzTV lineup: {result.lineup}")
+        urls = lan_urls()
+        if urls:
+            print("\nnext: docker compose up -d, then point a player at " + urls[0])
+            for extra in urls[1:]:
+                print(f"      (also reachable at {extra})")
+        else:
+            # Emitting inside the container: the host's LAN address is not
+            # visible from here, and inventing one would be worse than saying so.
+            print(
+                "\nnext: docker compose up -d, then point a player at "
+                f"http://<this-machine's-LAN-IP>:{_streamer_port()}/channels.m3u"
+            )
         print(
-            "\nnext: docker compose up -d, then point a player at "
-            "http://localhost:8409/channels.m3u"
+            "      Use a LAN address, not localhost: the streamer builds the\n"
+            "      playlist from the address you requested it by, so a TV given\n"
+            "      'localhost' would be told to fetch streams from itself."
         )
     return 0
+
+
+def lan_urls(port: int | None = None) -> list[str]:
+    """Addresses a *player on the network* can use to reach the streamer.
+
+    ErsatzTV builds its playlist from the address it was requested by, so the URL
+    you hand a TV becomes the URL the TV then fetches streams from. Telling someone
+    to use ``localhost`` therefore works on the machine running the channel and
+    fails on every TV in the house.
+
+    The primary result is the address the OS would actually route the internet
+    through, which is the one on the real LAN rather than a WSL or Hyper-V virtual
+    adapter. Those virtual adapters are the reason a hostname is not enough: this
+    machine's name resolves to three addresses, two of which a TV cannot reach.
+    """
+    port = _streamer_port() if port is None else port
+    primary = _default_route_address()
+    candidates = [primary] if primary else []
+    candidates += [
+        address
+        for address in _local_ipv4_addresses()
+        if address != primary and _looks_like_lan(address)
+    ]
+    return [f"http://{address}:{port}/channels.m3u" for address in candidates]
+
+
+def _default_route_address() -> str | None:
+    """The local address the OS would use to reach the outside world.
+
+    Uses a UDP socket, which performs no traffic: ``connect`` on UDP only resolves
+    the route, so this costs nothing and never leaves the machine.
+    """
+    import socket
+
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.connect(("203.0.113.1", 9))  # TEST-NET-3, never routed
+        address = probe.getsockname()[0]
+        return address if _looks_like_lan(address) else None
+    except OSError:
+        return None
+    finally:
+        probe.close()
+
+
+def _local_ipv4_addresses() -> list[str]:
+    import socket
+
+    try:
+        infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+    except OSError:
+        return []
+    seen: list[str] = []
+    for info in infos:
+        address = info[4][0]
+        if address not in seen:
+            seen.append(address)
+    return seen
+
+
+def _looks_like_lan(address: str) -> bool:
+    """True for an address a phone or TV could plausibly reach.
+
+    Deliberately excludes loopback and the ``172.16/12`` range WSL and Hyper-V
+    use for their host-only switches, which are reachable only from this machine.
+    """
+    octets = address.split(".")
+    if len(octets) != 4 or not all(part.isdigit() for part in octets):
+        return False
+    first, second = int(octets[0]), int(octets[1])
+    if first == 127:
+        return False
+    if first == 172 and 16 <= second <= 31:
+        return False
+    if first == 169 and second == 254:
+        return False
+    return True
 
 
 def _pending_tag_count(paths: Paths) -> int:
