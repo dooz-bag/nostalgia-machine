@@ -212,8 +212,8 @@ typographic [adult swim] cards — but it is a flat dump with names like
 | position | `_Next` / `_Into` / `_After` in the **filename** |
 
 ```powershell
-.\scripts\import-bumps.ps1 -Source C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps -DryRun
-.\scripts\import-bumps.ps1 -Source C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps
+.\scripts\import-bumps.ps1 -Source C:\Downloads\AdultswimBumps -DryRun
+.\scripts\import-bumps.ps1 -Source C:\Downloads\AdultswimBumps
 ```
 
 It maps filenames onto your roster (`ATHF`, `AQUA_TEEN` → `aqua-teen-hunger-force`,
@@ -517,6 +517,32 @@ would reject is refused with the file left untouched, because a saved file that
 cannot load would break the channel at the next plan with no clue which edit did
 it.
 
+### Skipping the episode that is on
+
+**On now** (`/`) has a **Skip this episode** button under the title. It swaps in the
+next episode of the same show and replans the channel immediately.
+
+A live channel cannot skip the way a video player can: the whole day is written in
+advance and ErsatzTV plays it by wall clock, so the only honest implementation is to
+change what the playout file says. Two consequences are worth knowing before you
+press it:
+
+* The change lands when a player **next connects**. Cutting into a session already
+  running would drop every viewer and desync the rest of the hour.
+* The skip is recorded in `data/skips.json` and **consumed once**. The next rebuild
+  marks it used and the schedule returns to normal behind it — this is not a
+  programming change.
+
+Mechanically it keeps ownership of the same wall-clock span: the replacement
+episode gives back its slot *and* its mid-roll pods (those exist to pad a 22-minute
+episode to 30, so holding onto them would push everything after it late), then the
+break is rebuilt from the new episode's own length. The day still ends exactly where
+it did, with no gap, so nothing goes black.
+
+The recorded `episode_key` is what makes it safe: if the plan has moved that slot
+onto a different episode by the time the build runs, the skip is refused with a
+warning rather than swapping out something nobody clicked on.
+
 ### Bump placement
 
 The **Bump review** page carries the placement panels, one per slot length. They
@@ -683,6 +709,36 @@ the guide.
 The playlist already carries `url-tvg`, so most apps pick the guide up
 automatically. Casting from the phone app works too, but the phone has to stay
 awake, so it is a fallback rather than the intended setup.
+
+#### The guide, and why it can look empty
+
+`http://<host>:8409/xmltv.xml` is a single file describing the **whole horizon**
+(`channel.horizon_days`, 3 by default), starting today. It is rewritten, not
+appended to, so it always describes exactly the days the playout files describe.
+
+TiviMate settings that matter:
+
+| Setting | Value |
+|---|---|
+| EPG source | `http://<host>:8409/xmltv.xml` (not a local file) |
+| Update interval | 6 hours, or "on app start" |
+| Timezone | the TV's own; the guide is already stamped `+0900` |
+
+If the guide comes up blank, it is almost always one of these:
+
+* **A stale playlist.** Re-add the M3U after the channel restarts; the app caches
+  the guide URL from the playlist it was given.
+* **An old emit.** Before this was one file per horizon, each day overwrote the
+  same path, so only the *last* day survived and the guide began 48 hours in the
+  future. `nostalgia emit` now writes all days at once; run it (or wait for the
+  scheduler) and refresh the guide.
+* **The TV cannot reach the host.** Fetch the XMLTV URL in the TV's browser. The
+  playlist hands out whatever address you requested it *by*, so a `localhost`
+  playlist points a television at itself.
+
+Each programme carries a title, the `SxxEyy` sub-title, a description, a category
+and an `xmltv_ns` episode number, so episode-level "new episode" marks and sorting
+work where the app supports them.
 
 **Jellyfin / Emby**
 

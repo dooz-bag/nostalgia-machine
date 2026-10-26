@@ -19,12 +19,19 @@ from .emit import (
     set_channel_timezone,
     set_path_mapping,
     write_ersatztv_config,
+    write_guide,
     write_playout,
-    write_xmltv,
 )
 from .grid import GridError, build_day, is_dst_transition_day
 from .plan import Plan, PlanContext, PlanError, build_plan
 from .paths import Paths
+from .skip import (
+    OverrideFile,
+    load_overrides,
+    mark_used,
+    pending_for,
+    prune,
+)
 from .rotation import cycle_length
 
 
@@ -378,8 +385,14 @@ def build(
     emit: bool = True,
     ignore_cooldowns: bool = False,
     allow_generated: bool | None = None,
+    use_skips: bool = True,
 ) -> BuildResult:
-    """Build and (optionally) write playout + XMLTV for a run of days."""
+    """Build and (optionally) write playout + XMLTV for a run of days.
+
+    ``use_skips`` applies pending "skip this programme" overrides from
+    ``data/skips.json``. They are consumed as they are planned, so a skip fires
+    once and the schedule returns to normal behind it.
+    """
     set_channel_timezone(config.channel.grid.timezone)
     # Inside Docker the mounts do not mirror the repo, so emitted media paths are
     # remapped to what the streamer will actually see. Identity when unset.
@@ -415,9 +428,15 @@ def build(
     # layer here would double the mark; `plan.watermark_rule` enforces that.
     watermark_layer = _overlay_layer(config, paths)
 
+    # Read once: every day in the horizon is planned from the same set of pending
+    # clicks, and the file is only rewritten after the whole run succeeds.
+    overrides = load_overrides(paths.skips) if use_skips else OverrideFile()
+    applied: dict = {}
+
     for offset in range(horizon):
         day = start_day + timedelta(days=offset)
         day_config = day_config_for(config, day)
+        pending = pending_for(overrides, day)
         try:
             plan = build_plan(
                 day,
@@ -425,9 +444,14 @@ def build(
                 context,
                 ignore_cooldowns=ignore_cooldowns,
                 allow_generated=allow_generated,
+                skips=pending,
             )
         except (PlanError, GridError) as exc:
             raise BuildError(f"{day}: {exc}") from exc
+        if pending:
+            applied.update(
+                {f"{day.isoformat()}#{index}": skip for index, skip in pending.items()}
+            )
 
         result.plans.append(plan)
         result.warnings.extend(plan.warnings)
@@ -438,9 +462,15 @@ def build(
             result.playout_files.append(
                 write_playout(plan, emit_paths, watermark_layer=watermark_layer)
             )
-            result.xmltv_files.append(write_xmltv(plan, emit_paths))
 
     if emit:
+        # One guide for the whole horizon. Writing it per day overwrote the same
+        # file each time, so only the *last* day survived -- the stream served,
+        # but the schedule started 48 hours in the future and a player showed an
+        # empty guide.
+        result.xmltv_files.append(
+            write_guide(result.plans, emit_paths, channel_name=config.channel.name)
+        )
         lineup, _ = write_ersatztv_config(
             emit_paths,
             channel_number=config.channel.number,
@@ -455,6 +485,12 @@ def build(
             config_dir=paths.ersatztv_dir,
         )
         result.lineup = lineup
+
+        # Only now are the clicks consumed. If any day failed to plan, the build
+        # raised above and every override is still pending -- which is correct: the
+        # channel is still serving the old playout, so the skip has not happened.
+        mark_used(paths.skips, {index: skip for index, skip in applied.items()})
+        prune(paths.skips, before=start_day)
 
     return result
 

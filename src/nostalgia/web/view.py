@@ -21,6 +21,7 @@ from ..plan import Plan, PlanContext, build_plan
 from ..sidecars import POSITIONS
 from ..sidecars import BumpTag
 from ..sidecars import write as write_tag
+from ..skip import load_overrides, pending_for
 
 # A subject is a show id: lowercase, hyphen-separated (``aqua-teen-hunger-force``).
 _SUBJECT_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -34,6 +35,11 @@ class ItemView:
     title: str
     subtitle: str
     note: str
+    slot_index: int = -1
+    """Which slot of the day this came from, so a skip can name it."""
+
+    asset_key: str = ""
+    """What is actually playing, so a skip can refuse to fire on the wrong episode."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,6 +63,8 @@ def _view(plan: Plan, item, zone, titles: dict[str, str] | None = None) -> ItemV
         title=title,
         subtitle=item.subtitle,
         note=item.note,
+        slot_index=item.slot_index,
+        asset_key=item.asset_key,
     )
 
 
@@ -81,9 +89,29 @@ def _config_fingerprint(config: RootConfig) -> int:
     return hash(config.model_dump_json())
 
 
+def _skip_stamp(paths: Paths) -> object:
+    """When the pending-skip file last changed.
+
+    Part of the plan cache key: a skip is a plan override, so a cache that ignored
+    it would keep showing -- and serving -- the programme the user just skipped.
+    """
+    import os
+
+    try:
+        info = os.stat(paths.skips)
+        return (info.st_mtime_ns, info.st_size)
+    except OSError:
+        return None
+
+
 def plan_for_day(config: RootConfig, catalog: Catalog, paths: Paths, day: date) -> Plan:
-    """The plan for *day*, cached until the config or the catalog changes."""
-    key = (day, _config_fingerprint(config), _catalog_stamp(catalog))
+    """The plan for *day*, cached until the config, catalog or skips change."""
+    key = (
+        day,
+        _config_fingerprint(config),
+        _catalog_stamp(catalog),
+        _skip_stamp(paths),
+    )
     cached = _PLAN_CACHE.get(key)
     if cached is not None:
         return cached
@@ -92,7 +120,16 @@ def plan_for_day(config: RootConfig, catalog: Catalog, paths: Paths, day: date) 
         config, catalog, config_dir=paths.config_dir, media_root=paths.media_root
     )
     try:
-        plan = build_plan(day, day_config_for(config, day), context)
+        plan = build_plan(
+            day,
+            day_config_for(config, day),
+            context,
+            # A pending skip has to be visible here too, or the page would show
+            # the old programme while the emitted file already airs the new one.
+            # The scheduler marks overrides used only after a successful emit, so
+            # an override that is still pending applies here as well.
+            skips=pending_for(load_overrides(paths.skips), day),
+        )
     except BuildError as exc:
         raise LookupError(str(exc)) from exc
 

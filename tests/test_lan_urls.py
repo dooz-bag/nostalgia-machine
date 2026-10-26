@@ -16,7 +16,7 @@ from nostalgia.cli import _looks_like_lan, lan_urls
 @pytest.mark.parametrize(
     "address",
     [
-        "10.36.191.85",
+        "10.1.2.3",
         "192.168.1.5",
         "192.168.0.254",
         "10.0.0.1",

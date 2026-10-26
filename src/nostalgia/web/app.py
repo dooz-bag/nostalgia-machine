@@ -53,7 +53,7 @@ from .schedule import (
     parse_form,
     write_schedule,
 )
-from .view import apply_tag, now_playing, pending_tags
+from .view import apply_tag, now_playing, pending_tags, plan_for_day
 
 _CSS = """
 /* SMPTE ECR 1-1978 NTSC colour bars. The official levels are 75% amplitude,
@@ -249,6 +249,29 @@ main { padding: 26px 28px 60px; max-width: 940px; }
 }
 .now-title { font-size: 27px; margin: 2px 0 2px; font-weight: 700; letter-spacing: .01em; }
 .now-sub { color: var(--dim); margin: 0; }
+
+/* Skip sits under the title, not beside it: the button is a deliberate act and
+   should not be reachable by a stray click on the largest thing on the page. */
+.skip-form { margin: 14px 0 6px; }
+.skip-form button {
+  font: inherit;
+  font-weight: 700;
+  letter-spacing: .04em;
+  text-transform: uppercase;
+  font-size: 13px;
+  color: var(--ink);
+  background: transparent;
+  border: 2px solid var(--cyan);
+  border-radius: 3px;
+  padding: 8px 16px;
+  cursor: pointer;
+}
+.skip-form button:hover,
+.skip-form button:focus-visible {
+  background: var(--cyan);
+  color: #000;
+  outline: none;
+}
 .kind { color: var(--accent); text-transform: uppercase; letter-spacing: .1em; }
 
 table { border-collapse: collapse; width: 100%; }
@@ -574,7 +597,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         return HTMLResponse(html)
 
     @app.get("/", response_class=HTMLResponse)
-    def index() -> Any:
+    def index(skipped: str = "", built: str = "", resync: str = "") -> Any:
         with Catalog(paths.catalog) as catalog:
             try:
                 state = now_playing(config, catalog, paths)
@@ -593,11 +616,26 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             current_html = '<p class="empty">Nothing scheduled right now.</p>'
         else:
             item = state.current
+            # Only an episode can be skipped. A card or a commercial has seconds
+            # left on the clock, and "skip to the next ad" is not a feature.
+            skip_button = (
+                f"""
+  <form method="post" action="/skip" class="skip-form">
+    <input type="hidden" name="slot" value="{item.slot_index}">
+    <button type="submit">Skip this episode &rsaquo;</button>
+  </form>
+  <p class="hint">Swaps in the next episode from the same show and replans. The
+  picture changes when a player next tunes in -- a live stream cannot cut into a
+  session already running.</p>"""
+                if item.kind == "episode"
+                else ""
+            )
             current_html = (
                 f'<p class="label">{item.kind} &middot; {item.clock} &middot; '
                 f'{item.duration_s:.0f}s</p>'
                 f'<h2 class="now-title">{_h(item.title)}</h2>'
                 f'<p class="now-sub">{_h(item.subtitle)}</p>'
+                f"{skip_button}"
             )
 
         rows = "".join(
@@ -612,7 +650,16 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             else '<p class="empty">No further programmes today.</p>'
         )
 
+        flash = ""
+        if skipped:
+            flash = (
+                f'<div class="saved">{_h(skipped)}'
+                + (f" &middot; {_h(built)}" if built else "")
+                + "</div>"
+            )
+
         body = f"""
+{flash}
 <div class="card now">
   <p class="label">{state.day} &middot; {state.now_clock}</p>
   {current_html}
@@ -639,6 +686,66 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
   </div>
 </div>"""
         return _render(_page("On now", body, active="/", card=_card(config)))
+
+    @app.post("/skip")
+    def skip(slot: str = Form(...)) -> Any:
+        """Skip one episode, then replan so the stream actually changes.
+
+        Deliberately *not* "skip whatever is on now": during a break that is a
+        commercial, and "skip to the next ad" is not a feature. The page names the
+        slot it meant, and this trusts that name -- the recorded ``episode_key``
+        is what protects correctness, by refusing to fire if the plan has since
+        moved that slot onto a different episode.
+        """
+        from ..skip import load_overrides as _load
+        from ..skip import request_skip as _request
+
+        try:
+            target = int(slot)
+        except ValueError:
+            return RedirectResponse(
+                "/?skipped=" + quote_plus("That is not a slot number"), status_code=303
+            )
+
+        with Catalog(paths.catalog) as catalog:
+            try:
+                state = now_playing(config, catalog, paths)
+                plan = plan_for_day(config, catalog, paths, state.day)
+            except LookupError as exc:
+                return RedirectResponse(
+                    "/?skipped=" + quote_plus(str(exc)), status_code=303
+                )
+
+            playing = next(
+                (item for item in plan.episode_items() if item.slot_index == target),
+                None,
+            )
+            if playing is None:
+                return RedirectResponse(
+                    "/?skipped=" + quote_plus("That slot has no episode to skip"),
+                    status_code=303,
+                )
+            _request(
+                paths.skips,
+                day=state.day,
+                slot_index=target,
+                episode_key=playing.asset_key,
+            )
+            label = f"Skipped {playing.title} {playing.subtitle}"
+
+        # Rebuild immediately: a skip only becomes real when the playout file says
+        # so, and a click that changes nothing reads as a broken button.
+        message = ""
+        try:
+            with Catalog(paths.catalog) as catalog:
+                result = build(config, catalog, paths)
+            message = f"{len(result.plans)} day(s) replanned"
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            message = f"skip saved, but replanning failed: {exc}"
+        return RedirectResponse(
+            f"/?skipped={quote_plus(label)}&built={quote_plus(message)}",
+            status_code=303,
+        )
 
     @app.get("/schedule", response_class=HTMLResponse)
     def schedule(saved: str = "", built: str = "") -> Any:

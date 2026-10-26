@@ -58,6 +58,15 @@ class Paths:
         return self.data_dir / "catalog.sqlite"
 
     @property
+    def skips(self) -> Path:
+        """Pending "skip this programme" overrides.
+
+        Runtime state, not configuration: it is a record of what was clicked and it
+        is meant to age out. Under ``data/`` so it is never committed.
+        """
+        return self.data_dir / "skips.json"
+
+    @property
     def media_root(self) -> Path:
         return self.root / "media"
 

@@ -15,10 +15,10 @@ Invariants the planner enforces, in order of severity:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date
 from pathlib import Path
-from typing import Iterator, Sequence
+from typing import TYPE_CHECKING, Iterator, Mapping, Sequence
 
 from . import programming
 from .ads import PodError, PodFill, fill_gap, fill_pod
@@ -37,6 +37,9 @@ from .grid import Slot, build_day, day_bounds_ms, format_wall
 from .rotation import NoEpisodesError, RotationRing, build_rings, select
 from .schedule import AssignedSlot, assign_day
 from .watermark import WatermarkRule
+
+if TYPE_CHECKING:
+    from .skip import Skip
 
 
 class PlanError(RuntimeError):
@@ -202,8 +205,14 @@ def build_plan(
     *,
     ignore_cooldowns: bool = False,
     allow_generated: bool | None = None,
+    skips: Mapping[int, "Skip"] | None = None,
 ) -> Plan:
-    """Build one day's timeline."""
+    """Build one day's timeline.
+
+    ``skips`` are slot indices whose programme should be replaced by the show's
+    next episode. See :mod:`nostalgia.skip` for why that is a plan override rather
+    than a player command.
+    """
     root = context.root
     channel = root.channel
     day_start, day_end = day_bounds_ms(day, channel.grid)
@@ -266,6 +275,26 @@ def build_plan(
 
     mark = watermark_rule(root)
     ordered = sorted(assignments.values(), key=lambda a: a.slot.start_ms)
+
+    # A skipped slot has to be planned twice: once to learn what the playing
+    # programme actually lasts -- its duration is what decides how much break
+    # surrounds it, so it cannot be guessed from the slot length -- and again with
+    # the following episode substituted. Only the second pass survives, so this
+    # costs planning time and changes nothing else about the day.
+    if skips:
+        ordered = _apply_skips(
+            plan,
+            ordered,
+            context,
+            dict(skips),
+            bump_tracker=bump_tracker,
+            ad_tracker=ad_tracker,
+            real_bumps=real_bumps,
+            generated_pool=generated_pool,
+            generated_budget=budget,
+            mark=mark,
+        )
+
     for position, assigned in enumerate(ordered):
         nxt = ordered[position + 1] if position + 1 < len(ordered) else None
         prev = ordered[position - 1] if position > 0 else None
@@ -290,6 +319,128 @@ def build_plan(
     if problems:
         raise PlanError(f"{day}: timeline is invalid\n  - " + "\n  - ".join(problems))
     return plan
+
+
+def _apply_skips(
+    plan: Plan,
+    ordered: list[AssignedSlot],
+    context: PlanContext,
+    skips: Mapping[int, "Skip"],
+    *,
+    bump_tracker,
+    ad_tracker,
+    real_bumps: Sequence,
+    generated_pool: Sequence,
+    generated_budget: GeneratedBudget,
+    mark: "WatermarkRule | None",
+) -> list[AssignedSlot]:
+    """Rewrite the running order so skipped slots air the next episode.
+
+    A skip is *not* "cut this episode out". Removing a programme and keeping its
+    neighbours' start times would leave a hole the length of a show, and ErsatzTV
+    plays a gap as black -- on a live channel that is a visibly dead stream. So the
+    replacement keeps ownership of the same wall-clock span, and the timeline stays
+    exactly as long as it was.
+
+    The replacement episode must fit the slot it inherits. It usually does, because
+    episodes of one show land in the same slot family, but a 23-minute episode does
+    exist in a 15-minute show's library, and asking the planner for 23 minutes of a
+    22-minute slot is how the whole day gets refused. When it does not fit, the
+    show's rotation is walked forward to the first episode that does -- which is
+    still "the next one you can watch", not a silent no-op.
+
+    Only the running order is rewritten, and the caller plans it once, so a skipped
+    day costs a normal day plus one probe slot.
+    """
+    by_index = {assigned.slot.index: assigned for assigned in ordered}
+
+    for slot_index, skip in sorted(skips.items()):
+        assigned = by_index.get(slot_index)
+        if assigned is None:
+            plan.warnings.append(
+                f"{plan.day} slot {slot_index}: skip ignored, that slot is not in today's plan"
+            )
+            continue
+
+        # Plan the slot as it stands, to learn which episode is airing. Its length
+        # cannot be read off the slot: a 21-minute and a 23-minute episode occupy
+        # the same 30-minute slot and leave very different room for break.
+        probe = Plan(
+            day=plan.day,
+            channel_name=plan.channel_name,
+            channel_number=plan.channel_number,
+            tvg_id=plan.tvg_id,
+            day_start_ms=plan.day_start_ms,
+            day_end_ms=plan.day_end_ms,
+        )
+        _plan_slot(
+            probe,
+            assigned,
+            None,
+            None,
+            context,
+            bump_tracker=bump_tracker,
+            ad_tracker=ad_tracker,
+            real_bumps=real_bumps,
+            generated_pool=generated_pool,
+            generated_budget=generated_budget,
+            mark=mark,
+        )
+        playing = next((item for item in probe.items if item.kind == "episode"), None)
+        if playing is None:
+            plan.warnings.append(
+                f"{plan.day} slot {slot_index}: skip ignored, nothing is airing there"
+            )
+            continue
+        if skip.episode_key and playing.asset_key != skip.episode_key:
+            # The plan moved underneath the request (a rebuild, a config change).
+            # Applying it now would swap out an episode nobody asked to skip.
+            plan.warnings.append(
+                f"{plan.day} slot {slot_index}: skip ignored, "
+                f"{skip.episode_key} is no longer the episode airing there"
+            )
+            continue
+
+        replacement = _next_episode(assigned, playing, context)
+        if replacement is None:
+            plan.warnings.append(
+                f"{plan.day}: skip ignored, {assigned.show_id} has no other episode "
+                f"that fits a {assigned.slot.length_ms / 60_000:.0f}-minute slot"
+            )
+            continue
+
+        by_index[slot_index] = replace(assigned, episode=replacement)
+        plan.warnings.append(
+            f"{plan.day} slot {slot_index}: skipped to {assigned.show_id} "
+            f"S{replacement.season:02d}E{replacement.episode:02d}"
+        )
+
+    return sorted(by_index.values(), key=lambda a: a.slot.start_ms)
+
+
+def _next_episode(assigned: AssignedSlot, playing: PlannedItem, context: PlanContext):
+    """The episode after *playing* in its show's rotation, if it fits the slot.
+
+    Walked forward rather than taken at ``ordinal + 1``: episodes in one show are
+    not guaranteed equal in length, and "next" that cannot air is not a skip.
+    """
+    ring = context.rings.get(assigned.show_id)
+    if ring is None or len(ring) < 2:
+        return None
+    start = next(
+        (index for index, episode in enumerate(ring.episodes) if episode.key == playing.asset_key),
+        None,
+    )
+    if start is None:
+        return None
+    limit = assigned.slot.length_ms
+    for step in range(1, len(ring) + 1):
+        candidate = ring.episodes[(start + step) % len(ring)]
+        if candidate.key == playing.asset_key:
+            continue
+        if candidate.duration_ms < limit:
+            return candidate
+    return None
 
 
 def _assignments_from_programming(placed: Sequence) -> dict[str, AssignedSlot]:

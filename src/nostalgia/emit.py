@@ -155,25 +155,40 @@ def prune_playouts(paths: EmitPaths, *, keep_days: Iterable[date]) -> list[Path]
 
 
 def to_xmltv(plan: Plan, *, channel_name: str | None = None) -> str:
-    """XMLTV guide for one channel, built from the plan's guide items."""
-    zone = tz(_zone_hint(plan))
-    name = channel_name or plan.channel_name
+    """XMLTV guide for one day."""
+    return to_xmltv_many([plan], channel_name=channel_name)
+
+
+def to_xmltv_many(plans: Iterable[Plan], *, channel_name: str | None = None) -> str:
+    """XMLTV guide covering several consecutive days of one channel.
+
+    One ``<channel>`` element and every programme from every plan, in date order:
+    a guide that only described the last broadcast day left players showing an
+    empty schedule for the part of the horizon that had already been emitted.
+    """
+    ordered = sorted(plans, key=lambda plan: plan.day_start_ms)
+    if not ordered:
+        raise ValueError("cannot build a guide with no plans")
+    first = ordered[0]
+    zone = tz(_zone_hint(first))
+    name = channel_name or first.channel_name
     lines = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE tv SYSTEM "xmltv.dtd">',
         '<tv generator-info-name="Nostalgia Machine">',
-        f'  <channel id="{escape(plan.tvg_id)}">',
+        f'  <channel id="{escape(first.tvg_id)}">',
         f"    <display-name>{escape(name)}</display-name>",
-        f"    <display-name>{escape(plan.channel_number)}</display-name>",
+        f"    <display-name>{escape(first.channel_number)}</display-name>",
         "  </channel>",
     ]
 
-    for item in _guide_programmes(plan):
+    items = [item for plan in ordered for item in _guide_programmes(plan)]
+    for item in items:
         start = from_epoch_ms(item.start_ms, zone)
         stop = from_epoch_ms(item.end_ms, zone)
         lines.append(
             f'  <programme start="{xmltv_stamp(start)}" stop="{xmltv_stamp(stop)}" '
-            f'channel="{escape(plan.tvg_id)}">'
+            f'channel="{escape(first.tvg_id)}">'
         )
         lines.append(f"    <title lang=\"en\">{escape(item.title or 'Programme')}</title>")
         if item.subtitle:
@@ -296,11 +311,35 @@ def xmltv_stamp(dt: datetime) -> str:
     return dt.strftime("%Y%m%d%H%M%S") + " " + dt.strftime("%z")
 
 
-def write_xmltv(plan: Plan, paths: EmitPaths, *, channel_name: str | None = None) -> Path:
+def write_guide(
+    plans: Iterable[Plan], paths: EmitPaths, *, channel_name: str | None = None
+) -> Path:
+    """Write the whole horizon into **one** guide file, and return it.
+
+    ErsatzTV reads ``xmltv/`` as a folder of schedules and merges them, so writing
+    a separate file per day would work -- but every plan carries the same channel
+    element, and merging 3x ``<channel id="adultswim.1">`` relies on the streamer
+    deduplicating. One file with one channel element and every programme in date
+    order is what a schedule is supposed to look like, and it is what a player
+    fetches in a single request.
+
+    The file is *replaced* rather than appended to: it must describe exactly the
+    days the playouts describe. Rewriting it every build is also what keeps a
+    station that has been running for weeks from accumulating duplicates of days
+    that have already aired.
+    """
+    ordered = sorted(plans, key=lambda plan: plan.day_start_ms)
+    if not ordered:
+        raise ValueError("cannot write a guide with no plans")
     paths.xmltv_dir.mkdir(parents=True, exist_ok=True)
-    target = paths.xmltv_dir / f"{plan.tvg_id}.xml"
-    _write_atomic(target, to_xmltv(plan, channel_name=channel_name))
+    target = paths.xmltv_dir / f"{ordered[0].tvg_id}.xml"
+    _write_atomic(target, to_xmltv_many(ordered, channel_name=channel_name))
     return target
+
+
+def write_xmltv(plan: Plan, paths: EmitPaths, *, channel_name: str | None = None) -> Path:
+    """Write a single day's guide. Kept for callers that have only one plan."""
+    return write_guide([plan], paths, channel_name=channel_name)
 
 
 # -- lineup / channel config ----------------------------------------------

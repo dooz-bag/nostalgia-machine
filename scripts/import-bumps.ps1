@@ -22,7 +22,7 @@
     four shows on a loop.
 
 .PARAMETER Source
-    The extracted archive folder, e.g. C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps
+    The extracted archive folder, e.g. C:\Downloads\AdultswimBumps
 
 .PARAMETER Dest
     Destination root. Defaults to media\bumps.
@@ -44,10 +44,10 @@
     Report what would be copied; touch nothing.
 
 .EXAMPLE
-    .\scripts\import-bumps.ps1 -Source C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps -DryRun
+    .\scripts\import-bumps.ps1 -Source C:\Downloads\AdultswimBumps -DryRun
 
 .EXAMPLE
-    .\scripts\import-bumps.ps1 -Source C:\Users\Dooz\Downloads\AdultswimBumps\AdultswimBumps
+    .\scripts\import-bumps.ps1 -Source C:\Downloads\AdultswimBumps
 #>
 [CmdletBinding()]
 param(

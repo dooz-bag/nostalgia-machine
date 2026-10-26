@@ -358,3 +358,31 @@ needed (or committed).
   every request 503s. `tests/test_channel_config.py` pins it.
 - **One channel** for now. Multi-channel is a config change (the lineup supports
   several), but the CLI assumes one.
+
+## Sharing this with someone else
+
+The repo is self-contained: Python source, config files and docs. **No media is
+tracked** (`media/` is ignored), and no runtime state is (`data/`, `playout/`,
+`xmltv/`, `lineup/`). So "install it" means: clone, add your own shows, bumps and
+commercials, then scan.
+
+Things a new user has to do that the repo cannot do for them:
+
+1. `.\run.ps1 setup` (Python 3.12+, ffmpeg on `PATH`).
+2. Drop their media into `media/shows/<show-id>/`, `media/bumps/<show-id>/` and
+   `media/commercials/<year>/`. Folder names are ids — see
+   [docs/TAGGING.md](docs/TAGGING.md).
+3. `nostalgia scan`, then `docker compose up -d`.
+
+Publish it as-is: there is nothing machine-specific left to strip. Two things to
+know if you fork it for a different channel:
+
+* `config/channel.yaml` holds the name, tvg-id, timezone and era year. Changing the
+  era year alone re-points every commercial and every generated card.
+* `config/shows.yaml` is the show roster. A show id that is not in `media/shows/`
+  is reported by `nostalgia doctor` rather than silently skipped.
+
+### Licence
+
+MIT — see [LICENSE](LICENSE). The licence covers the code, not the media; none is
+distributed with it.

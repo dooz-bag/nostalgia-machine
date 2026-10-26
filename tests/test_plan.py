@@ -483,3 +483,65 @@ def _merged_episodes(plan: Plan) -> list[str]:
         if not keys or keys[-1] != item.asset_key:
             keys.append(item.asset_key)
     return keys
+
+
+def test_a_guide_covers_the_whole_horizon_not_just_the_last_day(
+    config, context
+) -> None:
+    """Regression: per-day writes overwrote one file, so the guide began at +48h.
+
+    Every day in the horizon was written to the *same* ``<tvg-id>.xml``, so only
+    the last one survived. The stream served fine and the guide looked empty to a
+    player, because the only day in it was the one two days out.
+    """
+    import xml.etree.ElementTree as ET
+    from datetime import timedelta
+
+    from nostalgia.emit import _guide_programmes, set_channel_timezone, to_xmltv_many
+    from nostalgia.pipeline import day_config_for
+
+    set_channel_timezone("America/New_York")
+    plans = [
+        build_plan(DAY + timedelta(days=offset), day_config_for(config, DAY + timedelta(days=offset)), context)
+        for offset in range(3)
+    ]
+    root = ET.fromstring(to_xmltv_many(plans))
+
+    assert len(root.findall("channel")) == 1, "the channel element must not repeat"
+    programmes = root.findall("programme")
+    assert len(programmes) == sum(len(_guide_programmes(p)) for p in plans)
+
+    starts = [node.get("start") for node in programmes]
+    assert starts == sorted(starts), "programmes are not in date order"
+    for previous, current in zip(programmes, programmes[1:]):
+        assert previous.get("stop") == current.get("start"), "the guide leaked a gap"
+
+    # It has to start where the channel starts, not at the end of the horizon.
+    from nostalgia.emit import xmltv_stamp
+    from nostalgia.timeutil import from_epoch_ms, tz
+
+    zone = tz("America/New_York")
+    assert programmes[0].get("start") == xmltv_stamp(from_epoch_ms(plans[0].day_start_ms, zone))
+
+
+def test_writing_the_guide_twice_replaces_it_rather_than_growing(
+    paths: Paths, config, context
+) -> None:
+    """A long-running station must not accumulate duplicate copies of each day."""
+    from nostalgia.emit import (
+        EmitPaths,
+        _guide_programmes,
+        set_channel_timezone,
+        write_guide,
+    )
+    from nostalgia.pipeline import day_config_for
+
+    set_channel_timezone("America/New_York")
+    plan = build_plan(DAY, day_config_for(config, DAY), context)
+    emit_paths = EmitPaths(paths.playout_dir, paths.xmltv_dir)
+
+    first = write_guide([plan], emit_paths)
+    size_once = first.stat().st_size
+    write_guide([plan], emit_paths)
+    assert first.stat().st_size == size_once
+    assert first.read_text(encoding="utf-8").count("<programme ") == len(_guide_programmes(plan))
