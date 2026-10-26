@@ -1,13 +1,33 @@
 # Bump behaviour and the Phase 2 generated-bump settings.
 bumps:
   # strict   -> only a bump naming the right show, or nothing
-  # semi     -> the right show, else a neutral bump (default)
-  # off      -> allow a wrong-subject bump rather than fall back to neutral
+  # semi     -> the right show, else a promo for another show, else neutral
+  # off      -> also tolerate a card that fits the moment poorly
+  #
+  # None of these can ever air a card that *contradicts* the running order
+  # ("next up: X" when X is not next, "we now return to Y" before Y has aired).
+  # That is enforced in code, not configured.
   strictness: semi
 
-  # Minimum score for a real bump to be used. Raise this if you'd rather have a
-  # neutral bump than a loosely-related one.
+  # How well a card must fit the *moment* (position + era) to be used. The
+  # subject is scored separately, so this is not "how closely the subject must
+  # match" -- a promo for another show tops out around 2.0 and would never clear
+  # a subject-shaped threshold.
   min_score: 6.0
+
+  # Allow a real card about a *different* show to stand in as a topical promo.
+  #
+  # A 2003 [adult swim] break was mostly promos for other programmes: "Deathklok
+  # returns with new episodes" during Aqua Teen is authentic, not a mistake. The
+  # guard is on positional claims, not on subject -- a card that says "next up"
+  # or "we now return to" something must still name the show it actually sits
+  # next to. Set false to require a card naming the show or nothing.
+  allow_other_shows: true
+
+  # How often a *general* card is used when the show's own card is also available.
+  # [adult swim] did not name the current show at every single break, and a
+  # channel that does sounds like a DVD menu. 0.0 = never, 1.0 = always.
+  promo_share: 0.3
 
   # No bump repeats within this window.
   cooldown_hours: 6

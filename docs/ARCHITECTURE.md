@@ -159,29 +159,69 @@ minutes. `test_xmltv_is_continuous_across_breaks` pins this.
 ## Bump selection
 
 ```
-score = 5·subject + 3·position + 1·era + 0.5·family − 2·cooldown
+score = subject + 3·position + 1·era + 0.5·family − 2·cooldown
 ```
+
+Subject is worth one of four rungs, and every rung is worth at least one position
+grade, so a better subject can never be outbid by a better-fitting position:
+
+| tier | worth | meaning |
+|---|---|---|
+| `exact` | 5.0 | names the show the slot asked for |
+| `family` | 3.5 | another show in the same family |
+| `promo` | 2.0 | a promo for an unrelated show |
+| `neutral` | 1.0 | says nothing at all; claims nothing, so never wrong |
 
 The ladder, in order:
 
-1. A **real** asset naming the target show, clearing `min_score`.
-2. If every such asset is cooling down, the best one anyway (`all-cooling`). A
-   recycled correct bump beats a generic one.
-3. A **generated** card naming the target show, if `max_share` allows.
-4. A **neutral** card (`neutral-fallback`) — logged in `plan.bump_fallbacks`
+1. A **real** asset naming the target show — exactly, by family, or as a promo for
+   another show — clearing `min_score`. A `promo_share` fraction of picks goes to a
+   **neutral** card instead, so the general pool keeps airing rather than being
+   crowded out by show-specific cards.
+2. If the show's own card is only excluded by a cooldown, the best one anyway
+   (`all-cooling`). A recycled correct bump beats a generic one.
+3. `strictness: off` — the whole ranked pool.
+4. A **generated** card naming the target show, if `max_share` allows.
+5. A **neutral** card (`neutral-fallback`) — logged in `plan.bump_fallbacks`
    (emitted item ids) and `plan.bump_fallback_reasons` (why), so it can be counted,
    surfaced in the UI, and fixed by adding assets.
 
 Note the ids match the emitted `PlannedItem.item_id` exactly: an id that cannot be
 looked up in `plan.items` is worse than no id at all.
 
-A wrong *specific* show scores below zero and is never eligible. `bumps.strictness:
-off` relaxes that into "prefer correct, tolerate wrong", which is occasionally
-useful when building a pool and is never the default.
+### What is never allowed
+
+A card is rejected outright only when it would **contradict the running order**.
+Topical mismatch is not a contradiction; a positional claim is.
+
+| Card | Slot | Verdict |
+|---|---|---|
+| "Deathklok returns with new episodes" | during Aqua Teen | fine — a promo |
+| "Next up: Futurama" | before Aqua Teen | **rejected** — false promise |
+| "We now return to Aqua Teen" | before Sealab | **rejected** — wrong show |
+| any untagged promo | anywhere | fine — it claims nothing |
+| general card | anywhere, including the tail | fine — claims nothing |
+
+The rule is that **a card's own label fixes which show it must name**, regardless
+of the slot: an `NEXT`/`AFTER` card must name the show it sits next to on that
+side, while an untagged card is unconstrained. Additionally only a card labelled
+`NEXT` may close a slot, because that position *is* the up-next announcement.
+
+This is what makes "semi-strict" behave the way you'd hope instead of the way it
+sounds. Rejecting every wrong subject instead cost the channel ~48% of its break
+slots to generic cards, because a real 2003 archive is *mostly* promos for other
+programmes.
+
+`bumps.allow_other_shows: false` restores the old rule of requiring a card that
+names the show or nothing.
 
 Position (`INTO`/`OUT`/`NEXT`/`AFTER`) comes from the break template, not the
 asset, which is what makes `next` mean *the show that actually follows*. The tail
 bump is resolved with the following slot's show in hand.
+
+`min_score` gates position and era, **not** the subject: the subject's own weight
+is subtracted before comparison, so a flawless promo (which tops out near 2.0) is
+judged on the same scale as a flawless exact match (which tops out near 9.0).
 
 ## The era is not the date
 

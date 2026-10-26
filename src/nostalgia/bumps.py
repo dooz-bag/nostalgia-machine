@@ -6,9 +6,18 @@ belongs immediately before *Futurama*, and the one that says *"we now return to
 Aqua Teen"* belongs immediately after *Aqua Teen*. Only the scheduler knows the
 adjacency, so only the scheduler can choose the bump.
 
-Scoring is deliberately **lenient but never wrong-on-purpose**: an asset naming a
-*different* show can never beat a neutral bump. That is what makes "semi-strict"
-behave the way you'd hope instead of the way it sounds.
+Scoring is deliberately **lenient but never wrong-on-purpose**. The distinction
+that carries the whole design is not *which* show a card names but whether it
+makes a **claim** about the running order:
+
+* "Deathklok returns with new episodes" playing during Aqua Teen is a promo. It
+  is a real 2003 card, it is topical rather than positional, and a real channel
+  would absolutely have aired it there. Allowed.
+* "Next up: Futurama" in front of Aqua Teen is a *lie*. It contradicts the thing
+  the viewer can immediately check. Never allowed, however thin the pool.
+
+That is the rule "semi-strict" means here, and it is why the positional tags in
+``config/bumps.yaml`` matter more than the subject tags.
 """
 
 from __future__ import annotations
@@ -23,10 +32,37 @@ POSITION_EXACT = 3.0
 POSITION_ADJACENT = 1.0
 POSITION_UNKNOWN = 0.5
 
+#: The subject ladder. Every rung is worth at least one position grade (1.0), so
+#: a better *subject* can never be outbid by a better-fitting position. That
+#: monotonicity is what lets :func:`choose` take a band around the best score
+#: without ever handing the slot to a card about the wrong show.
 SUBJECT_EXACT = 5.0
-SUBJECT_FAMILY = 2.0
+
+SUBJECT_FAMILY = 3.5
+"""Another show in the same family -- the nearest thing to the right card."""
+
+SUBJECT_OTHER = 2.0
+"""A promo for an unrelated show.
+
+Above a general card on purpose: a real card from the archive is the thing being
+recreated, and a promo for a neighbouring show is both more authentic and more
+informative than a card that says nothing. The general pool still airs -- via
+``promo_share`` while named cards exist, and as the fallback when none does.
+"""
+
 SUBJECT_NEUTRAL = 1.0
+"""A general card."""
+
 SUBJECT_WRONG = -100.0
+"""A card that would contradict the running order. Never eligible."""
+
+SUBJECT_WEIGHT: dict[str, float] = {
+    "exact": SUBJECT_EXACT,
+    "family": SUBJECT_FAMILY,
+    "promo": SUBJECT_OTHER,
+    "neutral": SUBJECT_NEUTRAL,
+}
+"""What each tier contributes, so it can be scaled back out for comparison."""
 
 ERA_MATCH = 1.0
 ERA_NEAR = 0.25
@@ -42,6 +78,14 @@ ADJACENT_POSITIONS: dict[str, set[str]] = {
     "ANY": {"INTO", "OUT", "NEXT", "AFTER"},
 }
 
+#: Positions that assert something about the *sequence* rather than the schedule.
+#:
+#: "Up next", "we now return to", "you just watched" all make a claim the viewer
+#: can check against the next thing that starts. This is what
+#: :data:`SUBJECT_WRONG` is reserved for -- the wrong show is merely unhelpful,
+#: but the wrong show *plus* a positional claim is incorrect.
+POSITIONAL_CLAIMS: frozenset[str] = frozenset({"NEXT", "AFTER", "INTO", "OUT"})
+
 
 @dataclass(frozen=True, slots=True)
 class BumpRequest:
@@ -56,6 +100,12 @@ class BumpRequest:
     year: int | None = None
     family: str | None = None
     era_drift: int = 1
+    allow_other_shows: bool = True
+    """Whether a promo for another show may fill this slot (see ``bumps.yaml``).
+
+    Carried on the request rather than on :func:`score_asset` because it is a
+    property of the *slot being filled*, not of the card being considered.
+    """
 
     def resolved_subject(self) -> str:
         if self.subject == "this":
@@ -74,6 +124,9 @@ class Scored:
     asset: Asset
     score: float
     reasons: list[str] = field(default_factory=list)
+    tier: str = "neutral"
+    """``exact`` | ``family`` | ``promo`` | ``neutral``. Never ``wrong``: those
+    score below zero and :func:`rank` drops them."""
 
 
 @dataclass
@@ -86,6 +139,52 @@ class BumpChoice:
     reason: str
 
 
+def subject_tier(asset: Asset, request: BumpRequest) -> str:
+    """How *asset* relates to the show *request* asked for.
+
+    Kept separate from the score so the planner can reason about *tiers* -- "is
+    there a card for this show at all?" -- instead of comparing floats against a
+    single threshold. Those are different questions, and conflating them is what
+    made a promo for a neighbouring show permanently unusable.
+    """
+    wanted = request.resolved_subject()
+    if asset.is_neutral_bump:
+        # A general card names nothing, so it can never make a false claim --
+        # including in the up-next slot, where saying nothing is always true.
+        return "neutral"
+    if not wanted or wanted == NEUTRAL:
+        return "promo"
+    if asset.subject == wanted:
+        # Naming the right show is not enough if the card claims the wrong *side*
+        # of it: "we now return to Aqua Teen" in front of Aqua Teen says its
+        # episode has already finished.
+        return "wrong" if _contradicts(asset, request) else "exact"
+    if request.family and asset.family == request.family:
+        return "family"
+    if _contradicts(asset, request):
+        return "wrong"
+    if not request.allow_other_shows:
+        # Still *ineligible*, not neutral: the card names a show, so airing it
+        # here presents it as a general card and keeps the very claim the setting
+        # was meant to suppress.
+        return "wrong"
+    return "promo"
+
+
+def _meets_bar(item: Scored, min_score: float) -> bool:
+    """Whether *item* fits its *moment* well enough to air.
+
+    ``min_score`` was written against a perfect subject match, so it cannot be
+    compared with a promo's raw score: a flawless promo tops out around 2.0, and
+    demanding 6.0 of it would reject every one -- which is exactly the bug that
+    emptied half the break slots. The subject's own weight is scaled out first, so
+    every tier is judged on position and era, which is what "fits this moment"
+    actually means. A cooldown still counts against it.
+    """
+    residual = item.score - SUBJECT_WEIGHT.get(item.tier, 0.0)
+    return residual >= min_score - SUBJECT_EXACT
+
+
 def score_asset(asset: Asset, request: BumpRequest, *, cool: bool) -> tuple[float, list[str]]:
     """Score *asset* against *request*. Returns ``(score, reasons)``.
 
@@ -95,24 +194,25 @@ def score_asset(asset: Asset, request: BumpRequest, *, cool: bool) -> tuple[floa
     score = 0.0
 
     wanted = request.resolved_subject()
-    if wanted and wanted != NEUTRAL:
-        if asset.subject == wanted:
-            score += SUBJECT_EXACT
-            reasons.append(f"subject={wanted}")
-        elif asset.subject is None or asset.subject == NEUTRAL:
-            score += SUBJECT_NEUTRAL
-            reasons.append("subject=neutral")
-        elif request.family and asset.family == request.family:
-            score += SUBJECT_FAMILY
-            reasons.append(f"family={request.family}")
-        else:
-            return SUBJECT_WRONG, [f"wrong subject {asset.subject!r}"]
-    else:
-        if asset.is_neutral_bump:
-            score += SUBJECT_NEUTRAL
-            reasons.append("neutral slot")
-        else:
-            reasons.append("neutral slot, show-specific bump")
+    specific_slot = bool(wanted) and wanted != NEUTRAL
+    tier = subject_tier(asset, request)
+
+    if tier == "wrong":
+        # Naming another show is only a problem if the card *also* claims a place
+        # in the running order. "Next up: Futurama" before Aqua Teen is wrong in a
+        # way the viewer can see; a Deathklok promo airing during Aqua Teen is
+        # just a promo, and refusing those was costing the channel ~40% of its
+        # break cards.
+        return SUBJECT_WRONG, [f"{asset.subject!r} claims {asset.position} out of place"]
+    score += SUBJECT_WEIGHT.get(tier, 0.0)
+    if tier == "exact":
+        reasons.append(f"subject={wanted}")
+    elif tier == "family":
+        reasons.append(f"family={request.family}")
+    elif tier == "promo":
+        reasons.append(f"promo for {asset.subject}" if specific_slot else "neutral slot")
+    elif tier == "neutral":
+        reasons.append("subject=neutral")
 
     if asset.position:
         if asset.position == request.position:
@@ -141,6 +241,13 @@ def score_asset(asset: Asset, request: BumpRequest, *, cool: bool) -> tuple[floa
             else:
                 score -= ERA_NEAR
 
+    # Reached only for a *generic* slot (no show named): "up next" still promises
+    # a specific show, so a card naming one is a claim the planner cannot check
+    # and therefore must not make. A general card claims nothing and is fine.
+    if not specific_slot and asset.subject not in (None, "", NEUTRAL):
+        if request.position in POSITIONAL_CLAIMS:
+            return SUBJECT_WRONG, [f"'{request.position}' needs a known subject"]
+
     if request.family and asset.family == request.family:
         score += FAMILY_ONLY
 
@@ -149,6 +256,49 @@ def score_asset(asset: Asset, request: BumpRequest, *, cool: bool) -> tuple[floa
         reasons.append("cooldown")
 
     return score, reasons
+
+
+def _contradicts(asset: Asset, request: BumpRequest) -> bool:
+    """Whether *asset* claims a place in the running order it cannot honour.
+
+    A general card claims nothing, so it can never contradict anything. For the
+    rest, a claim is true when it names the right show *for that moment*:
+
+    * **Before the episode** (`INTO`/`NEXT`) the truthful subject is the one
+      about to start -- the next show, or the current one at an `INTO`.
+    * **After the episode** (`OUT`/`AFTER`) it is the one that just ended.
+    * **Wrong side.** "We now return to Aqua Teen" in front of Aqua Teen says its
+      episode has already finished. That is how an `AFTER` card once opened a
+      slot, and the only salvage is a card naming the show that truly comes next,
+      where "up next: Brak" is accurate from anywhere in the break.
+    """
+    if asset.subject is None or asset.subject == NEUTRAL:
+        return False
+    if asset.position not in POSITIONAL_CLAIMS:
+        # An untagged promo says nothing about the schedule, so there is nothing
+        # it can get wrong. This is the common case and the relaxation itself.
+        return False
+
+    # The closing card *is* the "up next" announcement, so only a card labelled
+    # NEXT belongs there: anything else describes a moment this slot has already
+    # left behind. That is how an INTO card for Aqua Teen ended up promising more
+    # Aqua Teen at the end of a slot that lead into Sealab.
+    if request.position == "NEXT" and asset.position != "NEXT":
+        return True
+
+    # A card's *own* label says which moment it describes, which fixes which show
+    # it must name -- regardless of which slot it sits in. "Up next: The Brak
+    # Show" is accurate from anywhere before Brak; "we now return to Aqua Teen" is
+    # only accurate when Aqua Teen is what this slot is about.
+    required = request.next_show if asset.position == "NEXT" else request.this_show
+    return asset.subject != required
+
+
+def _position_agrees(asset: Asset, position: str) -> bool:
+    """Whether *asset* fits the *moment* as well as a card that says nothing."""
+    if asset.position is None:
+        return True
+    return asset.position == position or asset.position in ADJACENT_POSITIONS.get(position, {"ANY"})
 
 
 def rank(
@@ -164,9 +314,20 @@ def rank(
         score, reasons = score_asset(asset, request, cool=asset.key in cooling)
         if score <= 0:
             continue
-        scored.append(Scored(asset=asset, score=score, reasons=reasons))
+        scored.append(
+            Scored(
+                asset=asset,
+                score=score,
+                reasons=reasons,
+                tier=subject_tier(asset, request),
+            )
+        )
     scored.sort(key=lambda item: (-item.score, item.asset.key))
     return scored
+
+
+#: Tiers that mean "this card names the show the slot asked for".
+NAMED_TIERS: frozenset[str] = frozenset({"exact", "family", "promo"})
 
 
 def choose(
@@ -178,27 +339,44 @@ def choose(
     on_cooldown: set[str] | None = None,
     seed_parts: Sequence[object] = (),
     generated: Iterable[Asset] = (),
+    promo_share: float = 0.0,
 ) -> BumpChoice:
     """Pick the best bump for *request*.
 
-    Real assets are tried first. Generated bumps are only considered when nothing
-    real clears *min_score*, which keeps the synthetic share honest.
+    The ladder, in order:
+
+    1. A real card that **names** the target show -- exactly, by family, or as a
+       promo for a neighbouring show. A share of picks goes to a *general* card
+       instead, so the general pool keeps airing rather than being crowded out.
+    2. The show's own card again, if a cooldown is the only thing excluding it.
+    3. ``strictness: off`` -- the whole ranked pool.
+    4. A **generated** card that names the show, if the budget allows.
+    5. A **neutral** card, which is the honest thing to air.
+
+    *min_score* gates how well a card fits the *moment* (position and era). It
+    deliberately no longer decides whether a promo may air -- that is a question
+    about the subject, and a single global threshold was answering it wrongly.
     """
     pool = list(pool)
     cooling = on_cooldown or set()
+    # Cooldown is applied *after* scoring everywhere below, so a card that the
+    # board excludes on other grounds can never sneak back in via the cooldown
+    # pass. This used to re-rank the raw pool, which re-admitted promos the
+    # request had ruled out and put them at the end of a slot.
     ranked = rank(pool, request, on_cooldown=cooling)
+    thawed_all = rank(pool, request, on_cooldown=set())
 
-    # If every bump that names the right show is cooling down, prefer a repeat
-    # over a neutral card: the card naming the right show is still more accurate,
-    # and a recycled bump is what a real channel would do too.
-    if not [item for item in ranked if item.score >= min_score]:
-        thawed_candidates = [
-            item
-            for item in rank(pool, request, on_cooldown=set())
-            if item.score >= min_score
-        ]
-        if thawed_candidates:
-            picked = _rotate(thawed_candidates, seed_parts)
+    viable = [item for item in ranked if _meets_bar(item, min_score)]
+
+    # A recycled correct bump beats a fresh generic one, as it always did. The
+    # cooling card has to be compared *by tier* against what is available warm:
+    # once promos became eligible, "nothing viable" stopped happening and this
+    # rescue never ran, so a single cooldown demoted the show's own card below a
+    # promo for a different show.
+    if viable and not any(item.tier == "exact" for item in viable):
+        better = _cooled_upgrade(thawed_all, viable[0], min_score)
+        if better is not None:
+            picked = _rotate(_best_band(better), seed_parts)
             return BumpChoice(
                 picked.asset,
                 picked.score,
@@ -206,19 +384,43 @@ def choose(
                 reason="all-cooling," + ",".join(picked.reasons),
             )
 
-    viable = [item for item in ranked if item.score >= min_score]
+    named = [item for item in viable if item.tier in NAMED_TIERS]
+    general = [item for item in viable if item.tier == "neutral"]
 
-    if viable:
-        top = viable[0].score
-        # within a hair of the best score, rotate so consecutive breaks differ
-        contenders = [item for item in viable if item.score >= top - 1.0]
-        picked = _rotate(contenders, seed_parts)
-        return BumpChoice(picked.asset, picked.score, fallback=False, reason=",".join(picked.reasons))
+    # A share of picks deliberately goes to a *general* card even when a named one
+    # is available. [adult swim] never ran a card for the show you were watching
+    # at every single break, and a channel that does sounds like a DVD menu. This
+    # is the knob that keeps the general pool in rotation.
+    #
+    # Gated on the show having *something* of its own, exact or not: when it has
+    # nothing, the general card is already the outcome, so choosing it "by share"
+    # would relabel the gap the owner should be fixing.
+    if named and general and promo_share > 0:
+        if rng_for("bump-kind", *seed_parts).random() < promo_share:
+            picked = _rotate(_best_band(general), seed_parts)
+            return BumpChoice(
+                picked.asset,
+                picked.score,
+                fallback=False,
+                reason="general-by-share," + ",".join(picked.reasons),
+            )
+
+    if named:
+        picked = _rotate(_best_band(named), seed_parts)
+        return BumpChoice(
+            picked.asset,
+            picked.score,
+            fallback=False,
+            reason=",".join(picked.reasons),
+        )
 
     if strictness == "off" and ranked:
         picked = _rotate(ranked[: max(1, len(ranked) // 2)], seed_parts)
         return BumpChoice(
-            picked.asset, picked.score, fallback=False, reason="strictness=off," + ",".join(picked.reasons)
+            picked.asset,
+            picked.score,
+            fallback=False,
+            reason="strictness=off," + ",".join(picked.reasons),
         )
 
     # A generated card that names the right show beats a neutral real card: the
@@ -227,25 +429,90 @@ def choose(
     # what keeps generated cards out of the way when the library is complete.
     generated = list(generated)
     if generated:
-        gen_ranked = [item for item in rank(generated, request, on_cooldown=on_cooldown) if item.score >= min_score]
+        gen_ranked = [
+            item
+            for item in rank(generated, request, on_cooldown=on_cooldown)
+            if item.tier in NAMED_TIERS
+        ]
         if gen_ranked:
             picked = _rotate(gen_ranked, seed_parts)
             return BumpChoice(
                 picked.asset, picked.score, fallback=False, reason="generated," + ",".join(picked.reasons)
             )
 
-    neutral = [asset for asset in pool if asset.is_neutral_bump]
-    neutral_ranked = rank(
-        neutral, BumpRequest(position=request.position, year=request.year), on_cooldown=on_cooldown
-    )
-    if neutral_ranked:
-        picked = _rotate(neutral_ranked[:3], seed_parts)
+    # Last resort: reuse the general cards from the main ranking rather than
+    # re-deriving them. The previous version re-ranked a `neutral`-only pool with
+    # a subject-free request, which silently decided which cards counted as
+    # neutral a second, different way.
+    neutral = [item for item in ranked if item.tier == "neutral"]
+    if not neutral:
+        neutral = rank(
+            [asset for asset in pool if asset.is_neutral_bump],
+            BumpRequest(
+                position=request.position,
+                year=request.year,
+                allow_other_shows=request.allow_other_shows,
+            ),
+            on_cooldown=on_cooldown,
+        )
+    if neutral:
+        picked = _rotate(_best_band(neutral)[:3], seed_parts)
+        # Always a fallback by definition: reaching here means a general card
+        # stood in for one naming the show, which is the gap to report. Earlier
+        # branches never return a neutral card, so there is no other case.
         return BumpChoice(picked.asset, picked.score, fallback=True, reason="neutral-fallback")
 
     return BumpChoice(None, 0.0, fallback=True, reason="no-eligible-bump")
 
 
+def _cooled_upgrade(
+    thawed: Sequence[Scored],
+    warm_best: Scored,
+    min_score: float,
+) -> list[Scored] | None:
+    """Exact cards excluded only by cooldown, if they beat what would air instead.
+
+    A recycled correct bump beats a fresh generic one, which is what a real
+    channel does too. *warm_best* is the best card that would otherwise air, so
+    the comparison is against that -- not against a threshold, which is why this
+    can only ever improve a decision.
+    """
+    cooled = [
+        item
+        for item in thawed
+        if item.tier == "exact" and _meets_bar(item, min_score)
+    ]
+    if not cooled:
+        return None
+    if cooled[0].score - COOLDOWN_PENALTY < warm_best.score:
+        return None
+    return cooled
+
+
+def _best_band(candidates: Sequence[Scored]) -> list[Scored]:
+    """The candidates shareable with the best one, so breaks do not repeat.
+
+    A *band*, not a rate: rotating across the whole viable list would let a promo
+    for a neighbouring show appear as often as the show's own card, and a card
+    naming the wrong show must never outrank the right one for the same moment.
+    """
+    if not candidates:
+        return []
+    best = candidates[0]
+    # Tie-break on *fit*, not on the tier's own weight: the weight is what makes
+    # tiers dominate each other, so including it here would leave a single card
+    # in every band and nothing to rotate through.
+    best_fit = best.score - SUBJECT_WEIGHT.get(best.tier, 0.0)
+    return [
+        item
+        for item in candidates
+        if item.tier == best.tier
+        and item.score - SUBJECT_WEIGHT.get(item.tier, 0.0) >= best_fit - 1.0
+    ]
+
+
 def _rotate(candidates: Sequence[Scored], seed_parts: Sequence[object]) -> Scored:
+    """Weighted pick, favouring the best-ranked candidates."""
     if len(candidates) == 1:
         return candidates[0]
     rng = rng_for("bump-rotate", *seed_parts)

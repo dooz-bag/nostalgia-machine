@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from dataclasses import replace
+
 from nostalgia.catalog import Catalog
 from nostalgia.config import load_config
 from nostalgia.emit import (
@@ -29,6 +31,21 @@ from nostalgia.plan import PlanContext, build_plan
 from nostalgia.plan import Plan
 
 DAY = date(2003, 6, 16)
+
+
+def without_other_show_bumps(context: PlanContext) -> PlanContext:
+    """*context* with only neutral and Aqua Teen cards left in the pool.
+
+    The "a bump naming the wrong show is never chosen" guarantees are about a card
+    that would *contradict* the running order, so they have to be checked with the
+    neighbouring promos taken out -- otherwise they only prove that a promo is
+    allowed, not that a lie never is.
+    """
+    keep = {"aqua-teen-hunger-force"}
+    return replace(
+        context,
+        bumps=[asset for asset in context.bumps if asset.is_neutral_bump or asset.subject in keep],
+    )
 
 
 @pytest.fixture()
@@ -69,47 +86,93 @@ def test_every_slot_has_an_episode(plan: Plan) -> None:
     assert slots == episode_slots
 
 
-def test_bump_naming_the_show_sits_next_to_it(plan: Plan, config) -> None:
-    """The headline requirement: a bump's subject matches its adjacent show."""
+def test_a_promo_never_contradicts_the_running_order(plan: Plan, config) -> None:
+    """The headline requirement, stated the way a viewer would notice a breach.
+
+    A card naming a *different* show is fine -- that is a promo, and 2003 breaks
+    were full of them. What must never happen is a card making a **positional
+    claim** about a show it is not adjacent to: "next up: X" in front of Y, or
+    "we now return to X" after Y. Those are checkable lies.
+    """
     for index, item in enumerate(plan.items):
         if item.kind != "bump" or item.show_id is None:
             continue
         neighbours = _adjacent_shows(plan.items, index)
-        assert item.show_id in neighbours, (
-            f"{item.item_id} names {item.show_id} but sits next to {neighbours}"
+        claims_order = item.subtitle.rsplit(" ", 1)[-1] in {"into", "out", "next", "after"}
+        if claims_order:
+            assert item.show_id in neighbours, (
+                f"{item.item_id} claims {item.subtitle!r} for {item.show_id} "
+                f"but sits next to {neighbours}"
+            )
+        else:
+            # No claim: the card is topical filler and may name any show at all,
+            # as long as the show exists in the roster.
+            assert item.show_id in config.shows
+
+
+def test_a_promo_for_another_show_never_uses_a_positional_claim(plan: Plan) -> None:
+    """The specific relaxation, asserted directly."""
+    for index, item in enumerate(plan.items):
+        if item.kind != "bump" or item.show_id is None:
+            continue
+        neighbours = _adjacent_shows(plan.items, index)
+        if item.show_id in neighbours:
+            continue
+        assert not item.subtitle.rsplit(" ", 1)[-1] in {"into", "out", "next", "after"}, (
+            f"{item.item_id} makes a positional claim about {item.show_id}"
         )
 
 
 def test_into_bump_precedes_its_episode(plan: Plan) -> None:
+    """An "into" card either names the episode's show or claims nothing at all."""
     for index, item in enumerate(plan.items):
         if item.kind != "bump" or not item.subtitle.endswith("into"):
             continue
         following = _next_episode(plan.items, index)
         if following is None:
             continue
-        assert item.show_id == following.show_id or item.subtitle.endswith("any")
+        assert item.show_id in (following.show_id, None), (
+            f"{item.item_id} says 'into' {item.show_id} but {following.show_id} plays next"
+        )
 
 
 def test_after_bump_follows_its_episode(plan: Plan) -> None:
+    """An "after" card either names the episode's show or claims nothing at all."""
     for index, item in enumerate(plan.items):
         if item.kind != "bump" or not item.subtitle.endswith("after"):
             continue
         preceding = _previous_episode(plan.items, index)
         if preceding is None:
             continue
-        assert item.show_id == preceding.show_id
+        assert item.show_id in (preceding.show_id, None), (
+            f"{item.item_id} says 'after' {item.show_id} but {preceding.show_id} just played"
+        )
 
 
-def test_bump_before_an_episode_names_that_episode(plan: Plan) -> None:
+def test_bump_before_an_episode_never_names_a_different_show(plan: Plan) -> None:
+    """The card immediately before an episode must not be a promo for another one.
+
+    A promo may air anywhere else in the break, but the last thing a viewer sees
+    before the show starts is the one place a topical card would read as a lie.
+    """
     for index, item in enumerate(plan.items):
-        if item.kind == "episode" and index > 0:
-            previous = plan.items[index - 1]
-            if previous.kind == "bump" and previous.show_id:
-                assert previous.show_id == item.show_id
+        if item.kind != "episode" or index == 0:
+            continue
+        previous = plan.items[index - 1]
+        if previous.kind == "bump" and previous.show_id:
+            assert previous.show_id == item.show_id, (
+                f"{previous.item_id} names {previous.show_id} immediately before "
+                f"{item.show_id}"
+            )
 
 
 def test_next_bump_points_at_the_following_slot(plan: Plan) -> None:
-    """A `next` bump at the tail names the show that actually follows."""
+    """A `next` bump at the tail names the show that actually follows.
+
+    This is where the relaxed rule earns its keep: a promo for some *third* show
+    is allowed in the break, but the closing card is the one that promises what is
+    about to start, so it has to be either the right show or a general card.
+    """
     slots = sorted({item.slot_index for item in plan.items})
     for slot_index in slots:
         tail_bumps = [
@@ -129,8 +192,7 @@ def test_next_bump_points_at_the_following_slot(plan: Plan) -> None:
         }
         chosen = tail_bumps[0]
         if chosen.show_id is None:
-            # A neutral card is the documented fallback when the pool is thin.
-            assert "neutral-fallback" in chosen.note
+            # A general card claims nothing, so it is always truthful here.
             continue
         assert chosen.show_id in following
 

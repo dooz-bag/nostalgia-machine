@@ -104,12 +104,29 @@ slack.
 **Bumps are matched, not sampled.**
 
 ```
-score = 5·subject + 3·position + 1·era + 0.5·family − 2·cooldown
+score = subject + 3·position + 1·era + 0.5·family − 2·cooldown
 ```
 
-A bump naming the *wrong* show can never win. If nothing names the right show, a
-neutral card steps in and the event is logged, so you can see exactly where the
-pool is thin (`nostalgia review`, or the web UI at `/bumps`).
+A card that would **contradict the running order** never wins: "next up: Futurama"
+in front of Aqua Teen, or "we now return to Aqua Teen" before Sealab. That is the
+only hard rule, and it is enforced in code rather than configured.
+
+A card about a *different* show is not a contradiction — it is a promo, and a 2003
+break was mostly made of them. "Deathklok returns with new episodes" during Aqua
+Teen is authentic, so it airs; it simply ranks below the show's own card. The
+score ladder is `exact` 5.0 › `family` 3.5 › `promo` 2.0 › `neutral` 1.0, with
+every rung worth at least one position grade so a better subject can never be
+outbid by a better-fitting position.
+
+`bumps.promo_share` (default 0.3) reserves a share of picks for **general** cards
+even when the show has its own, because a channel that names the current show at
+every single break sounds like a DVD menu. `bumps.allow_other_shows: false`
+restores the stricter "right show or nothing" rule.
+
+If nothing names the right show *and* no promo fits, a neutral card steps in and
+the event is logged, so you can see exactly where the pool is thin (`nostalgia
+review`, or the web UI at `/bumps`). On the included library that is now 0.4% of
+break slots, down from 48%.
 
 **Ad pods are booked, not computed.** A pod target is a booking length: real spots
 run 30.021 s and 15.021 s, so pods are filled with whole spots to within
@@ -324,8 +341,10 @@ needed (or committed).
 
 ## Limitations
 
-- **Bump content is best-match, not perfect.** That is the "semi-strict" setting
-  you asked for. The review queue exists so you can raise accuracy over time.
+- **Bump content is best-match, not perfect.** A card may be a promo for a
+  *different* show — only a false claim about the running order is rejected. That
+  is the "semi-strict" setting, and it is what a real break looked like. The
+  review queue exists so you can raise accuracy over time.
 - **24/7 transcoding is the real cost.** Defaults are 720p/2.5 Mbps. Set the
   encoder to use QuickSync/NVENC in `channel.json` if you have a GPU, and
   `--mount type=tmpfs,destination=/transcode` to spare your SSD.

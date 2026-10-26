@@ -83,6 +83,25 @@ class BumpConfig(_Model):
     cooldown_hours: int = Field(default=6, ge=0)
     trim_slop_ms: int = Field(default=0)
     """Bumps are never trimmed by default; over-long clips are simply skipped."""
+
+    allow_other_shows: bool = True
+    """Whether a card about a *different* show may stand in as a topical promo.
+
+    A real 2003 break was mostly promos for other programmes, so refusing them
+    left the channel refilling roughly half its cards with generic ones. The
+    guard is positional, not topical: a card that claims "up next" or "we now
+    return to" something is still rejected unless that something is the show it
+    actually sits next to.
+    """
+
+    promo_share: float = Field(default=0.3, ge=0.0, le=1.0)
+    """How often a weaker named card beats an exact one, when both are available.
+
+    Keeps general and neighbouring-show cards in the rotation instead of letting
+    a handful of show-specific cards take every slot. ``0`` always prefers the
+    exact show; ``1`` ignores subject precision within the named tiers.
+    """
+
     generated: BumpGeneratedConfig = Field(default_factory=BumpGeneratedConfig)
 
 

@@ -62,8 +62,12 @@ def test_right_show_beats_neutral(pool: list[Asset]) -> None:
 
 
 def test_wrong_show_is_never_chosen(pool: list[Asset]) -> None:
-    choice = choose(pool, _request(), min_score=6.0)
-    assert choice.asset.subject != "futurama"
+    """A card that would make a false positional claim is never chosen."""
+    request = _request()  # Aqua Teen playing, Futurama up next
+    choice = choose(pool, request, min_score=6.0)
+    # futurama-into claims "we now return to Futurama" while Aqua Teen is on;
+    # futurama-next claims it is up next, which is false too.
+    assert choice.asset.key not in {"futurama-into", "futurama-next"}
 
 
 def test_next_bump_matches_the_following_show(pool: list[Asset]) -> None:
@@ -86,13 +90,33 @@ def test_position_affects_ranking(pool: list[Asset]) -> None:
     assert after.asset.position == "AFTER"
 
 
-def test_missing_show_falls_back_to_neutral(pool: list[Asset]) -> None:
+def test_missing_show_uses_a_promo_before_a_neutral_card(pool: list[Asset]) -> None:
+    """The archive has no Sealab cards, but it has promos for other shows.
+
+    Those are what a real 2003 break was made of, so they are the *first* choice
+    when a show is uncovered -- not a last resort.
+    """
     request = BumpRequest(
         subject="this",
         position="INTO",
         this_show="sealab",  # no sealab bumps in the pool
         next_show="futurama",
         year=2003,
+    )
+    choice = choose(pool, request, min_score=6.0)
+    assert not choice.fallback
+    assert choice.asset is not None
+    assert choice.asset.subject != "sealab"
+
+
+def test_missing_show_falls_back_to_neutral_when_promos_are_off(pool: list[Asset]) -> None:
+    request = BumpRequest(
+        subject="this",
+        position="INTO",
+        this_show="sealab",
+        next_show="futurama",
+        year=2003,
+        allow_other_shows=False,
     )
     choice = choose(pool, request, min_score=6.0)
     assert choice.fallback
@@ -154,17 +178,21 @@ def test_thawed_choice_when_cooldown_drops_it_below_the_bar() -> None:
     assert "all-cooling" in choice.reason
 
 
-def test_strictness_off_allows_a_wrong_show(pool: list[Asset]) -> None:
+def test_strictness_off_widens_a_thin_pool(pool: list[Asset]) -> None:
+    """`off` relaxes *fit*, never the truth: a contradiction stays ineligible."""
     request = BumpRequest(
         subject="this",
         position="INTO",
         this_show="sealab",
         year=2003,
+        allow_other_shows=False,
     )
-    semi = choose(pool, request, min_score=6.0, strictness="semi")
     off = choose(pool, request, min_score=6.0, strictness="off")
-    assert semi.fallback
     assert not off.fallback
+    # The only Sealab cards are absent, so it must have reached past the
+    # preferred set -- but never to a card that lies about the running order.
+    assert off.asset.key not in {"futurama-next", "athf-after"}
+    assert off.score > 0
 
 
 def test_era_mismatch_penalises() -> None:

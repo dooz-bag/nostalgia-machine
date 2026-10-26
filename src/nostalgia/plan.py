@@ -538,11 +538,15 @@ def _plan_slot(
         year=era_year,
         family=show.family if show else None,
         era_drift=root.ads.era_drift_years,
+        allow_other_shows=root.bumps.allow_other_shows,
     )
 
     # -- pass 1: resolve bumps -------------------------------------------------
     bump_assets: dict[int, Asset] = {}
     bump_reasons: dict[int, str] = {}
+    # A wrong-subject *promo* is now intended behaviour, not a gap in the library,
+    # so it is no longer logged as a fallback: only a general card standing in for
+    # a show-specific one is.
     for index, spec in enumerate(script.specs):
         if spec.kind != "bump":
             continue
@@ -558,6 +562,7 @@ def _plan_slot(
             on_cooldown=bump_tracker.cooling([], slot.start_ms),
             seed_parts=(plan.day.isoformat(), slot.index, index),
             generated=allowed,
+            promo_share=root.bumps.promo_share,
         )
         asset = choice.asset
         if asset is None:
