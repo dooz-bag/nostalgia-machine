@@ -87,6 +87,10 @@ services:
       - ./xmltv:/app/xmltv
       - ./lineup:/app/lineup
       - ${GENERATED_BUMP_DIR:-./media/bumps/generated}:/app/media/bumps/generated
+      # Saving a setting replans from here, and replanning renders the watermark
+      # card into media/derived. Without this the media tree stays read-only and
+      # every save reports "saved, but replanning failed: Read-only file system".
+      - ./media/derived:/app/media/derived
     healthcheck:
       # A TCP connect, not a page fetch. The page renders a full day's schedule and
       # the first request after a config change rebuilds it; polling that on a timer

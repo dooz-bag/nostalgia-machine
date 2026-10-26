@@ -431,6 +431,7 @@ Docker runs the page as its own service, so it is up whenever the stack is:
 | On now | `http://<host>:8099/` |
 | Schedule | `http://<host>:8099/schedule` |
 | Bump review | `http://<host>:8099/bumps` |
+| Config | `http://<host>:8099/config` |
 
 Published on `${WEB_PORT:-8099}`, and bound to `0.0.0.0` inside the container —
 a `127.0.0.1` bind there is the *container's* loopback, so it would be
@@ -444,6 +445,31 @@ nostalgia serve --host 0.0.0.0 --port 8099
 
 Go to **Schedule** (`/schedule`). This is the one place you can change *what the
 channel is* without editing YAML.
+
+### Every other setting
+
+**Config** (`/config`) edits `channel.yaml`, `ads.yaml`, `bumps.yaml` and
+`watermark.yaml`, grouped by what the setting is *for* rather than by file:
+
+| Category | Contains |
+|---|---|
+| The channel | name, guide ids, grid, timezone, era year, horizon, encode |
+| What airs between the shows | commercial pool and pod fitting, bump matching and generated cards |
+| The picture | the corner bug — mode, type, placement |
+| The schedule | which weekdays each day file applies to |
+
+Each file has its own save button, so a mistake in one cannot block another, and
+saving replans the channel immediately.
+
+The page is a *form over the files*, never a second source of truth. Editing
+through it changes only the key you touched — comments, key order, quote style and
+anything the page does not display are preserved, so hand-editing and the page
+never fight. A blank optional field removes the key rather than writing `''`.
+
+Everything is validated before anything is written: a submission the config model
+would reject is refused with the file left untouched, because a saved file that
+cannot load would break the channel at the next plan with no clue which edit did
+it.
 
 Three modes, and they are exclusive:
 

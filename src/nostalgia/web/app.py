@@ -15,11 +15,27 @@ from dataclasses import asdict
 from typing import Any, Sequence
 from urllib.parse import quote_plus
 
+from fastapi import Request
+
 from ..catalog import Catalog
-from ..config import RootConfig
+from ..config import ConfigError, RootConfig, load_config
 from ..paths import Paths
 from ..pipeline import build
 from ..rotation import EpisodeRef
+from .config_edit import (
+    BOOL,
+    BY_SLUG,
+    CHOICE,
+    DAY,
+    FLOAT,
+    INT,
+    LIST,
+    SETTINGS,
+    ConfigEditError,
+    SettingsFile,
+    read_values,
+    save_values,
+)
 from .schedule import (
     ScheduleFormError,
     load_schedule,
@@ -351,6 +367,83 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
 .shows label { font-size: 13px; color: var(--fg); display: flex; gap: 7px; align-items: center; }
 .shows input { flex: 0 0 auto; }
 
+/* -- settings editor ------------------------------------------------ */
+.category {
+  font-size: 12px;
+  letter-spacing: .26em;
+  text-transform: uppercase;
+  color: var(--fg);
+  margin: 30px 0 12px;
+  padding-bottom: 8px;
+  border-bottom: 2px solid var(--accent);
+}
+.category:first-of-type { margin-top: 0; }
+/* Two columns on a wide screen so a long list stays scannable, one on a
+   phone. The label column is fixed so the controls line up down the page,
+   which is what makes a form read as a table of settings rather than a wall. */
+.settings form { margin-top: 4px; }
+.settings-group {
+  border-top: 1px solid var(--line);
+  padding-top: 14px;
+  margin-top: 14px;
+}
+.settings-group:first-of-type { border-top: 0; padding-top: 0; margin-top: 0; }
+.group-title {
+  color: var(--accent);
+  font-size: 10px;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  margin: 0 0 4px;
+}
+.field {
+  display: grid;
+  /* The control column takes the wider share: a settings label is a phrase and
+     a control needs room. Capped so a wide screen does not stretch a 4-digit
+     number box across the page. */
+  grid-template-columns: minmax(140px, 220px) minmax(0, 620px);
+  gap: 4px 18px;
+  align-items: start;
+  padding: 7px 0;
+  border-bottom: 1px solid #171719;
+}
+.field:last-child { border-bottom: 0; }
+.field > label {
+  color: var(--dim);
+  font-size: 12px;
+  letter-spacing: .04em;
+  padding-top: 6px;
+}
+.field input[type="text"],
+.field input[type="number"],
+.field select { width: 100%; padding: 6px 8px; font: inherit; font-size: 13px; }
+.field-help {
+  grid-column: 2;
+  color: var(--dim);
+  font-size: 11px;
+  margin: 1px 0 0;
+  max-width: 60ch;
+  line-height: 1.45;
+}
+/* A checkbox reads as a sentence, not as a label above a box. */
+.field.check { grid-template-columns: minmax(0, 1fr); }
+.field.check > label {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  padding-top: 0;
+  font-size: 13px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.field.check .field-help { grid-column: 1; margin-left: 25px; }
+.settings button { margin-top: 16px; }
+.filename { margin: 10px 0 0; font-size: 11px; }
+@media (max-width: 620px) {
+  .field { grid-template-columns: minmax(0, 1fr); }
+  .field > label { padding-top: 0; }
+  .field-help { grid-column: 1; }
+}
+
 .saved {
   border-left: 4px solid var(--green);
   padding: 12px 16px;
@@ -409,7 +502,7 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
 {_test_card(card)}
 <header>
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
-  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}</nav>
+  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/config", "Config")}</nav>
 </header>
 <main>{body}</main>
 <footer>Nostalgia Machine &middot; {standard}</footer>
@@ -635,6 +728,79 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse("/bumps", status_code=303)
 
+    @app.get("/config", response_class=HTMLResponse)
+    def config_page(saved: str = "", built: str = "", error: str = "") -> Any:
+        return _render(
+            _config_page(
+                _reload(config, paths),
+                paths,
+                card=_card(config),
+                saved=saved.split("|") if saved else None,
+                built=built,
+                error=error,
+            )
+        )
+
+    @app.post("/config/{slug}")
+    async def save_config_section(slug: str, request: Request) -> Any:
+        entry = BY_SLUG.get(slug)
+        if entry is None:
+            raise HTTPException(status_code=404, detail=f"no settings file {slug!r}")
+
+        form = await request.form()
+        submitted = {
+            str(key): ("" if value is None else str(value))
+            for key, value in form.items()
+            if key != "current"
+        }
+        # A checkbox that is unticked submits nothing at all, so its absence has
+        # to mean "false" rather than "leave as it was". Without this, a boolean
+        # could be turned on from the page and never off again.
+        for spec in entry.all_fields():
+            if spec.kind == BOOL and spec.key not in submitted:
+                submitted[spec.key] = ""
+
+        try:
+            changed = save_values(entry, paths.config_dir, submitted)
+            # Reload and re-validate the whole config before reporting success: a
+            # save that cannot be loaded would break the channel at the next plan,
+            # and the user would not know which edit did it.
+            updated = load_config(paths.config_dir)
+        except ConfigEditError as exc:
+            return _render(
+                _config_page(
+                    _reload(config, paths),
+                    paths,
+                    card=_card(config),
+                    error=str(exc),
+                    current=slug,
+                )
+            )
+        except ConfigError as exc:
+            return _render(
+                _config_page(
+                    _reload(config, paths),
+                    paths,
+                    card=_card(config),
+                    error=f"saved, but the config is now invalid:\n{exc}",
+                    current=slug,
+                )
+            )
+
+        message = ""
+        if changed:
+            try:
+                with Catalog(paths.catalog) as catalog:
+                    result = build(updated, catalog, paths)
+                message = f"{len(result.plans)} day(s) replanned"
+            except Exception as exc:  # noqa: BLE001 - surfaced to the page
+                message = f"saved, but replanning failed: {exc}"
+
+        query = f"saved={'|'.join(quote_plus(name) for name in changed)}"
+        if message:
+            query += f"&built={quote_plus(message)}"
+        return RedirectResponse(f"/config?{query}", status_code=303)
+
     @app.get("/api/now")
     def api_now() -> dict:
         with Catalog(paths.catalog) as catalog:
@@ -858,6 +1024,145 @@ def _schedule_page(
 </div>
 """
     return _page("Schedule", body, active="/schedule", card=card)
+
+
+def _config_page(
+    config: RootConfig,
+    paths: Paths,
+    *,
+    card: str,
+    current: str = "",
+    saved: list[str] | None = None,
+    built: str = "",
+    error: str = "",
+) -> str:
+    """The settings editor: every editable field in every file, grouped by purpose.
+
+    One long page rather than tabs, because the settings are few enough to scan
+    and hiding half of them behind a click makes "what is this channel set to"
+    into a hunt. Each file is a panel with its own save button, so a mistake in
+    one file cannot block saving another.
+    """
+    # Grouped by *category* rather than by file, because two files can serve one
+    # idea (channel.yaml holds both the channel and its encode) and a reader wants
+    # the idea. Order follows the registry so the page has a fixed shape.
+    body = [
+        '<div class="panel-block">',
+        '<p class="label">Settings</p>',
+        '<p class="hint">Every option here writes straight back to the YAML file in '
+        "<code>config/</code>. Comments and anything this page does not show are left "
+        "untouched, so the files stay hand-editable. Saving replans the channel "
+        "immediately.</p>",
+        "</div>",
+    ]
+    grouped: dict[str, list[SettingsFile]] = {}
+    for entry in SETTINGS:
+        grouped.setdefault(entry.category, []).append(entry)
+    sections = []
+    for category, entries in grouped.items():
+        sections.append(f'<h2 class="category">{_h(category)}</h2>')
+        sections.extend(
+            _settings_panel(entry, paths, config, open_panel=(entry.slug == current))
+            for entry in entries
+        )
+    if error:
+        body.append(f'<div class="saved bad">{_h(error)}</div>')
+    elif saved:
+        body.append(
+            f'<div class="saved">Saved {_h(", ".join(saved))}'
+            + (f" &middot; {_h(built)}" if built else "")
+            + "</div>"
+        )
+    body.extend(sections)
+    return _page("Config", "".join(body), active="/config", card=card)
+
+
+def _settings_panel(
+    entry: SettingsFile,
+    paths: Paths,
+    config: RootConfig,
+    *,
+    open_panel: bool,
+) -> str:
+    values = read_values(entry, paths.config_dir)
+    field_html = "".join(
+        _form_section(section, values, entry) for section in entry.sections
+    )
+    return f"""
+<div class="panel-block settings">
+  <p class="label">{_h(entry.title)}</p>
+  <p class="hint">{_h(entry.purpose)}</p>
+  <form method="post" action="/config/{_h(entry.slug)}">
+    <input type="hidden" name="current" value="{_h(entry.slug)}">
+    {field_html}
+    <button type="submit">Save {_h(entry.title)}</button>
+  </form>
+  <p class="hint filename"><code>config/{_h(entry.filename)}</code></p>
+</div>"""
+
+
+def _form_section(section, values, entry: SettingsFile) -> str:
+    rows = "".join(_form_field(spec, values.get(spec.key), entry) for spec in section.fields)
+    note = f'<p class="hint">{_h(section.note)}</p>' if section.note else ""
+    return f"""
+<div class="settings-group">
+  <p class="group-title">{_h(section.title)}</p>
+  {note}
+  {rows}
+</div>"""
+
+
+def _form_field(spec, value, entry: SettingsFile) -> str:
+    """One labelled control, drawn from its declared type."""
+    name = _h(spec.key)
+    help_html = f'<p class="field-help">{_h(spec.help)}</p>' if spec.help else ""
+
+    if spec.kind == BOOL:
+        checked = " checked" if value else ""
+        control = (
+            f'<input type="checkbox" name="{name}" value="1" id="f-{name}"{checked}>'
+        )
+        return f"""
+<div class="field check">
+  <label for="f-{name}">{control}<span>{_h(spec.label)}</span></label>
+  {help_html}
+</div>"""
+
+    if spec.kind == CHOICE:
+        options = "".join(
+            f'<option value="{_h(choice)}"{" selected" if choice == value else ""}>'
+            f"{_h(label)}</option>"
+            for choice, label in spec.choices
+        )
+        control = f'<select name="{name}" id="f-{name}">{options}</select>'
+    elif spec.kind == LIST:
+        shown = " ".join(str(item) for item in (value or []))
+        control = (
+            f'<input type="text" name="{name}" id="f-{name}" '
+            f'value="{_h(shown)}" placeholder="{_h(spec.placeholder or "—")}">'
+        )
+    else:
+        bump = ""
+        if spec.minimum is not None:
+            bump += f' min="{spec.minimum:g}"'
+        if spec.maximum is not None:
+            bump += f' max="{spec.maximum:g}"'
+        if spec.step is not None:
+            bump += f' step="{spec.step:g}"'
+        kind = "number" if spec.kind in (INT, FLOAT) else "text"
+        placeholder = spec.placeholder or ("—" if spec.kind == DAY else "")
+        control = (
+            f'<input type="{kind}" name="{name}" id="f-{name}" '
+            f'value="{_h("" if value is None else value)}"{bump} '
+            f'placeholder="{_h(placeholder)}">'
+        )
+
+    return f"""
+<div class="field">
+  <label for="f-{name}">{_h(spec.label)}</label>
+  {control}
+  {help_html}
+</div>"""
 
 
 def _card(config: RootConfig) -> str:

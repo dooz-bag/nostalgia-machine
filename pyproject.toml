@@ -17,7 +17,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9"]
+# ruamel.yaml is what lets the config editor write back into files that are also
+# edited by hand: PyYAML discards comments, and these files are mostly comments.
+web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "ruamel.yaml>=0.18"]
 tag = ["pytesseract>=0.3.10", "Pillow>=10.0"]
 dev = ["pytest>=8.0"]
 
