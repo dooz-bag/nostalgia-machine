@@ -519,10 +519,12 @@ it.
 
 ### Finding the commercial that makes a break lurch
 
-**Commercials** (`/commercials`) lists every commercial that has actually aired,
-newest first, with its file name, the channel time it went out and how long it
-played. A spot that played shorter than its file is marked *cut to N s* — that is
-the visible symptom of a pod that could not fit what it was given.
+**Commercials** (`/commercials`) lists the last 20 commercials that have actually
+aired, newest first, with the file name, the channel time it went out and how long
+it played. The cap is deliberate: the question the page answers is "which of the
+spots that just played was the bad one", and that answer is always near the top. A
+spot that played shorter than its file is marked *cut to N s* — that is the visible
+symptom of a pod that could not fit what it was given.
 
 Each row has a **Disable** button. Disabling writes a flag on the media row;
 `Catalog.assets()` filters on it, so the file leaves the pool at the very next plan

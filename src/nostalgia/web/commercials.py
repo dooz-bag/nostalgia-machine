@@ -37,6 +37,13 @@ MULTI_SPOT_HINT_MS = 90_000
 #: the first is a claim about the file, the second about where it landed.
 SHORT_POD_HINT_MS = 30_000
 
+#: How many airings the history lists. The point of the page is "which of the
+#: spots that just played was the bad one", which is a question about the last few
+#: minutes -- a whole day of history is a wall of rows nobody reads, and the only
+#: rows worth having are the ones still in earshot. Twenty covers roughly an
+#: hour of commercials.
+AIRING_LIMIT = 20
+
 
 def _h(value: object) -> str:
     return escape(str(value), quote=True)
@@ -202,7 +209,7 @@ def commercials_body(
     saved: str = "",
     built: str = "",
     error: str = "",
-    limit: int = 200,
+    limit: int = AIRING_LIMIT,
 ) -> str:
     """The page body, as a fragment the shell can wrap."""
     timezone = config.channel.grid.timezone
@@ -259,11 +266,14 @@ def commercials_body(
             if show_disabled
             else '<a class="button" href="/commercials?all=1">Show switched-off</a>'
         )
+        # Say "most recent" rather than "every", because the list is capped: a
+        # heading that promises the whole history and then stops is the sort of
+        # thing that reads as a broken page rather than a deliberate limit.
         body.append(
             f"""<div class="card">
   <p class="label">Recently aired</p>
-  <p class="hint">Every commercial that has actually gone out, newest first.
-  Times are channel time ({_h(timezone)}). {toggle}</p>
+  <p class="hint">The last {AIRING_LIMIT} commercials that have actually gone out,
+  newest first. Times are channel time ({_h(timezone)}). {toggle}</p>
   <table>
     <thead><tr><th>Aired</th><th>File</th><th>Length</th><th></th></tr></thead>
     <tbody>{rows}</tbody>
@@ -332,6 +342,7 @@ def set_spot_enabled(catalog: Catalog, key: str, *, enabled: bool) -> str:
 
 
 __all__ = [
+    "AIRING_LIMIT",
     "MULTI_SPOT_HINT_MS",
     "SHORT_POD_HINT_MS",
     "commercials_body",

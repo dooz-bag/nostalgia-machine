@@ -8,12 +8,17 @@ the next page load.
 
 from __future__ import annotations
 
+import time
 from datetime import date
 
 import pytest
 
 from nostalgia.catalog import Catalog
-from nostalgia.web.commercials import MULTI_SPOT_HINT_MS, SHORT_POD_HINT_MS
+from nostalgia.web.commercials import (
+    AIRING_LIMIT,
+    MULTI_SPOT_HINT_MS,
+    SHORT_POD_HINT_MS,
+)
 
 
 def _client(paths, config):
@@ -23,15 +28,24 @@ def _client(paths, config):
     return fastapi.TestClient(create_app(paths, config))
 
 
-def _record(catalog: Catalog, key: str, *, start_ms: int = 1_000_000) -> None:
-    """Record one airing of *key*, played in full."""
+def _record(catalog: Catalog, key: str, *, start_ms: int | None = None) -> None:
+    """Record one airing of *key*, played in full.
+
+    Defaults to a minute from now rather than some fixed past instant: the history
+    is capped at ``AIRING_LIMIT`` rows and newest-first, so a fixture airing dated
+    1970 is buried the moment a replan writes a real day on top of it. The default
+    has to be the most recent airing for the tests to be talking about the row they
+    just recorded.
+    """
+    if start_ms is None:
+        start_ms = int(time.time() * 1000) + 60_000
     played = next(
         asset.duration_ms
         for asset in catalog.assets(("ad",), include_disabled=True)
         if asset.key == key
     )
     catalog.record_airing(
-        item_id=f"2004-06-01-{key[-8:]}-0",
+        item_id=f"2004-06-01-{key[-8:]}-{start_ms}",
         asset_key=key,
         kind="ad",
         start_ms=start_ms,
@@ -170,12 +184,17 @@ def test_a_spot_disabled_before_it_ever_aired_can_still_be_enabled(
 
 
 def _airing_section(body: str) -> str:
-    """The "Recently aired" card only, so a name in "Switched off" cannot count."""
+    """The "Recently aired" card only, so a name in "Switched off" cannot count.
+
+    Ends at the card's own closing ``</table>``: stopping at the next heading
+    instead would run on into "Long files" whenever nothing is switched off, and
+    a row count over that would count two tables.
+    """
     start = body.find("Recently aired")
     if start < 0:
         return ""
-    end = body.find("Switched off", start)
-    return body[start:end if end > 0 else len(body)]
+    end = body.find("</table>", start)
+    return body[start : end if end > 0 else len(body)]
 
 
 def test_disabled_airings_are_hidden_unless_asked_for(paths, config, catalog):
@@ -305,6 +324,35 @@ def test_an_untrimmed_spot_is_not_marked_as_cut(paths, config, catalog):
     body = _client(paths, config).get("/commercials").text
     # The marker is a span in the row, not the prose in the hint paragraph.
     assert '<span class="mono" title="cut short to fit the pod">' not in body
+
+
+def test_the_history_is_capped_at_the_most_recent_few(paths, config, catalog):
+    """The page answers "which of the spots that just played was bad?".
+
+    A whole broadcast day of history is a wall of rows nobody reads, and the
+    answer is always near the top. So the list is capped, and the hint says so --
+    a heading that promises everything and then stops reads as a broken page.
+    """
+    spots = catalog.assets(("ad",))
+    now_ms = int(time.time() * 1000)
+    # More airings than the cap, cycling the fixture's handful of spots: a break
+    # airs the same commercial twice in a day, and the cap is about rows, not about
+    # distinct files.
+    airings = AIRING_LIMIT + 10
+    for index in range(airings):
+        _record(catalog, spots[index % len(spots)].key, start_ms=now_ms + index * 30_000)
+
+    body = _client(paths, config).get("/commercials").text
+    section = _airing_section(body)
+
+    assert section.count("<tr>") == AIRING_LIMIT + 1  # +1 for the header row
+    assert f"The last {AIRING_LIMIT} commercials" in body
+
+    # Every row rendered is an airing that exists, and there are exactly `airings`
+    # of them in the catalog -- so the cap really did drop ten rows rather than the
+    # section simply being short.
+    with Catalog(paths.catalog) as fresh:
+        assert len(fresh.commercial_airings(limit=1000)) == airings
 
 
 @pytest.mark.parametrize("action", ["disable", "enable"])
