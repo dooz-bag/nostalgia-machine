@@ -35,13 +35,13 @@ watermark:
   font: "Helvetica Neue Condensed Bold"
   condense: 0.84
 
-  font_size: 0.033        # fraction of frame height; a bug is small
+  font_size: 0.013        # fraction of frame height; a bug is small
   colour: "white"
   # The broadcast bug was a solid white mark. It sat *in* the picture rather than
   # on top of it, so a little transparency keeps it from reading as a sticker --
   # but too much (0.72 was too much) washed it out and made it look like a
   # compression artifact instead of a logo.
-  opacity: 0.92
+  opacity: 0.62
   uppercase: false
 
   # Distance from the corner, in percent of frame width/height.
@@ -54,7 +54,7 @@ watermark:
   # wider than the wordmark and never trimmed, so the streamer was scaling mostly
   # empty space and the mark came out at roughly a third of the requested size --
   # which is why raising this number barely changed anything on screen.
-  width_percent: 20.0
+  width_percent: 15.0
 
   # Which shows get it. Empty = every show. Commercials and bumpers never do,
   # because [adult swim] did not bug them.
