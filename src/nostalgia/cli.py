@@ -89,6 +89,14 @@ def _parser() -> argparse.ArgumentParser:
             "per episode)"
         ),
     )
+    scan_cmd.add_argument(
+        "--detect-spots",
+        action="store_true",
+        help=(
+            "flag commercials longer than the longest pod the channel books as "
+            "likely multi-spot files. Advisory only: nothing is disabled"
+        ),
+    )
 
     plan_cmd = sub.add_parser("plan", help="build a plan (no files written unless --emit)")
     _add_common_plan_args(plan_cmd)
@@ -235,10 +243,21 @@ def _cmd_scan(args, config, paths: Paths) -> int:
             ffprobe_path=args.ffprobe,
             write_sidecars=args.sidecars,
             detect_burned_in=args.detect_marks,
+            detect_spots=args.detect_spots,
         )
     print(f"scanned {report.total} files ({report.probed} probed, {report.from_sidecar} from sidecars)")
     if args.detect_marks:
         print(f"  {report.marked} episode(s) already carry a corner bug of their own")
+    if args.detect_spots:
+        print(
+            f"  {report.multi_spot} commercial(s) longer than the longest pod "
+            f"-- likely a whole recorded break"
+        )
+        for key in report.multi_spot_keys[:20]:
+            print(f"    {key}")
+        if len(report.multi_spot_keys) > 20:
+            print(f"    ... and {len(report.multi_spot_keys) - 20} more")
+        print("  nothing was disabled; review them at /commercials")
     for kind, count in sorted(report.per_kind.items()):
         print(f"  {kind:<9} {count}")
     if report.issues:

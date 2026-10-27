@@ -1,0 +1,339 @@
+"""The commercials page: what aired, and turning off the bad ones.
+
+Commercial playback artefacts are not evenly distributed. The breaks that lurch
+are almost always the same handful of files -- a recorded break catalogued as one
+long "spot", or a clip whose audio and picture are already damaged -- and there is
+no automatic way to find them. Scene-cut counts and silence detection were both
+tried and neither separates a 70-second recorded break from a 70-second single
+spot, so the only reliable detector is a person watching the channel.
+
+This page exists so that act costs one click instead of a CLI invocation. It reads
+the ``airings`` table (written by :func:`nostalgia.pipeline.build` from what has
+actually aired) and writes a flag on the media row; :meth:`Catalog.assets` filters
+on that flag, so a disabled file leaves the pool at the very next plan with no
+rescan.
+
+Kept out of :mod:`nostalgia.web.app` so the routing module stays readable, and out
+of :mod:`nostalgia.web.view` because that module is the testable read model and
+this one is presentation.
+"""
+
+from __future__ import annotations
+
+from html import escape
+from datetime import datetime
+
+from ..catalog import Catalog
+from ..config import RootConfig
+
+#: A file longer than the longest pod the channel books can never play whole: it
+#: will be trimmed, or it will steal the budget from the pods after it. That is
+#: arithmetic, not a guess, so it is the one hint stated as a fact.
+MULTI_SPOT_HINT_MS = 90_000
+
+#: A file longer than the *shortest* pod may still be trimmed, but only when it
+#: lands in a short pod -- a 45 s spot plays whole in a 60 s break. Listed as
+#: "worth a look" rather than "cannot play whole", because the difference matters:
+#: the first is a claim about the file, the second about where it landed.
+SHORT_POD_HINT_MS = 30_000
+
+
+def _h(value: object) -> str:
+    return escape(str(value), quote=True)
+
+
+def _seconds(ms: int) -> str:
+    return f"{ms / 1000:.1f}s"
+
+
+def _when(aired_ms: int, timezone: str) -> str:
+    """Wall clock of an airing, in the channel's timezone.
+
+    Uses the same helper the rest of the UI uses so a time on this page agrees
+    with the time on the schedule page -- which matters when the whole point is
+    correlating "the break that jumped" with "what was in it".
+    """
+    try:
+        moment = datetime.fromtimestamp(aired_ms / 1000, tz=_zone(timezone))
+    except (OverflowError, OSError, ValueError):
+        return "—"
+    return moment.strftime("%a %H:%M:%S")
+
+
+def _zone(timezone: str):
+    from zoneinfo import ZoneInfo
+
+    return ZoneInfo(timezone)
+
+
+def _rows(
+    airings: list[dict],
+    *,
+    timezone: str,
+    show_disabled: bool,
+) -> str:
+    """The airing table.
+
+    A disabled file is shown struck through rather than hidden even when the
+    filter is off: the row that prompted the click is the row the reader is
+    looking for, and having it disappear is how a page feels broken.
+    """
+    out: list[str] = []
+    for entry in airings:
+        disabled = entry["disabled"]
+        if disabled and not show_disabled:
+            continue
+        action = "enable" if disabled else "disable"
+        label = "Enable" if disabled else "Disable"
+        flag = ' <span class="kind">disabled</span>' if disabled else ""
+        hint = (
+            f' <span class="warn" title="long file: probably several spots in one">'
+            f"long file</span>"
+            if entry["duration_ms"] >= MULTI_SPOT_HINT_MS
+            else ""
+        )
+        clip = entry["played_ms"] < entry["duration_ms"] - 1000
+        trimmed = (
+            f' <span class="mono" title="cut short to fit the pod">'
+            f"cut to {_seconds(entry['played_ms'])}</span>"
+            if clip
+            else ""
+        )
+        out.append(
+            f"""<tr>
+  <td class="mono">{_h(_when(entry['aired_ms'], timezone))}</td>
+  <td>{_h(entry['name'])}{flag}{hint}</td>
+  <td class="mono">{_h(_seconds(entry['duration_ms']))}{trimmed}</td>
+  <td>
+    <form method="post" action="/commercials/{action}" class="inline">
+      <input type="hidden" name="key" value="{_h(entry['key'])}">
+      <button type="submit">{label}</button>
+    </form>
+  </td>
+</tr>"""
+        )
+    return "".join(out)
+
+
+def _library_rows(assets, *, limit: int = 40) -> tuple[str, int, int]:
+    """The longest commercials, longest first, plus counts for the header.
+
+    Ordered by duration because that is the only signal that correlates with a bad
+    file: a 90-second "commercial" is nearly always a whole recorded break, and it
+    is the one that has to be cut to fit a pod. The threshold is the *shortest* pod,
+    so a 45 s spot that only gets trimmed in a 30 s break is still listed -- with a
+    softer label, because "long" is not the same claim as "cannot play whole".
+
+    Capped, because a real library has hundreds of 40-70 s spots and a page listing
+    all of them is a page nobody reads. The longest are the ones that lurch, so the
+    longest are what is shown; the header states the total so the cap is not a lie.
+    """
+    ordered = sorted(assets, key=lambda asset: asset.duration_ms, reverse=True)
+    candidates = [asset for asset in ordered if asset.duration_ms >= SHORT_POD_HINT_MS]
+    out: list[str] = []
+    for asset in candidates[:limit]:
+        action = "enable" if asset.disabled else "disable"
+        label = "Enable" if asset.disabled else "Disable"
+        flag = ' <span class="kind">disabled</span>' if asset.disabled else ""
+        # Two tiers, because the two claims are different. A file over the longest
+        # pod cannot play whole anywhere; one over the shortest pod only gets
+        # trimmed when it lands in a short break.
+        if asset.duration_ms > MULTI_SPOT_HINT_MS:
+            tier = (
+                '<span class="warn" title="longer than any pod: cannot play whole">'
+                "cannot play whole</span>"
+            )
+        else:
+            tier = (
+                '<span class="dim" title="fits a 60s or 90s pod; trimmed in a 30s one">'
+                "long</span>"
+            )
+        out.append(
+            f"""<tr>
+  <td>{_h(asset.path.replace(chr(92), "/").rsplit("/", 1)[-1])}{flag}</td>
+  <td class="mono">{_h(_seconds(asset.duration_ms))}</td>
+  <td>{tier}</td>
+  <td>
+    <form method="post" action="/commercials/{action}" class="inline">
+      <input type="hidden" name="key" value="{_h(asset.key)}">
+      <button type="submit">{label}</button>
+    </form>
+  </td>
+</tr>"""
+        )
+    return "".join(out), len(candidates), len(ordered)
+
+
+def _disabled_rows(assets) -> str:
+    """Every switched-off spot, with the button that puts it back.
+
+    A separate section rather than a filter on the other two, because neither of
+    them is guaranteed to contain a disabled file: the airing list only holds what
+    has already played (a spot switched off before its first airing never appears
+    there), and the long-file list is capped at the longest 40 (a 60 s spot sits
+    around rank 190 in a real library). Without this section, disabling a spot
+    could hide the only control that undoes it -- a click that cannot be taken
+    back is worse than no button at all.
+    """
+    out: list[str] = []
+    for asset in sorted(assets, key=lambda a: a.duration_ms, reverse=True):
+        if not asset.disabled:
+            continue
+        out.append(
+            f"""<tr>
+  <td>{_h(asset.path.replace(chr(92), "/").rsplit("/", 1)[-1])}</td>
+  <td class="mono">{_h(_seconds(asset.duration_ms))}</td>
+  <td>
+    <form method="post" action="/commercials/enable" class="inline">
+      <input type="hidden" name="key" value="{_h(asset.key)}">
+      <button type="submit">Enable</button>
+    </form>
+  </td>
+</tr>"""
+        )
+    return "".join(out)
+
+
+def commercials_body(
+    config: RootConfig,
+    catalog: Catalog,
+    *,
+    show_disabled: bool = False,
+    saved: str = "",
+    built: str = "",
+    error: str = "",
+    limit: int = 200,
+) -> str:
+    """The page body, as a fragment the shell can wrap."""
+    timezone = config.channel.grid.timezone
+    stats = catalog.commercial_stats()
+    airings = catalog.commercial_airings(limit=limit)
+    all_ads = catalog.assets(("ad",), include_disabled=True)
+
+    body: list[str] = []
+    if error:
+        body.append(f'<div class="saved bad">{_h(error)}</div>')
+    elif saved:
+        suffix = f" &middot; {_h(built)}" if built else ""
+        body.append(f'<div class="saved">{_h(saved)}{suffix}</div>')
+
+    body.append(
+        f"""<div class="card">
+  <p class="label">Commercial library</p>
+  <div class="stats">
+    <span class="stat"><b>{stats['total']}</b>
+      <span class="label">spots catalogued</span></span>
+    <span class="stat"><b>{stats['disabled']}</b>
+      <span class="label">switched off</span></span>
+    <span class="stat"><b>{stats['multi_spot']}</b>
+      <span class="label">marked multi-spot</span></span>
+  </div>
+  <p class="hint">A disabled spot leaves the pool at the next replan; the file
+  stays catalogued, so re-enabling it costs nothing but a click. Disabling is the
+  reliable way to fix a break that lurches: a recorded break stored as one long
+  "commercial" cannot be detected automatically, only heard.</p>
+</div>"""
+    )
+
+    # Always shown when anything is switched off, and never filtered by `all=1`:
+    # this is the undo list. A spot disabled before its first airing appears in
+    # neither of the sections below, so without this it would be unreachable.
+    disabled_rows = _disabled_rows(all_ads)
+    if disabled_rows:
+        body.append(
+            f"""<div class="card">
+  <p class="label">Switched off</p>
+  <p class="hint">These spots are out of the pool and will not air. The files are
+  still catalogued, so enabling one puts it straight back.</p>
+  <table>
+    <thead><tr><th>File</th><th>Length</th><th></th></tr></thead>
+    <tbody>{disabled_rows}</tbody>
+  </table>
+</div>"""
+        )
+
+    rows = _rows(airings, timezone=timezone, show_disabled=show_disabled)
+    if rows:
+        toggle = (
+            '<a class="button" href="/commercials">Hide switched-off</a>'
+            if show_disabled
+            else '<a class="button" href="/commercials?all=1">Show switched-off</a>'
+        )
+        body.append(
+            f"""<div class="card">
+  <p class="label">Recently aired</p>
+  <p class="hint">Every commercial that has actually gone out, newest first.
+  Times are channel time ({_h(timezone)}). {toggle}</p>
+  <table>
+    <thead><tr><th>Aired</th><th>File</th><th>Length</th><th></th></tr></thead>
+    <tbody>{rows}</tbody>
+  </table>
+</div>"""
+        )
+    else:
+        body.append(
+            """<div class="card">
+  <p class="label">Recently aired</p>
+  <p class="empty">Nothing recorded yet. The list fills as the channel airs:
+  each build records what has already gone out.</p>
+</div>"""
+        )
+
+    library, candidate_count, total_count = _library_rows(all_ads)
+    if library:
+        shown_rows = library.count("<tr>")
+        # "the longest 40 of 484 long files, out of 840 commercials" -- three
+        # numbers, so each one has to say what it counts. A bare "of 484 of 840"
+        # reads as a typo and makes the cap look like a bug.
+        shown = (
+            f"the longest {shown_rows} of {candidate_count} long files, out of "
+            f"{total_count} commercials"
+            if candidate_count > shown_rows
+            else f"all {candidate_count} long files, out of {total_count} commercials"
+        )
+        body.append(
+            f"""<div class="card">
+  <p class="label">Long files &mdash; worth a look</p>
+  <p class="hint">A pod is booked at 30/60/90 seconds. A file longer than the pod
+  it lands in gets trimmed, which is exactly the jump you see. <b>Cannot play
+  whole</b> means longer than every pod the channel books, so it is trimmed
+  wherever it goes &mdash; the strongest hint this page can give. <b>Long</b> means
+  it only gets trimmed in a short break. Showing {shown}. Both labels are
+  suggestions, not verdicts, so check the file before switching it off.</p>
+  <table>
+    <thead><tr><th>File</th><th>Length</th><th></th><th></th></tr></thead>
+    <tbody>{library}</tbody>
+  </table>
+</div>"""
+        )
+    else:
+        body.append(
+            f"""<div class="card">
+  <p class="label">Long files</p>
+  <p class="empty">No commercial is longer than {SHORT_POD_HINT_MS // 1000}s, so
+  nothing is being trimmed to fit a pod.</p>
+</div>"""
+        )
+
+    return "".join(body)
+
+
+def set_spot_enabled(catalog: Catalog, key: str, *, enabled: bool) -> str:
+    """Enable or disable one spot, returning a sentence for the page.
+
+    Raises ``LookupError`` for an unknown key so the route can answer 404 instead
+    of silently doing nothing -- a click that reports success and changes nothing
+    is worse than an error.
+    """
+    if not catalog.set_disabled(key, disabled=not enabled):
+        raise LookupError(f"no commercial with key {key!r}")
+    name = key.rsplit("/", 1)[-1].rsplit(":", 1)[-1]
+    return f"{name} {'re-enabled' if enabled else 'switched off'}"
+
+
+__all__ = [
+    "MULTI_SPOT_HINT_MS",
+    "SHORT_POD_HINT_MS",
+    "commercials_body",
+    "set_spot_enabled",
+]

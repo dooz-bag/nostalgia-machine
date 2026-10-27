@@ -29,7 +29,7 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `programming` | Hand-built lineup / whole-collection shuffle, and the grid they imply | pure |
 | `continuity` | Template → ordered segment specs, budget math | pure |
 | `bumps` | Scoring, cooldown, fallback ladder | pure |
-| `ads` | Pod filling: whole-spot tolerance, promo top-up, black-card fallback | pure |
+| `ads` | Pod filling: whole-spot tolerance, promo top-up, black-card fallback; multi-spot hint | pure |
 | `plan` | Ties the above into one timeline; enforces invariants | pure |
 | `emit` | Plan → playout JSON, XMLTV, lineup/channel config | writes files |
 | `mediaimport` | Download → library layout: alias match, filename parse, dry-run plan | pure |
@@ -37,6 +37,7 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `catalog` | Scan, tags, airing history (SQLite) | I/O |
 | `probe` | ffprobe with a sidecar fallback | I/O |
 | `bumpgen` | Render typographic cards with ffmpeg | I/O |
+| `web.commercials` | The commercial history page: what aired, and switching spots off | I/O |
 | `pipeline`, `cli`, `web` | Wiring and presentation | I/O |
 
 ## Why the schedule is deterministic
@@ -349,3 +350,18 @@ never plays and everything looks green" into a one-line warning.
 decisions are deliberately kept out of it — confirmed tags are written to
 sidecars, which travel with the media and survive a wiped database. `doctor`
 reports any sidecar it cannot parse instead of silently ignoring it.
+
+The one exception is the **disabled** flag on a commercial. It lives in the
+database because it is a playback decision rather than a description of the file,
+and it is cheap to redo: a rescan clears it, and the Commercials page puts it back
+in one click. That trade is deliberate — a sidecar per switched-off spot would put
+a file next to the media for a setting that only matters to this channel.
+
+### Airing history
+
+`airings` records what has actually gone out, and two things read it: the
+Commercials page, and `last_aired`, which seeds the cooldowns. Both need it to be
+*true*, so `build` writes only items at or before the wall clock — a plan covers a
+whole broadcast day, and a spot scheduled for 41:00 is tomorrow afternoon, not
+something that has run. Each day's rows are replaced wholesale on every build, so a
+replan cannot leave stale entries behind.

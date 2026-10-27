@@ -17,7 +17,7 @@ from ..config import RootConfig
 from ..grid import format_clock, format_wall
 from ..paths import Paths
 from ..pipeline import BuildError, day_config_for
-from ..plan import Plan, PlanContext, build_plan
+from ..plan import Plan, PlanContext, PlanError, build_plan
 from ..sidecars import POSITIONS
 from ..sidecars import BumpTag
 from ..sidecars import write as write_tag
@@ -130,7 +130,10 @@ def plan_for_day(config: RootConfig, catalog: Catalog, paths: Paths, day: date) 
             # an override that is still pending applies here as well.
             skips=pending_for(load_overrides(paths.skips), day),
         )
-    except BuildError as exc:
+    # PlanError as well as BuildError: `build_plan` raises its own exception for a
+    # day it cannot fill, and catching only BuildError let that escape the page as
+    # a 500. Every route here already renders a LookupError as a readable message.
+    except (BuildError, PlanError) as exc:
         raise LookupError(str(exc)) from exc
 
     # One entry is enough: the page only ever shows today, and keeping older days

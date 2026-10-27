@@ -56,6 +56,19 @@ class PodError(ValueError):
     pass
 
 
+#: A spot is never shaved below this, however small the leftover.
+MIN_SPOT_MS = 1_000
+
+#: A leftover below this is never covered by a black card.
+#:
+#: A card this short is not a card -- it is a discontinuity between two spots, and
+#: it reads as a flash. At 30 fps a 900 ms card is 27 frames of black between two
+#: commercials, which is not a station ident, it is a glitch. The threshold is a
+#: full second because that is the shortest interval a viewer reads as *content*
+#: rather than as a cut: below it, the honest options are to absorb the leftover
+#: into the neighbouring item or to leave the break a few milliseconds short.
+BLACK_CARD_MIN_MS = 1_000
+
 #: Upper bound on subset-sum iterations per pod. Large enough to find exact
 #: combinations for real 30/60/90 s targets, small enough that a pathological
 #: pool (dozens of spots with jittery real durations) cannot stall a build.
@@ -76,6 +89,14 @@ def fill_pod(
     #: A pod is 15-25 spots; searching more than ~14 candidates per single pod was
     #: buying nothing but CPU.
     max_candidates: int = 14,
+    #: A single spot may not overshoot the pod target by more than this.
+    #:
+    #: A pod target is a booking length, and a 70-second file dropped into a
+    #: 60-second pod is what makes playback lurch: it cannot fit, so it is either
+    #: cut (audibly, mid-word) or it steals the budget from the pods after it and
+    #: they get cut instead. Refusing the overshoot makes the pool pick two 30s
+    #: spots, which is what the break was for.
+    max_overshoot_ms: int = 500,
 ) -> PodFill:
     """Select whole spots that come as close to *target_ms* as possible.
 
@@ -111,10 +132,18 @@ def fill_pod(
     if max_candidates > 0:
         order = _budgeted_window(order, target_ms, max_candidates)
 
+    # Anything longer than target + overshoot cannot be part of this pod: it would
+    # have to be cut, or it would swallow the slot.
+    ceiling = target_ms + max(0, max_overshoot_ms)
+
     preferred = [asset for asset in order if asset.key not in cooling]
     for candidates, suffix in ((preferred, ""), (order, " (cooldown relaxed)")):
         if not candidates:
             continue
+
+        bounded = [asset for asset in candidates if asset.duration_ms <= ceiling]
+        if bounded:
+            candidates = bounded
 
         closest = _closest_to(candidates, target_ms, max_items)
         if closest is not None:
@@ -164,6 +193,30 @@ def fill_pod(
     )
 
 
+def multi_spot_candidates(
+    pool: Iterable[Asset],
+    *,
+    longest_pod_ms: int,
+    max_overshoot_ms: int = 500,
+) -> list[Asset]:
+    """Spots too long to ever play whole in this channel's longest pod.
+
+    This is the only honest automatic discriminator available. Scene-cut counts
+    and silence detection were both tried and neither separates a 70-second
+    recorded break from a 70-second single spot: a real spot has cuts too, and a
+    recorded break's seams are often *quieter* than its own audio. Duration is
+    different in kind -- it is arithmetic. A file longer than the longest pod the
+    channel books cannot be played whole, so it will be trimmed or it will steal
+    the budget from the pods after it. Either way it needs a human to look at it.
+
+    Deliberately a *suggestion*: this returns candidates and changes nothing. A
+    real 45-second spot in a 30/60/90 channel is long, not broken, and disabling
+    it automatically would quietly shrink the pool.
+    """
+    ceiling = longest_pod_ms + max(0, max_overshoot_ms)
+    return [asset for asset in pool if asset.duration_ms > ceiling]
+
+
 def fill_gap(
     pool: Iterable[Asset],
     *,
@@ -173,8 +226,9 @@ def fill_gap(
     seed_parts: Sequence[object] = (),
     max_items: int = 10,
     short_pool: Iterable[Asset] = (),
+    must_fill: bool = False,
 ) -> PodFill:
-    """Fill a gap of exactly *target_ms*, always succeeding.
+    """Fill a gap of up to *target_ms*, always succeeding.
 
     Used for the tail of a slot, where the remainder is whatever the template and
     the episode length left behind -- frequently shorter than one commercial, and
@@ -183,6 +237,17 @@ def fill_gap(
     *short_pool* (promos, generic bumps, idents) is drawn on once the commercials
     no longer fit. A break that comes up short is topped up with promos, which is
     exactly what a station does; a black card covers only what nothing can fill.
+
+    *must_fill* decides what a **sub-second** leftover means, and the two answers
+    are genuinely different:
+
+    * ``True`` -- this gap runs to the end of the slot, so nothing follows to
+      absorb a shortfall. A card is emitted, because the timeline must be
+      contiguous and a slot cannot end early.
+    * ``False`` -- more items follow inside the same break, so they simply start a
+      few milliseconds earlier. Nothing is emitted: a 1 ms card *between* two spots
+      is a single frame of black at a cut, which reads as a flash, and that was
+      happening several times an hour.
     """
     if target_ms <= 0:
         raise PodError("gap target must be positive")
@@ -269,6 +334,50 @@ def fill_gap(
         if used:
             note_parts.append(f"{used} promo(s)")
 
+    # A few milliseconds of leftover is not worth a card. Emitting one put a
+    # 6-millisecond black frame between two spots -- invisible as a card, but the
+    # *discontinuity* it creates is a visible flash, and it was happening on 20 of
+    # the day's breaks. A leading `_exact_sum_trimmed` pass would have taken this
+    # off a real spot, so reaching here means no spot is long enough to give back
+    # the leftover. It is a few hundred milliseconds: the slot's tail absorbs it,
+    # and that is a far smaller artefact than a card.
+    #
+    # This has to be decided *before* the "nothing fit" branch below. A gap of
+    # 1 ms has no spots that fit, so `not items` was true and a 1 ms card was
+    # emitted anyway -- the round-off was being undone one line later. When
+    # something follows, returning an empty fill is the honest answer: the next
+    # item starts a few ms early and nothing flashes. When nothing follows, the
+    # slot would end short and the timeline would lose its contiguity, so the card
+    # stays.
+    if 0 < remaining <= BLACK_CARD_MIN_MS:
+        if not must_fill:
+            # Something follows inside the same break and absorbs the shortfall by
+            # starting a few milliseconds early. A card here would be a single
+            # frame of black at a cut -- a flash -- and it buys nothing at all.
+            note_parts.append(f"{remaining}ms short")
+            return PodFill(
+                items=tuple(items),
+                target_ms=target_ms,
+                achieved_ms=sum(item.duration_ms for item in items),
+                note=" + ".join(note_parts),
+                synthetic_ms=sum(
+                    item.duration_ms for item in items if item.asset.is_synthetic
+                ),
+            )
+        # Nothing follows: the slot must land exactly. A card this short is a
+        # single frame of black at the boundary -- a flash, not a card. Giving the
+        # leftover back to a spot that was trimmed earlier is invisible (it is a
+        # fraction of a frame at 30 fps) and lands exactly, which is what a station
+        # does when a break runs a hair short.
+        #
+        # If nothing was trimmed there is nothing to give back, so `remaining` is
+        # deliberately left alone: the card branch below covers it. Rounding it off
+        # here would leave a hole in the timeline, which is worse than the flash.
+        extended = _extend_last_spot(items, remaining)
+        if extended is not None:
+            note_parts.append(f"{remaining}ms given back to {extended}")
+            remaining = 0
+
     if not items or remaining > 0:
         if remaining > 0:
             items.append(PodItem(synthetic_filler(remaining / 1000)))
@@ -279,13 +388,42 @@ def fill_gap(
         elif not note_parts:
             note_parts.append("whole spots")
 
+    # Report what will *actually* air, not the target. A rounded-off remainder
+    # means the break is a few milliseconds short, and the planner has to be told
+    # so it can put that slack in the slot's tail -- claiming `target_ms` here
+    # while emitting less is how a gap appears and the timeline loses its
+    # contiguity.
+    achieved = sum(item.duration_ms for item in items)
     return PodFill(
         items=tuple(items),
         target_ms=target_ms,
-        achieved_ms=target_ms,
+        achieved_ms=achieved,
         note=" + ".join(note_parts) if note_parts else f"{len(items)} spot(s)",
-        synthetic_ms=remaining if remaining > 0 else 0,
+        synthetic_ms=sum(item.duration_ms for item in items if item.asset.is_synthetic),
     )
+
+
+def _extend_last_spot(items: list[PodItem], ms: int) -> str | None:
+    """Give *ms* back to the last spot that was trimmed, in place.
+
+    Used only for a sub-second shortfall at the very end of a slot, where the
+    timeline must land exactly and a card would be a single frame of black. A spot
+    that was cut short still has its own tail to give back, so extending it by a
+    few milliseconds is invisible -- and unlike a card it does not flash.
+
+    Refuses when no spot was trimmed (every item is already playing its full file)
+    or when the extension would run past the file's own length.
+    """
+    for index in range(len(items) - 1, -1, -1):
+        item = items[index]
+        if item.asset.is_synthetic or item.out_point_ms is None:
+            continue
+        extended_ms = item.duration_ms + ms
+        if extended_ms > item.asset.duration_ms:
+            return None
+        items[index] = PodItem(item.asset, extended_ms)
+        return item.asset.key
+    return None
 
 
 def _budgeted_window(order: Sequence[Asset], target_ms: int, limit: int) -> list[Asset]:
@@ -361,10 +499,12 @@ def _closest_under(candidates: Sequence[Asset], target: int, max_items: int) -> 
 
 
 def _closest_to(candidates: Sequence[Asset], target: int, max_items: int) -> list[Asset] | None:
-    """The subset whose total is nearest *target*, over or under."""
-    # Only look one spot beyond the target. 1.5x the target was needlessly wide:
-    # an overshoot can never be useful by more than the longest single spot, and a
-    # wider window multiplies the state count for nothing.
+    """The subset whose total is nearest *target*, over or under.
+
+    The search window is one spot beyond the target, and the *caller* is
+    responsible for excluding spots that cannot belong to this pod at all -- see
+    ``max_overshoot_ms`` in :func:`fill_pod`.
+    """
     longest = max((asset.duration_ms for asset in candidates), default=0)
     limit = target + max(longest, 1)
     reachable = _reachable_totals(candidates, limit, max_items)
@@ -440,4 +580,5 @@ __all__ = [
     "dedupe",
     "fill_gap",
     "fill_pod",
+    "multi_spot_candidates",
 ]

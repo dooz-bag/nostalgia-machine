@@ -47,6 +47,7 @@ from .continuity_edit import (
     read_all,
     template_for,
 )
+from .commercials import commercials_body, set_spot_enabled
 from .schedule import (
     ScheduleFormError,
     load_schedule,
@@ -314,6 +315,31 @@ button:hover { background: #1a1a5e; border-color: var(--accent); }
 
 .empty { color: var(--dim); font-style: italic; }
 
+/* A one-button form inside a table cell. The default `form` is a flex row with a
+   top margin, which staggered every row of the commercials table. */
+form.inline { display: inline; margin: 0; }
+form.inline button { padding: 4px 10px; font-size: 10px; }
+
+/* A link that reads as a control, for the filter toggles. */
+a.button {
+  display: inline-block;
+  margin-left: 10px;
+  padding: 4px 10px;
+  border: 1px solid var(--line);
+  border-radius: 2px;
+  background: var(--navy);
+  border-color: #2a2a72;
+  color: var(--fg);
+  text-decoration: none;
+  font-size: 10px;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+a.button:hover { border-color: var(--accent); }
+
+/* Disabled rows stay legible: they are the ones being looked for. */
+tr:has(.kind) td { color: var(--dim); }
+
 .stats { display: flex; gap: 34px; flex-wrap: wrap; }
 .stat b { display: block; font-size: 21px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
@@ -396,6 +422,7 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
 .hint { color: var(--dim); font-size: 12px; margin: 0 0 12px; max-width: 62ch; }
 .hint code { color: var(--accent); }
 .warn { color: var(--yellow); font-size: 12px; }
+.dim { color: var(--dim); font-size: 12px; }
 
 .shows { display: grid; grid-template-columns: repeat(auto-fill, minmax(210px, 1fr)); gap: 4px 14px; }
 .shows label { font-size: 13px; color: var(--fg); display: flex; gap: 7px; align-items: center; }
@@ -573,7 +600,7 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
 {_test_card(card)}
 <header>
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
-  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/config", "Config")}</nav>
+  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/config", "Config")}</nav>
 </header>
 <main>{body}</main>
 <footer>Nostalgia Machine &middot; {standard}</footer>
@@ -946,6 +973,55 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse("/bumps", status_code=303)
 
+    @app.get("/commercials", response_class=HTMLResponse)
+    def commercials(
+        all: str = "", saved: str = "", built: str = "", error: str = ""
+    ) -> Any:
+        current = _reload(config, paths)
+        with Catalog(paths.catalog) as catalog:
+            body = commercials_body(
+                current,
+                catalog,
+                # `all=1` shows the switched-off rows too, so undoing a click
+                # never requires hunting through the library list.
+                show_disabled=bool(all),
+                saved=saved,
+                built=built,
+                error=error,
+            )
+        return _render(_page("Commercials", body, active="/commercials", card=_card(current)))
+
+    @app.post("/commercials/{action}")
+    async def toggle_spot(action: str, request: Request) -> Any:
+        """Switch one spot off (or back on) and replan.
+
+        Replans immediately rather than waiting for the scheduler: the point of the
+        page is to fix a break you just heard, and a click that leaves the channel
+        unchanged for the next six hours reads as broken.
+        """
+        if action not in ("disable", "enable"):
+            raise HTTPException(status_code=404, detail=f"no action {action!r}")
+        form_data = await request.form()
+        key = str(form_data.get("key") or "")
+        if not key:
+            return RedirectResponse(
+                "/commercials?error=" + quote_plus("No file was named"), status_code=303
+            )
+
+        with Catalog(paths.catalog) as catalog:
+            try:
+                message = set_spot_enabled(catalog, key, enabled=action == "enable")
+            except LookupError as exc:
+                return RedirectResponse(
+                    "/commercials?error=" + quote_plus(str(exc)), status_code=303
+                )
+
+        built = _replan(config, paths)
+        return RedirectResponse(
+            f"/commercials?saved={quote_plus(message)}&built={quote_plus(built)}",
+            status_code=303,
+        )
+
     @app.get("/config", response_class=HTMLResponse)
     def config_page(saved: str = "", built: str = "", error: str = "") -> Any:
         return _render(
@@ -1047,6 +1123,20 @@ def _reload(config: RootConfig, paths: Paths) -> RootConfig:
         return load_config(paths.config_dir)
     except ConfigError:
         return config
+
+
+def _replan(config: RootConfig, paths: Paths) -> str:
+    """Rebuild the channel horizon, returning a one-line report for the page.
+
+    Never raises: a failed replan still means the setting was saved, and saying
+    both halves ("saved, but replanning failed: ...") is the only honest report.
+    """
+    try:
+        with Catalog(paths.catalog) as catalog:
+            result = build(config, catalog, paths)
+    except Exception as exc:  # noqa: BLE001 - surfaced to the page
+        return f"saved, but replanning failed: {exc}"
+    return f"{len(result.plans)} day(s) replanned"
 
 
 def _episodes(paths: Paths) -> list[EpisodeRef]:

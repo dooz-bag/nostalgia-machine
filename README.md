@@ -274,7 +274,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 
 | Command | Purpose |
 |---|---|
-| `nostalgia scan` | Walk media folders into the catalog (`--force`, `--sidecars`) |
+| `nostalgia scan` | Walk media folders into the catalog (`--force`, `--sidecars`, `--detect-spots`) |
 | `nostalgia plan` | Build a schedule and print it (`--date`, `--days`, `--show`) |
 | `nostalgia emit` | Write playout JSON + XMLTV + ErsatzTV lineup |
 | `nostalgia doctor` | Check config, ffmpeg, library and catalog |
@@ -284,7 +284,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia review` | List bumps awaiting subject confirmation |
 | `nostalgia tag` | Confirm one bump's subject from the terminal |
 | `nostalgia bumps` | Render generated bump cards (`--dry-run`, `--style`) |
-| `nostalgia serve` | Web UI: what's on now, the schedule editor and the bump review queue, styled as a broadcast test card |
+| `nostalgia serve` | Web UI: what's on now, the schedule editor, bump review, commercial history and settings, styled as a broadcast test card |
 | `scripts/import-breaks.ps1` | Bulk-import commercial breaks from archive.org and split them into spots |
 
 ## Layout

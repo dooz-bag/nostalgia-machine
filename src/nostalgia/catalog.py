@@ -20,7 +20,7 @@ from typing import Iterable, Iterator, Sequence
 
 import re
 
-from .assets import Asset
+from .assets import Asset, flag_from_row
 from .naming import is_media_name, parse_episode, season_from_dir
 from .probe import (
     MediaInfo,
@@ -69,6 +69,18 @@ def _migrate(connection: sqlite3.Connection) -> None:
         # Deliberately left NULL for existing rows: "not examined" must not be
         # confused with "examined and absent", or every episode in a catalog that
         # predates this column would be treated as needing a mark.
+    if "disabled" not in columns:
+        # DEFAULT 0, not NULL: an existing library has nothing disabled, and a
+        # NULL would have to be handled at every read site.
+        connection.execute(
+            "ALTER TABLE media ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"
+        )
+    if "contains_multiple_spots" not in columns:
+        # NULL for existing rows: "not examined", so a catalog that predates the
+        # check keeps airing everything until `nostalgia scan --detect-spots` runs.
+        connection.execute(
+            "ALTER TABLE media ADD COLUMN contains_multiple_spots INTEGER"
+        )
     connection.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -76,8 +88,8 @@ def _migrate(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
-SCHEMA_VERSION = 2
-"""Bumped for ``media.burned_in_mark``.
+SCHEMA_VERSION = 3
+"""Bumped for ``media.burned_in_mark``, ``disabled`` and ``contains_multiple_spots``.
 
 An existing catalog is *migrated in place* rather than refused: the new column is
 added by ``ALTER TABLE`` and left NULL, which reads as "not examined yet" and
@@ -112,7 +124,16 @@ CREATE TABLE IF NOT EXISTS media (
     -- 1 when the picture already carries a corner bug of its own. Nullable on
     -- purpose: NULL means "not examined", which is different from "examined and
     -- not present", and only the latter may be marked by the channel.
-    burned_in_mark INTEGER
+    burned_in_mark INTEGER,
+    -- 1 when the file was marked bad on the web page. Kept in the catalog rather
+    -- than in a sidecar because it is a judgement about the print, not about the
+    -- media: the file must stay catalogued (and keep its tags and history) while
+    -- being excluded from planning.
+    disabled INTEGER NOT NULL DEFAULT 0,
+    -- 1 when the file holds several commercials back to back. A recorded break
+    -- masquerading as one spot is the main reason playback lurches: the pod
+    -- arithmetic sees a single 70-second "commercial" and has to cut it.
+    contains_multiple_spots INTEGER
 );
 CREATE INDEX IF NOT EXISTS media_kind  ON media(kind);
 CREATE INDEX IF NOT EXISTS media_show  ON media(show_id, season, episode);
@@ -179,6 +200,9 @@ class ScanReport:
     """Episodes found to carry their own corner bug."""
     mark_pending: int = 0
     """Episodes whose corner has not been examined yet."""
+    multi_spot: int = 0
+    """Commercials flagged as probably holding several spots (advisory)."""
+    multi_spot_keys: list[str] = field(default_factory=list)
 
     def note(self, path: Path, reason: str) -> None:
         self.issues.append((str(path), reason))
@@ -273,6 +297,8 @@ class Catalog:
         derived_root: Path | None = None,
         detect_burned_in: bool = False,
         ffmpeg_path: str | None = None,
+        detect_spots: bool = False,
+        longest_pod_ms: int = 90_000,
     ) -> ScanReport:
         """Walk every media root and (re)build the ``media`` table.
 
@@ -353,7 +379,33 @@ class Catalog:
         for row in rows:
             report.per_kind[row[1]] = report.per_kind.get(row[1], 0) + 1
             report.scanned += 1
+        if detect_spots:
+            self._flag_multi_spots(report, longest_pod_ms=longest_pod_ms)
         return report
+
+    def _flag_multi_spots(self, report: ScanReport, *, longest_pod_ms: int) -> None:
+        """Mark commercials too long to play whole in the longest pod.
+
+        Advisory only: this writes ``contains_multiple_spots`` and never touches
+        ``disabled``. Duration is the one discriminator that is arithmetic rather
+        than a guess -- scene-cut counts and silence detection were both tried and
+        neither separates a recorded break from a long single spot -- but it is
+        still only a hint, because a real 45 s spot in a 30/60/90 channel is long,
+        not broken. The page offers these as candidates; a person decides.
+        """
+        from .ads import multi_spot_candidates
+
+        pool = self.assets(("ad",), include_disabled=True)
+        candidates = multi_spot_candidates(pool, longest_pod_ms=longest_pod_ms)
+        if not candidates:
+            return
+        with self.transaction() as connection:
+            connection.executemany(
+                "UPDATE media SET contains_multiple_spots = 1 WHERE key = ?",
+                [(asset.key,) for asset in candidates],
+            )
+        report.multi_spot = len(candidates)
+        report.multi_spot_keys = [asset.key for asset in candidates]
 
     def _sync_sidecar_tags(self, connection: sqlite3.Connection) -> None:
         """Copy confirmed sidecar tags into ``asset_tags``.
@@ -674,13 +726,24 @@ class Catalog:
             for row in self.connect().execute(query, params)
         ]
 
-    def assets(self, kinds: Sequence[str] = ("bump", "ad", "ident")) -> list[Asset]:
+    def assets(
+        self,
+        kinds: Sequence[str] = ("bump", "ad", "ident"),
+        *,
+        include_disabled: bool = False,
+    ) -> list[Asset]:
         """Catalogued assets, with tags resolved from sidecar then sidebar DB.
 
         Resolution order is deliberate: a sidecar next to the file is the most
         specific statement of intent (it is what the review queue and
         ``nostalgia tag`` write), then a manual tag in the database, then the
         folder convention.
+
+        Disabled assets are filtered out here rather than in the planner: this is
+        the only door into the pool, so one predicate covers bumps, spots and
+        idents, and a click on the web page takes effect at the very next plan
+        without a rescan. ``include_disabled`` exists for the history page, which
+        has to list what was switched off.
         """
         placeholders = ",".join("?" for _ in kinds)
         query = f"""
@@ -694,9 +757,33 @@ class Catalog:
         out: list[Asset] = []
         for row in self.connect().execute(query, tuple(kinds)):
             asset = self._asset_from_row(row)
-            if asset is not None:
-                out.append(asset)
+            if asset is None:
+                continue
+            if asset.disabled and not include_disabled:
+                continue
+            out.append(asset)
         return out
+
+    # -- enabling / disabling an asset ------------------------------------
+
+    def set_disabled(self, key: str, disabled: bool) -> bool:
+        """Mark one asset air-worthy or not. Returns False if *key* is unknown."""
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE media SET disabled = ? WHERE key = ?",
+                (1 if disabled else 0, key),
+            )
+        return cursor.rowcount > 0
+
+    def set_multi_spot(self, key: str, multi: bool | None) -> bool:
+        """Record whether a file holds several commercials back to back."""
+        value = None if multi is None else (1 if multi else 0)
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE media SET contains_multiple_spots = ? WHERE key = ?",
+                (value, key),
+            )
+        return cursor.rowcount > 0
 
     def _asset_from_row(self, row: sqlite3.Row) -> Asset | None:
         path = Path(row["path"])
@@ -737,6 +824,7 @@ class Catalog:
             confidence = 1.0 if subject else 0.0
             brand = None
 
+        get = row.__getitem__ if not hasattr(row, "get") else row.get
         return Asset(
             key=row["key"],
             path=str(path),
@@ -750,6 +838,8 @@ class Catalog:
             tag_source=source,
             confidence=confidence,
             brand=brand,
+            disabled=flag_from_row(get, "disabled") is True,
+            contains_multiple_spots=flag_from_row(get, "contains_multiple_spots"),
         )
 
     def _note_issue(self, path: Path, reason: str) -> None:
@@ -897,6 +987,106 @@ class Catalog:
                 """,
                 (item_id, asset_key, kind, start_ms, end_ms, day, slot_index),
             )
+
+    def record_day_airings(self, day, items: Sequence) -> int:
+        """Replace the whole day's airings with *items*, in one transaction.
+
+        Called after a day plans. The two things that read this table both need it
+        to be *true*:
+
+        * the history page, which is how a bad spot gets found at all; and
+        * ``last_aired``, which seeds the cooldowns -- and cooldowns are only
+          meaningful for what has already aired. A slot that airs at 41:00 (i.e.
+          tomorrow afternoon, on a broadcast day that starts at 06:00) must not
+          count as history while planning 02:00, or the planner would exclude
+          spots for a reason that has not happened yet.
+
+        So this is deliberately *not* "insert everything the plan contains". The
+        caller decides which items are behind the plan's own start line.
+        """
+        day_text = day.isoformat() if hasattr(day, "isoformat") else str(day)
+        rows = [
+            (
+                item.item_id,
+                item.asset_key,
+                item.kind,
+                item.start_ms,
+                item.end_ms,
+                day_text,
+                item.slot_index,
+            )
+            for item in items
+        ]
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM airings WHERE day = ?", (day_text,))
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT INTO airings (item_id, asset_key, kind, start_ms, end_ms,
+                                         day, slot_index)
+                    VALUES (?,?,?,?,?,?,?)
+                    ON CONFLICT(item_id) DO UPDATE SET
+                        asset_key=excluded.asset_key, kind=excluded.kind,
+                        start_ms=excluded.start_ms, end_ms=excluded.end_ms,
+                        slot_index=excluded.slot_index
+                    """,
+                    rows,
+                )
+        return len(rows)
+
+    def commercial_airings(self, *, limit: int = 300, since_ms: int | None = None) -> list[dict]:
+        """Recent commercial airings, newest first, with the file they came from.
+
+        Joined to ``media`` rather than looked up per row: the page shows a
+        filename and a duration for every entry, and a row whose file has since
+        been deleted still has to render (with a blank path) rather than vanish.
+        """
+        query = """
+            SELECT a.asset_key, a.start_ms, a.end_ms, a.day, a.slot_index,
+                   m.path, m.duration_ms, m.disabled, m.contains_multiple_spots
+            FROM airings a
+            LEFT JOIN media m ON m.key = a.asset_key
+            WHERE a.kind = 'ad'
+        """
+        params: list = []
+        if since_ms is not None:
+            query += " AND a.start_ms >= ?"
+            params.append(since_ms)
+        query += " ORDER BY a.start_ms DESC LIMIT ?"
+        params.append(int(limit))
+        out: list[dict] = []
+        for row in self.connect().execute(query, tuple(params)):
+            out.append(
+                {
+                    "key": row["asset_key"],
+                    "path": row["path"] or "",
+                    "name": Path(row["path"]).name if row["path"] else row["asset_key"],
+                    "duration_ms": int(row["duration_ms"] or (row["end_ms"] - row["start_ms"])),
+                    "aired_ms": row["start_ms"],
+                    "played_ms": row["end_ms"] - row["start_ms"],
+                    "day": row["day"],
+                    "slot_index": row["slot_index"],
+                    "disabled": flag_from_row(row.__getitem__, "disabled") is True,
+                    "multi_spot": flag_from_row(row.__getitem__, "contains_multiple_spots") is True,
+                }
+            )
+        return out
+
+    def commercial_stats(self) -> dict:
+        """Counts the commercials page needs for its header."""
+        row = self.connect().execute(
+            """
+            SELECT COUNT(*) AS total,
+                   SUM(CASE WHEN disabled = 1 THEN 1 ELSE 0 END) AS off,
+                   SUM(CASE WHEN contains_multiple_spots = 1 THEN 1 ELSE 0 END) AS multi
+            FROM media WHERE kind = 'ad'
+            """
+        ).fetchone()
+        return {
+            "total": int(row["total"] or 0),
+            "disabled": int(row["off"] or 0),
+            "multi_spot": int(row["multi"] or 0),
+        }
 
     def last_aired(self, kinds: Sequence[str] = ("bump", "ad")) -> dict[str, int]:
         placeholders = ",".join("?" for _ in kinds)

@@ -517,6 +517,37 @@ would reject is refused with the file left untouched, because a saved file that
 cannot load would break the channel at the next plan with no clue which edit did
 it.
 
+### Finding the commercial that makes a break lurch
+
+**Commercials** (`/commercials`) lists every commercial that has actually aired,
+newest first, with its file name, the channel time it went out and how long it
+played. A spot that played shorter than its file is marked *cut to N s* — that is
+the visible symptom of a pod that could not fit what it was given.
+
+Each row has a **Disable** button. Disabling writes a flag on the media row;
+`Catalog.assets()` filters on it, so the file leaves the pool at the very next plan
+with no rescan. The file stays catalogued and the row stays visible under
+`?all=1`, so re-enabling costs one click. Disabling is the reliable fix for a break
+that jumps: a recorded break stored as one long "commercial" cannot be detected
+automatically, only heard.
+
+Everything switched off is listed in its own **Switched off** section, which is
+never filtered. That section is the undo list: a spot disabled before its first
+airing appears in neither the history (nothing has aired) nor the long-file list
+(capped at the longest 40), so without it the only control that reverses the click
+would be unreachable.
+
+The page also lists **long files** — anything longer than the longest pod the
+channel books — as *likely a whole recorded break*. These are suggestions, not
+verdicts: a real 45-second spot in a 30/60/90 channel is long, not broken. Check the
+file before switching it off.
+
+`nostalgia scan --detect-spots` writes the same hint into the catalog in bulk and
+prints what it found. It never disables anything. Scene-cut counting and silence
+detection were both tried for this and rejected: neither separates a 70-second
+recorded break from a 70-second single spot. Duration is arithmetic — a file longer
+than the longest pod cannot play whole — so it is the only honest signal available.
+
 ### Skipping the episode that is on
 
 **On now** (`/`) has a **Skip this episode** button under the title. It swaps in the
@@ -642,6 +673,10 @@ daypart is wrong if not.
 .\run.ps1 plan --date 2003-06-16 --show     # read the timeline first
 .\run.ps1 emit
 ```
+
+`scan --detect-spots` additionally flags commercials longer than the longest pod the
+channel books, as candidates for the Commercials page. It is advisory and changes no
+playback setting.
 
 `plan --show` prints the whole day: clock, duration, kind and show. This is the
 cheapest way to tune — no streaming, no waiting.

@@ -17,7 +17,7 @@ import time
 
 import pytest
 
-from nostalgia.ads import fill_gap, fill_pod
+from nostalgia.ads import BLACK_CARD_MIN_MS, fill_gap, fill_pod
 from nostalgia.assets import Asset
 
 
@@ -49,7 +49,10 @@ def test_gap_filling_is_fast_on_a_ragged_pool(real_pool, target: int) -> None:
     started = time.perf_counter()
     fill = fill_gap(real_pool, target_ms=target)
     elapsed = time.perf_counter() - started
-    assert fill.exact
+    # A gap may fall a few hundred milliseconds short rather than emit a
+    # sub-second black card -- see BLACK_CARD_MIN_MS. It may never *overrun*:
+    # there is nothing after it to absorb a surplus.
+    assert target - BLACK_CARD_MIN_MS <= fill.achieved_ms <= target
     assert elapsed < 3.0, f"fill_gap({target}) took {elapsed:.2f}s"
 
 
@@ -65,8 +68,34 @@ def test_round_trip_fill_still_sums_exactly(real_pool) -> None:
     """The speed-up must not have cost correctness on ordinary targets."""
     for target in (30_000, 60_000, 90_000, 120_000):
         fill = fill_gap(real_pool, target_ms=target)
-        assert fill.exact, target
-        assert sum(item.duration_ms for item in fill.items) == target
+        assert abs(fill.achieved_ms - target) <= BLACK_CARD_MIN_MS, target
+        assert sum(item.duration_ms for item in fill.items) == fill.achieved_ms
+
+
+def test_a_gap_never_emits_a_sub_second_black_card(real_pool) -> None:
+    """Regression: 20 of a day's breaks contained a 0.0 s card.
+
+    A card of a few milliseconds is not a card. It renders as a single frame of
+    black between two spots, and the discontinuity it introduces reads as a flash
+    -- worse than the few hundred milliseconds of unfilled tail it replaced.
+    """
+    for target in (30_000, 45_500, 60_000, 75_250, 90_000, 120_000):
+        fill = fill_gap(real_pool, target_ms=target)
+        for item in fill.items:
+            if not item.asset.is_synthetic:
+                continue
+            assert item.duration_ms > BLACK_CARD_MIN_MS, (target, item.duration_ms)
+
+
+def test_a_pod_refuses_a_spot_that_cannot_fit_it(real_pool) -> None:
+    """A 70-second file in a 60-second pod is the lurch, not the fix.
+
+    Previously the longest candidate won and was then cut mid-word, or stole the
+    budget from the pods after it.
+    """
+    fill = fill_pod(real_pool, target_ms=60_000, max_overshoot_ms=500)
+    assert sum(item.duration_ms for item in fill.items) <= 60_500
+    assert all(item.out_point_ms is None for item in fill.items)
 
 
 def test_no_spot_is_used_twice(real_pool) -> None:

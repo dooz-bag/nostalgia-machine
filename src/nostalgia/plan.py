@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Mapping, Sequence
 
 from . import programming
-from .ads import PodError, PodFill, fill_gap, fill_pod
+from .ads import BLACK_CARD_MIN_MS, PodError, PodFill, fill_gap, fill_pod
 from .assets import NEUTRAL, Asset
 from .bumps import BumpRequest, choose
 from .catalog import Catalog
@@ -907,6 +907,10 @@ def _plan_slot(
                     trim_slop_ms=root.ads.trim_slop_ms,
                     seed_parts=(plan.day.isoformat(), slot.index, "tail", cursor_ms),
                     short_pool=_promo_pool(real_bumps, generated_pool, context.idents),
+                    # A mid-break pod is followed by more material, which absorbs
+                    # any shortfall by starting a few ms early. Only the closing pod
+                    # runs to the slot boundary and has to land exactly.
+                    must_fill=not _has_item_after(script, spec),
                 )
             else:
                 try:
@@ -937,26 +941,39 @@ def _plan_slot(
         # Trailing dead air means the template under-budgeted the break. Cover it
         # exactly rather than letting the next slot start early.
         remainder = slot.end_ms - cursor_ms
-        try:
-            filler = fill_gap(
-                context.ads,
-                target_ms=remainder,
-                on_cooldown=ad_tracker.cooling([], cursor_ms),
-                trim_slop_ms=root.ads.trim_slop_ms,
-                seed_parts=(plan.day.isoformat(), slot.index, "trail", cursor_ms),
-                short_pool=_promo_pool(real_bumps, generated_pool, context.idents),
-            )
-            cursor_ms = _emit_pod(
-                plan,
-                filler,
-                cursor_ms=cursor_ms,
-                slot=slot,
-                suffix="t",
-                tracker=ad_tracker,
-                root=root,
-            )
-        except PodError as exc:
-            plan.warnings.append(f"{prefix}: {exc}")
+        # A sub-second remainder is a rounding artefact, not a gap. Emitting a card
+        # for it puts a single frame of black at the slot boundary -- a flash, and
+        # it was happening several times an hour. Absorbing it into the item just
+        # before is invisible: the durations are integer milliseconds, so a file
+        # recorded as 5349 ms is really 5.3493 s and giving back 1 ms is correcting
+        # the rounding rather than inventing footage.
+        if remainder <= BLACK_CARD_MIN_MS and _absorb_remainder(plan, remainder):
+            cursor_ms = slot.end_ms
+        else:
+            try:
+                filler = fill_gap(
+                    context.ads,
+                    target_ms=remainder,
+                    on_cooldown=ad_tracker.cooling([], cursor_ms),
+                    trim_slop_ms=root.ads.trim_slop_ms,
+                    seed_parts=(plan.day.isoformat(), slot.index, "trail", cursor_ms),
+                    short_pool=_promo_pool(real_bumps, generated_pool, context.idents),
+                    # Nothing follows this: it runs to the slot boundary. A
+                    # shortfall here is a gap in the timeline, so it must land
+                    # exactly even when the leftover is only a few milliseconds.
+                    must_fill=True,
+                )
+                cursor_ms = _emit_pod(
+                    plan,
+                    filler,
+                    cursor_ms=cursor_ms,
+                    slot=slot,
+                    suffix="t",
+                    tracker=ad_tracker,
+                    root=root,
+                )
+            except PodError as exc:
+                plan.warnings.append(f"{prefix}: {exc}")
 
     if cursor_ms != slot.end_ms:
         plan.warnings.append(
@@ -1188,6 +1205,47 @@ def _promo_pool(
             continue
         pool.append(asset)
     return pool
+
+
+def _absorb_remainder(plan: Plan, ms: int) -> bool:
+    """Stretch the last item by *ms* so the slot lands exactly. True on success.
+
+    Only ever called for a sub-second remainder at a slot boundary, where the
+    alternative is a black card one frame long. A card that short is not a card: it
+    is a discontinuity at the cut, and it reads as a flash. Stretching the previous
+    item by the same few milliseconds is invisible -- durations are integer
+    milliseconds, so a file recorded as 5349 ms is really 5.3493 s and giving back
+    1 ms corrects the rounding rather than inventing footage.
+
+    Refuses for a synthetic item (a card cannot be stretched into a longer card
+    without changing what it is) and for an episode (its length is the file's, and
+    the guide would then disagree with the timeline).
+    """
+    if ms <= 0 or not plan.items:
+        return False
+    last = plan.items[-1]
+    if last.kind not in ("ad", "bump", "ident", "filler"):
+        return False
+    plan.items[-1] = replace(last, end_ms=last.end_ms + ms)
+    return True
+
+
+def _has_item_after(script, spec: SegmentSpec) -> bool:
+    """Whether anything at all follows *spec* inside the same slot.
+
+    A pod followed by more material -- another episode part, or the closing bump --
+    is mid-break: whatever comes next starts a few milliseconds early and absorbs
+    the shortfall, so a sub-second leftover needs no card. Only the very last pod of
+    a slot has nothing after it, and only that one must land exactly.
+    """
+    seen = False
+    for candidate in script.specs:
+        if candidate is spec:
+            seen = True
+            continue
+        if seen:
+            return True
+    return False
 
 
 def _is_last_filler(script, spec: SegmentSpec) -> bool:

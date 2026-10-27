@@ -8,6 +8,7 @@ can produce a playout file. Anything that "just changes one thing" goes through
 from __future__ import annotations
 
 import os
+import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
@@ -16,6 +17,7 @@ from .catalog import Catalog, ScanReport
 from .config import DayConfig, RootConfig, load_config
 from .emit import (
     EmitPaths,
+    prune_playouts,
     set_channel_timezone,
     set_path_mapping,
     write_ersatztv_config,
@@ -323,6 +325,11 @@ def _is_video(path: Path) -> bool:
     return path.is_file() and path.suffix.lower() in VIDEO_EXTENSIONS
 
 
+def _now_ms() -> int:
+    """Wall clock in epoch ms, in one place so tests can freeze it."""
+    return int(time.time() * 1000)
+
+
 def day_config_for(config: RootConfig, day: date) -> DayConfig:
     """Pick the day file that covers *day*."""
     weekday = day.strftime("%a").lower()[:3]
@@ -342,6 +349,7 @@ def scan(
     ffprobe_path: str | None = None,
     write_sidecars: bool = False,
     detect_burned_in: bool | None = None,
+    detect_spots: bool = False,
 ) -> ScanReport:
     """Scan every configured media root into the catalog.
 
@@ -372,6 +380,13 @@ def scan(
         derived_root=paths.media("derived", "watermark"),
         detect_burned_in=detect_burned_in,
         ffmpeg_path=config.channel.ffmpeg_path,
+        detect_spots=detect_spots,
+        # The longest pod the channel actually books. A spot longer than this can
+        # never play whole, which is the only honest multi-spot signal available.
+        longest_pod_ms=max(
+            (target.seconds * 1000 for target in config.ads.pod_targets),
+            default=90_000,
+        ),
     )
 
 
@@ -458,6 +473,16 @@ def build(
         result.fallbacks += len(plan.bump_fallbacks)
         result.fallback_reasons.extend(plan.bump_fallback_reasons)
 
+        # Record what has actually aired, which is what the commercials page reads
+        # and what seeds tomorrow's cooldowns. Only items at or before "now" go in:
+        # a plan covers the whole broadcast day, and a spot scheduled for 41:00 is
+        # tomorrow afternoon, not something that has run. The day is always
+        # rewritten, so a replan cannot leave yesterday's stale rows behind.
+        cutoff = _now_ms()
+        catalog.record_day_airings(
+            day, [item for item in plan.items if item.start_ms <= cutoff]
+        )
+
         if emit:
             result.playout_files.append(
                 write_playout(plan, emit_paths, watermark_layer=watermark_layer)
@@ -471,6 +496,11 @@ def build(
         result.xmltv_files.append(
             write_guide(result.plans, emit_paths, channel_name=config.channel.name)
         )
+        # Drop playouts for days outside the horizon. Without this a file written
+        # once stays forever: the streamer keeps serving a day whose plan has since
+        # been rebuilt with a fix, so the channel plays the old, broken version and
+        # nothing on disk says why. Pruning is what makes "rebuild" mean rebuilt.
+        prune_playouts(emit_paths, keep_days=[plan.day for plan in result.plans])
         lineup, _ = write_ersatztv_config(
             emit_paths,
             channel_number=config.channel.number,
