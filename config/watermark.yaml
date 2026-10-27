@@ -54,7 +54,10 @@ watermark:
   # wider than the wordmark and never trimmed, so the streamer was scaling mostly
   # empty space and the mark came out at roughly a third of the requested size --
   # which is why raising this number barely changed anything on screen.
-  width_percent: 15.0
+  #
+  # Now that it is trimmed to the ink, each point is worth real pixels: 15% read
+  # slightly large on screen, so this is 15% less of a mark than before (12.75).
+  width_percent: 12.75
 
   # Which shows get it. Empty = every show. Commercials and bumpers never do,
   # because [adult swim] did not bug them.

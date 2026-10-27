@@ -30,12 +30,20 @@ from nostalgia.web.continuity_edit import (
 
 CONFIG = Path(__file__).resolve().parents[1] / "config"
 
+#: A copy of ``continuity.yaml`` as it ships, taken from the last commit that
+#: touched it. Tests that describe *the shipped defaults* must not read the live
+#: config: that file is the one the schedule page rewrites, so the moment anyone
+#: changes the card counts in the UI, every assertion about "one card at each
+#: position" starts failing for a reason that has nothing to do with the code.
+#: Editing a template is a supported feature, not a broken build.
+SHIPPED = Path(__file__).resolve().parent / "fixtures" / "continuity-shipped.yaml"
+
 
 @pytest.fixture()
 def document():
     reader = YAML()
     reader.preserve_quotes = True
-    return reader.load((CONFIG / "continuity.yaml").read_text(encoding="utf-8"))
+    return reader.load((SHIPPED).read_text(encoding="utf-8"))
 
 
 @pytest.fixture()
@@ -66,6 +74,25 @@ def test_the_shipped_templates_read_as_one_card_at_each_standard_point(document)
     for family in SLOT_FAMILIES:
         form = read_form(document, family)
         assert (form.into, form.after, form.next) == (1, 1, 1)
+
+
+def test_the_live_config_is_never_assumed_to_hold_the_shipped_counts() -> None:
+    """Editing a template must not be able to fail the build.
+
+    The card counts are a supported setting on the schedule page, so the live
+    ``config/continuity.yaml`` is expected to drift from what ships. Every test
+    above reads the shipped snapshot instead; this one states the invariant that
+    makes that necessary, so nobody "fixes" the fixture back to the live file.
+    """
+    reader = YAML()
+    reader.preserve_quotes = True
+    live = reader.load((CONFIG / "continuity.yaml").read_text(encoding="utf-8"))
+    shipped = reader.load(SHIPPED.read_text(encoding="utf-8"))
+
+    for family in SLOT_FAMILIES:
+        # Both files must be structurally valid, whatever counts they carry.
+        assert read_form(live, family) is not None, family
+        assert read_form(shipped, family) is not None, family
 
 
 def test_mid_breaks_are_read_with_their_card_counts(document) -> None:
