@@ -84,9 +84,11 @@ foreach ($show in $shows) {
         New-Item -ItemType Directory -Force -Path $dir | Out-Null
         $target = Join-Path $dir "$position-01.mkv"
         if ((Test-Path $target) -and $KeepExisting) { continue }
+        # `after` sits where the episode has already ended, so it must not promise
+        # a return -- "we now return to" belongs to the mid-break (`out`) card.
         $word = switch ($position) {
             'into' { 'STAY TUNED' }
-            'after' { 'WE NOW RETURN TO' }
+            'after' { 'YOU JUST WATCHED' }
             'next' { 'NEXT' }
         }
         $vf = "drawtext=text='[ADULT SWIM]':fontfile='$fontRegular':fontcolor=white:fontsize=20:x=60:y=150," +

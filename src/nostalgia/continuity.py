@@ -52,6 +52,14 @@ class SegmentSpec:
     offset_ms: int = 0
     duration_ms: int = 0
 
+    resumes: bool = False
+    """True for an `INTO` that returns from a mid-episode break.
+
+    Two `INTO` segments exist in a slot and they describe different moments: the
+    one before the episode announces it, the one inside `mid:` says it is
+    continuing. Only the second may carry "we now return to".
+    """
+
 
 @dataclass
 class SlotScript:
@@ -141,7 +149,9 @@ def build_script(template: ContinuityTemplate, *, episode_ms: int) -> SlotScript
         if segment.kind == "episode":
             for part_index, (offset, length) in enumerate(split.parts):
                 if part_index > 0 and mid_index < len(template.mid):
-                    script.specs.extend(_specs_from(template.mid[mid_index].segments))
+                    script.specs.extend(
+                        _specs_from(template.mid[mid_index].segments, resuming=True)
+                    )
                     mid_index += 1
                 script.specs.append(
                     SegmentSpec(
@@ -164,7 +174,15 @@ def build_script(template: ContinuityTemplate, *, episode_ms: int) -> SlotScript
     return script
 
 
-def _specs_from(segments: Sequence[ContinuitySegment]) -> list[SegmentSpec]:
+def _specs_from(
+    segments: Sequence[ContinuitySegment], *, resuming: bool = False
+) -> list[SegmentSpec]:
+    """Expand segment config into specs.
+
+    *resuming* marks a ``mid:`` block, whose leading ``INTO`` is the episode
+    coming back rather than a new show about to start -- a distinction the bump
+    matcher needs in order to choose a truthful card.
+    """
     return [
         SegmentSpec(
             kind=segment.kind,
@@ -175,6 +193,7 @@ def _specs_from(segments: Sequence[ContinuitySegment]) -> list[SegmentSpec]:
             pod=segment.pod,
             share=segment.share,
             guide=segment.guide,
+            resumes=resuming and segment.kind == "bump" and segment.position == "INTO",
         )
         for segment in segments
     ]

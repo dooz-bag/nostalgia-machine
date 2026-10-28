@@ -426,6 +426,76 @@ def test_every_slot_ends_on_its_up_next_bump(plan: Plan) -> None:
         assert "next" in items[-1].subtitle, (slot_index, items[-1].subtitle)
 
 
+def test_no_bump_airs_twice_in_a_row(plan: Plan) -> None:
+    """Two identical cards back to back read as a frozen stream.
+
+    Regression: pass 1 resolves every bump in a slot *before* any is emitted, so
+    the cooldown tracker was still empty when each spec was scored, and a template
+    with two cards in one position picked the same file for both.
+    """
+    for previous, current in zip(plan.items, plan.items[1:]):
+        if previous.kind != "bump" or current.kind != "bump":
+            continue
+        assert previous.asset_key != current.asset_key, (
+            f"{current.item_id} repeats {previous.item_id} "
+            f"({current.asset_key}) back to back"
+        )
+
+
+def test_a_long_gap_does_not_repeat_a_spot_immediately() -> None:
+    """`fill_gap` re-drew from the whole pool on every round.
+
+    The bug was not "a spot may never repeat" -- a library smaller than the break
+    has to repeat -- but that one *round* could re-pick what the previous round
+    had just placed, putting the same commercial on twice running.
+    """
+    from nostalgia.ads import fill_gap
+    from nostalgia.assets import Asset
+
+    def spot(index: int) -> Asset:
+        return Asset(
+            key=f"ad:{index}",
+            path=f"/ads/{index}.mp4",
+            kind="ad",
+            duration_ms=30_000,
+        )
+
+    pool = [spot(index) for index in range(20)]
+    fill = fill_gap(pool, target_ms=300_000, seed_parts=("gap", 1))
+    keys = [item.asset.key for item in fill.items]
+    assert len(keys) >= 10
+    for previous, current in zip(keys, keys[1:]):
+        assert previous != current, f"{current} repeated immediately in {keys}"
+
+
+def test_a_slot_never_airs_the_same_spot_twice_when_the_pool_allows(
+    plan: Plan, context: PlanContext
+) -> None:
+    """A break repeating a commercial is the other half of the same tell.
+
+    Only asserted where the pool can actually cover the break. On a library
+    smaller than the break -- this fixture has 12 spots and a half-hour slot needs
+    about 21 -- reuse is arithmetic, not a bug: going back to a spot is what a
+    station does when it runs out, and black would be worse.
+    """
+    pool = {asset.key for asset in context.ads}
+    by_slot: dict[int, list[str]] = {}
+    for item in plan.items:
+        if item.kind == "ad":
+            by_slot.setdefault(item.slot_index, []).append(item.asset_key)
+    checked = 0
+    for slot_index, keys in by_slot.items():
+        if len(keys) > len(pool):
+            # The slot needs more spots than exist; a repeat is unavoidable.
+            continue
+        checked += 1
+        assert len(keys) == len(set(keys)), (
+            f"slot {slot_index} repeats "
+            f"{sorted({k for k in keys if keys.count(k) > 1})}"
+        )
+    assert checked, "no slot had a pool large enough to assert this"
+
+
 def test_break_tails_are_topped_up_with_promos_not_black(plan: Plan) -> None:
     """A break that comes up short gets a card, not seconds of black.
 

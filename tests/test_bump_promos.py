@@ -85,17 +85,32 @@ def test_a_card_claiming_the_sequence_is_refused_in_any_claimed_slot() -> None:
         assert score < 0, f"a positional claim survived a {slot_position} slot"
 
 
-def test_a_card_for_the_show_that_actually_follows_is_fine_anywhere() -> None:
-    """It says "up next" and the next show *is* it, so the claim is always true.
+def test_a_card_for_the_show_that_actually_follows_is_fine_after_it_ends() -> None:
+    """It says "up next: Brak" and Brak *is* next, so the claim is true.
 
-    Including at the end of the break -- that is precisely where an "up next" card
-    belongs, and rejecting it there would have made the most recognisable moment
-    on the channel impossible to schedule.
+    It is true from the moment the episode ends through the end of the break --
+    which is precisely where an "up next" card belongs, and rejecting it there
+    would have made the most recognisable moment on the channel impossible to
+    schedule. It is *not* true at the `INTO` that opens the slot, because the show
+    starting there is the current one; see the boundary test below.
     """
     upcoming = _bump("brak-next", "the-brak-show", "NEXT")
-    for slot_position in ("INTO", "OUT", "NEXT", "AFTER", "ANY"):
+    for slot_position in ("NEXT", "AFTER"):
         score, reasons = score_asset(upcoming, _request(position=slot_position), cool=False)
         assert score > 0, (slot_position, reasons)
+
+
+def test_an_up_next_card_may_not_precede_the_show_it_announces() -> None:
+    """"Up next: Brak" immediately before Aqua Teen is a checkable lie.
+
+    "Up next" names what plays after the *episode*, so it is false before that
+    episode has started and false at a mid-episode break, where what resumes is
+    the episode itself.
+    """
+    upcoming = _bump("brak-next", "the-brak-show", "NEXT")
+    for slot_position in ("INTO", "OUT"):
+        score, reasons = score_asset(upcoming, _request(position=slot_position), cool=False)
+        assert score < 0, (slot_position, reasons)
 
 
 def test_the_closing_card_must_be_labelled_as_an_up_next() -> None:
@@ -111,6 +126,48 @@ def test_the_closing_card_must_be_labelled_as_an_up_next() -> None:
     assert score_asset(next_card, request, cool=False)[0] > 0
 
 
+def test_a_return_claim_is_refused_once_the_episode_has_ended() -> None:
+    """`OUT` promises a return; `AFTER` sits past the point one can happen.
+
+    The reported symptom: a "WE NOW RETURN TO King of the Hill" card airing right
+    after King of the Hill ended and leading into commercials. Naming the right
+    show is not enough -- at an `AFTER` slot the show is not coming back, so the
+    claim is false whatever it names.
+    """
+    card = _bump("athf-out", "aqua-teen-hunger-force", "OUT")
+    assert score_asset(card, _request(position="AFTER"), cool=False)[0] < 0
+    # The same card is correct at the mid-break it was made for.
+    assert score_asset(card, _request(position="OUT"), cool=False)[0] > 0
+
+
+def test_an_after_card_cannot_open_a_mid_break() -> None:
+    """The reverse boundary: "you just watched" is false mid-episode."""
+    card = _bump("athf-after", "aqua-teen-hunger-force", "AFTER")
+    assert score_asset(card, _request(position="OUT"), cool=False)[0] < 0
+    assert score_asset(card, _request(position="AFTER"), cool=False)[0] > 0
+
+
+def test_the_two_into_cards_in_a_slot_are_different_moments() -> None:
+    """One announces the show; the other says the episode is continuing.
+
+    "STAY TUNED FOR Aqua Teen" is false at the `INTO` that resumes Aqua Teen --
+    the show is not about to start, it never stopped -- while "WE NOW RETURN TO
+    Aqua Teen" is exactly right there and false at the front of the slot.
+    """
+    stay_tuned = _bump("athf-into", "aqua-teen-hunger-force", "INTO")
+    returning = _bump("athf-out", "aqua-teen-hunger-force", "OUT")
+
+    opening = _request(position="INTO")
+    resume = _request(position="INTO", resumes=True)
+
+    assert score_asset(stay_tuned, opening, cool=False)[0] > 0
+    assert score_asset(returning, opening, cool=False)[0] < 0
+    assert score_asset(returning, resume, cool=False)[0] > 0
+    # Odd rather than false, so it stays eligible -- otherwise a template whose
+    # mid-break `INTO` is the only card left would fall through to a general one.
+    assert score_asset(stay_tuned, resume, cool=False)[0] > 0
+
+
 def test_a_card_about_this_show_at_this_spot_is_fine() -> None:
     into = _bump("athf-into", "aqua-teen-hunger-force", "INTO")
     score, reasons = score_asset(into, _request(position="INTO"), cool=False)
@@ -121,6 +178,14 @@ def test_a_card_for_this_show_may_open_the_slot_it_belongs_to() -> None:
     into = _bump("athf-into", "aqua-teen-hunger-force", "INTO")
     score, reasons = score_asset(into, _request(position="INTO"), cool=False)
     assert score > 0, reasons
+
+
+def test_the_two_halves_of_the_boundary_are_not_interchangeable() -> None:
+    """`OUT`/`AFTER` describe opposite sides of the same cut, so neither is a
+    fallback for the other even on a pool too thin to fill the slot."""
+    pool = [_bump("athf-out", "aqua-teen-hunger-force", "OUT")]
+    choice = choose(pool, _request(position="AFTER"), min_score=6.0, strictness="off")
+    assert choice.asset is None or choice.asset.position != "OUT"
 
 
 def test_a_general_card_is_never_a_contradiction() -> None:

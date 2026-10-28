@@ -69,7 +69,14 @@ ERA_NEAR = 0.25
 FAMILY_ONLY = 0.5
 COOLDOWN_PENALTY = 2.0
 
-#: Positions considered "the same kind of moment" as another.
+#: Positions whose *fit* is close enough to earn the partial position bonus.
+#:
+#: A scoring hint only. It says "a card from the other side of this moment still
+#: fits better than nothing", which is true of ``INTO``/``NEXT`` and of
+#: ``OUT``/``AFTER``. It does **not** grant permission: whether the printed phrase
+#: is true here is :data:`PERMITTED_MOMENTS`, which is strictly narrower. Keeping
+#: the two apart is what stops a "WE NOW RETURN TO" card being handed to an
+#: ``AFTER`` slot because the two scored as adjacent.
 ADJACENT_POSITIONS: dict[str, set[str]] = {
     "INTO": {"NEXT", "ANY"},
     "OUT": {"AFTER", "ANY"},
@@ -85,6 +92,39 @@ ADJACENT_POSITIONS: dict[str, set[str]] = {
 #: :data:`SUBJECT_WRONG` is reserved for -- the wrong show is merely unhelpful,
 #: but the wrong show *plus* a positional claim is incorrect.
 POSITIONAL_CLAIMS: frozenset[str] = frozenset({"NEXT", "AFTER", "INTO", "OUT"})
+
+#: The slots a card carrying *position* may truthfully occupy.
+#:
+#: This is the correctness table, and it is deliberately narrower than
+#: :data:`ADJACENT_POSITIONS`: that one is a scoring hint ("these moments are
+#: similar enough that a good-fit bonus is fair"), while this one decides whether a
+#: printed sentence is TRUE. Conflating the two is what let a "WE NOW RETURN TO
+#: King of the Hill" card air immediately after King of the Hill had finished --
+#: ``OUT`` and ``AFTER`` were adjacent for scoring, so an ``OUT`` card was handed
+#: to an ``AFTER`` slot, and the phrase is false there by definition.
+#:
+#: Each phrase names exactly one moment:
+#:
+#: * ``STAY TUNED FOR <show>`` -- the show is about to *start*. ``INTO`` only. At
+#:   a resume ``INTO`` the episode is already under way, and before the next slot
+#:   the thing starting is that slot's show, not this one.
+#: * ``WE NOW RETURN TO <show>`` -- the show is coming *back*. ``OUT``, and also
+#:   the resume ``INTO`` immediately after it (granted by
+#:   :func:`_contradicts` when :attr:`BumpRequest.resumes`, since that ``INTO`` is
+#:   the return). Never ``AFTER``: there the episode has ended and nothing returns.
+#: * ``YOU JUST WATCHED <show>`` -- the episode finished. ``AFTER`` only.
+#: * ``NEXT: <show>`` -- what plays after this *episode*. ``NEXT``, and anywhere
+#:   after the episode has ended. Never ``INTO`` or ``OUT``, including a resume
+#:   ``INTO``: what resumes there is the current episode, not another show.
+#:
+#: A card with no position names nothing about the running order, so it is absent
+#: here and unconstrained everywhere.
+PERMITTED_MOMENTS: dict[str, frozenset[str]] = {
+    "INTO": frozenset({"INTO"}),
+    "OUT": frozenset({"OUT"}),
+    "AFTER": frozenset({"AFTER"}),
+    "NEXT": frozenset({"NEXT", "AFTER"}),
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -105,6 +145,16 @@ class BumpRequest:
 
     Carried on the request rather than on :func:`score_asset` because it is a
     property of the *slot being filled*, not of the card being considered.
+    """
+
+    resumes: bool = False
+    """True for the `INTO` that returns from a mid-episode break.
+
+    Two `INTO` cards exist in a break and they are not the same moment: the one
+    before the episode announces what is about to *start*, while the one after a
+    mid-roll pod says the episode is continuing. "Stay tuned for <show>" and "we
+    now return to <show>" are statements about opposite directions in time, so the
+    distinction has to reach the matcher rather than being averaged away.
     """
 
     def resolved_subject(self) -> str:
@@ -271,6 +321,10 @@ def _contradicts(asset: Asset, request: BumpRequest) -> bool:
       episode has already finished. That is how an `AFTER` card once opened a
       slot, and the only salvage is a card naming the show that truly comes next,
       where "up next: Brak" is accurate from anywhere in the break.
+    * **Wrong moment.** A card's phrase names one moment -- "we now return to"
+      only where the show comes back, "you just watched" only once it has ended --
+      so it may not sit in a slot that is a different moment, even when it names
+      exactly the right show. See :data:`PERMITTED_MOMENTS`.
     """
     if asset.subject is None or asset.subject == NEUTRAL:
         return False
@@ -285,6 +339,22 @@ def _contradicts(asset: Asset, request: BumpRequest) -> bool:
     # Aqua Teen at the end of a slot that lead into Sealab.
     if request.position == "NEXT" and asset.position != "NEXT":
         return True
+
+    # Whether the *phrase* is sayable here at all. A "WE NOW RETURN TO King of the
+    # Hill" card is false the moment King of the Hill has finished, so it may not
+    # be handed to an `AFTER` slot however thin the pool is.
+    permitted = PERMITTED_MOMENTS.get(asset.position)
+    if permitted is not None:
+        allowed = set(permitted)
+        if request.resumes:
+            # The `INTO` that returns from a mid-roll pod is the one place the two
+            # phrases meet: "we now return to <show>" belongs there, and "stay
+            # tuned for <show>" is merely odd rather than false. Allowing both is
+            # what keeps the most recognisable moment of the break schedulable.
+            if asset.position == "OUT":
+                allowed.add("INTO")
+        if request.position not in allowed:
+            return True
 
     # A card's *own* label says which moment it describes, which fixes which show
     # it must name -- regardless of which slot it sits in. "Up next: The Brak

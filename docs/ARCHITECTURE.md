@@ -200,13 +200,39 @@ Topical mismatch is not a contradiction; a positional claim is.
 | "Deathklok returns with new episodes" | during Aqua Teen | fine — a promo |
 | "Next up: Futurama" | before Aqua Teen | **rejected** — false promise |
 | "We now return to Aqua Teen" | before Sealab | **rejected** — wrong show |
+| "We now return to Aqua Teen" | after Aqua Teen ended | **rejected** — nothing returns |
 | any untagged promo | anywhere | fine — it claims nothing |
 | general card | anywhere, including the tail | fine — claims nothing |
 
-The rule is that **a card's own label fixes which show it must name**, regardless
-of the slot: an `NEXT`/`AFTER` card must name the show it sits next to on that
-side, while an untagged card is unconstrained. Additionally only a card labelled
-`NEXT` may close a slot, because that position *is* the up-next announcement.
+Two separate rules apply, and they are checked independently:
+
+1. **The phrase must be true at this moment.** `PERMITTED_MOMENTS` says which
+   slot each printed sentence can occupy. `OUT` ("we now return to") only belongs
+   where the show actually comes back — the mid-episode break, or the `INTO` that
+   resumes it. At `AFTER` the episode has finished and nothing returns, so the
+   same card naming the right show is still a lie. That is the bug the archived
+   card collection exposed: it had only 3 `OUT` and 3 `AFTER` cards, and
+   `ADJACENT_POSITIONS` treated them as interchangeable *for scoring*, so an
+   `OUT` card was handed an `AFTER` slot and read "we now return to King of the
+   Hill" immediately after King of the Hill had ended.
+2. **The subject must match the moment.** A card's own label fixes which show it
+   must name, regardless of the slot: an `NEXT`/`AFTER` card must name the show
+   it sits next to on that side, while an untagged card is unconstrained.
+   Additionally only a card labelled `NEXT` may close a slot, because that
+   position *is* the up-next announcement.
+
+`ADJACENT_POSITIONS` stays, but only as a scoring hint ("this card still fits
+better than nothing"); correctness is the narrower table. Conflating the two is
+what let a false sentence through, so they are deliberately separate.
+
+Two `INTO` cards exist in a break and they are **not** the same moment: the one
+before the episode announces it, and the one after a mid-roll pod says it is
+continuing. `SegmentSpec.resumes` carries that distinction from `continuity.py`
+to the matcher, because "stay tuned for" and "we now return to" point in opposite
+directions in time.
+
+The rendered wording follows the same rule: `position_words.AFTER` is
+"YOU JUST WATCHED", not "WE NOW RETURN TO".
 
 This is what makes "semi-strict" behave the way you'd hope instead of the way it
 sounds. Rejecting every wrong subject instead cost the channel ~48% of its break

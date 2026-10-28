@@ -58,10 +58,16 @@ STOPWORDS = {
     "messages",
 }
 
+#: Text that identifies which moment a card describes.
+#:
+#: ``OUT`` and ``AFTER`` deliberately share no cue. "We now return to" only ever
+#: appears on a mid-break card -- it is a promise that the show is coming back --
+#: so reading it as ``AFTER`` (after the episode has ended) tags the card for a
+#: slot it would be a lie in, and leaves it unusable where it belongs.
 POSITION_CUES: dict[str, tuple[str, ...]] = {
     "NEXT": ("next", "coming up", "up next", "later"),
     "OUT": ("we now return", "return to", "back to", "right back"),
-    "AFTER": ("we now return", "return to"),
+    "AFTER": ("you just watched", "just watched", "you watched"),
     "INTO": ("stay tuned", "coming up", "up next", "next"),
 }
 

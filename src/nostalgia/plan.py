@@ -703,16 +703,36 @@ def _plan_slot(
     # -- pass 1: resolve bumps -------------------------------------------------
     bump_assets: dict[int, Asset] = {}
     bump_reasons: dict[int, str] = {}
+    # Cards chosen earlier *in this slot*. The cooldown tracker cannot answer
+    # this: it is only written as items are emitted, which happens in pass 2, so
+    # every spec here used to see identical state and a template with two "up
+    # next" segments picked the same card twice, back to back.
+    #
+    # A cooldown is the wrong tool even if it were current: `choose` deliberately
+    # resurrects a cooling card when it beats what would air instead, which is
+    # right for a *later* slot and wrong for something 5 seconds later.
+    chosen_here: set[str] = set()
     # A wrong-subject *promo* is now intended behaviour, not a gap in the library,
     # so it is no longer logged as a fallback: only a general card standing in for
     # a show-specific one is.
     for index, spec in enumerate(script.specs):
         if spec.kind != "bump":
             continue
-        request = BumpRequest(subject=spec.subject, position=spec.position, **request_base)
-        allowed = generated_pool if generated_budget.available() else ()
+        request = BumpRequest(
+            subject=spec.subject,
+            position=spec.position,
+            resumes=spec.resumes,
+            **request_base,
+        )
+        allowed = tuple(
+            asset for asset in generated_pool if asset.key not in chosen_here
+        ) if generated_budget.available() else ()
+        # A card that already aired in this break is removed from the pool rather
+        # than merely cooled, so no ladder step -- including the cooled-upgrade
+        # one -- can hand it back.
+        fresh = [asset for asset in real_bumps if asset.key not in chosen_here]
         choice = choose(
-            real_bumps,
+            fresh,
             request,
             min_score=root.bumps.min_score,
             strictness=root.bumps.strictness,
@@ -742,6 +762,7 @@ def _plan_slot(
                     f"Raise max_seconds in continuity.yaml or add shorter cards"
                 )
             continue
+        chosen_here.add(asset.key)
         bump_assets[index] = asset
         bump_reasons[index] = choice.reason
         if choice.fallback:
@@ -757,6 +778,11 @@ def _plan_slot(
         if asset.is_generated:
             generated_budget.take()
 
+    # Cards already placed in *this slot*, bumped and filler alike. Passed to every
+    # filler call so a promo cannot repeat the closing card it was topping up
+    # after -- both pools draw on the same short library, so they have to agree on
+    # what has already been used here.
+    used_here: set[str] = set(chosen_here)
     bump_total = sum(asset.duration_ms for asset in bump_assets.values())
 
     # -- pass 2: spend the rest on pods, then emit ----------------------------
@@ -894,7 +920,11 @@ def _plan_slot(
             if spec.kind == "ident":
                 pool = context.idents or context.ads
             else:
-                pool = ad_pool
+                # A spot that has already aired in this slot is removed rather
+                # than merely cooled. A cooldown can be overridden by the
+                # tolerance/nearest-combination fallbacks, and on a small era pool
+                # that is enough to put the same commercial on twice in one break.
+                pool = [asset for asset in ad_pool if asset.key not in used_here] or ad_pool
             # The final real pod fills up to (but not past) the reserved bumps; any
             # sliver left over is covered afterwards, so the closing card still
             # lands last and the next slot starts on its boundary.
@@ -906,7 +936,9 @@ def _plan_slot(
                     on_cooldown=ad_tracker.cooling([], cursor_ms),
                     trim_slop_ms=root.ads.trim_slop_ms,
                     seed_parts=(plan.day.isoformat(), slot.index, "tail", cursor_ms),
-                    short_pool=_promo_pool(real_bumps, generated_pool, context.idents),
+                    short_pool=_promo_pool(
+                        real_bumps, generated_pool, context.idents, exclude=used_here
+                    ),
                     # A mid-break pod is followed by more material, which absorbs
                     # any shortfall by starting a few ms early. Only the closing pod
                     # runs to the slot boundary and has to land exactly.
@@ -934,6 +966,7 @@ def _plan_slot(
                 tracker=ad_tracker,
                 root=root,
                 kind="ident" if spec.kind == "ident" else "ad",
+                used=used_here,
             )
             emitted += 1
 
@@ -952,12 +985,14 @@ def _plan_slot(
         else:
             try:
                 filler = fill_gap(
-                    context.ads,
+                    [asset for asset in ad_pool if asset.key not in used_here] or ad_pool,
                     target_ms=remainder,
                     on_cooldown=ad_tracker.cooling([], cursor_ms),
                     trim_slop_ms=root.ads.trim_slop_ms,
                     seed_parts=(plan.day.isoformat(), slot.index, "trail", cursor_ms),
-                    short_pool=_promo_pool(real_bumps, generated_pool, context.idents),
+                    short_pool=_promo_pool(
+                        real_bumps, generated_pool, context.idents, exclude=used_here
+                    ),
                     # Nothing follows this: it runs to the slot boundary. A
                     # shortfall here is a gap in the timeline, so it must land
                     # exactly even when the leftover is only a few milliseconds.
@@ -971,6 +1006,7 @@ def _plan_slot(
                     suffix="t",
                     tracker=ad_tracker,
                     root=root,
+                    used=used_here,
                 )
             except PodError as exc:
                 plan.warnings.append(f"{prefix}: {exc}")
@@ -1080,12 +1116,16 @@ def _emit_pod(
     tracker: CooldownTracker,
     root: RootConfig,
     kind: str = "ad",
+    used: set[str] | None = None,
 ) -> int:
     """Append a filled pod's items and return the new cursor.
 
     Items that would cross the slot boundary are dropped with a warning rather
     than allowed to overrun: a late item pushes everything after it and the
     channel loses the grid permanently.
+
+    *used* collects every asset placed in this slot, so the caller can keep filler
+    from repeating a card the template already aired.
     """
     for index, pod_item in enumerate(fill.items):
         if cursor_ms + pod_item.duration_ms > slot.end_ms:
@@ -1132,6 +1172,8 @@ def _emit_pod(
         )
         if not pod_item.asset.is_synthetic:
             tracker.record(pod_item.asset.key, cursor_ms)
+        if used is not None:
+            used.add(pod_item.asset.key)
         cursor_ms += pod_item.duration_ms
     return cursor_ms
 
@@ -1191,6 +1233,8 @@ def _promo_pool(
     real_bumps: Sequence[Asset],
     generated_pool: Sequence[Asset],
     idents: Sequence[Asset],
+    *,
+    exclude: set[str] | None = None,
 ) -> list[Asset]:
     """Short assets used to round out a break.
 
@@ -1198,10 +1242,18 @@ def _promo_pool(
     on black, so this deliberately draws on the whole short library, not just the
     neutral cards. Only the template's own slots are spoken for; extra cards are
     filler, and any card can be filler.
+
+    *exclude* drops cards that have already aired inside the slot being filled.
+    Filler draws on the same library as the template's own cards, so without it a
+    break could end on the same card twice running -- the closing "up next" being
+    "topped up" with a copy of itself.
     """
+    skip = exclude or set()
     pool: list[Asset] = []
     for asset in (*idents, *generated_pool, *real_bumps):
         if asset.is_synthetic or asset.duration_ms <= 0 or asset.duration_ms > 15_000:
+            continue
+        if asset.key in skip:
             continue
         pool.append(asset)
     return pool

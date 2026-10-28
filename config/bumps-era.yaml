@@ -120,8 +120,13 @@ position_words:
     "2003": "WE NOW RETURN TO"
     "2005": "WE NOW RETURN TO"
     "2007": "WE'LL BE RIGHT BACK"
+  # AFTER sits where the episode has *already ended*, so it must not promise a
+  # return -- "we now return to" is false the moment picture stopped for good.
+  # This is not `OUT`: that one sits at a mid-episode break, where the show really
+  # is coming back, and it keeps "WE NOW RETURN TO".
   AFTER:
-    default: "WE NOW RETURN TO"
+    default: "YOU JUST WATCHED"
+    "2007": "YOU JUST WATCHED"
   NEXT:
     default: "NEXT"
   ANY:

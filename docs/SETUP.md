@@ -589,6 +589,23 @@ answer "how many cards, and where" directly, instead of asking you to insert
 | after the closing break | `NEXT` | "next up" card |
 | mid-break: going in / coming back | `OUT` / `INTO` | cards either side of the mid-roll pod |
 
+The four positions are not interchangeable, and the scheduler enforces it rather
+than trusting the library:
+
+| Position | Says | Where it can truthfully sit |
+|---|---|---|
+| `INTO` | "stay tuned for *show*" | before the episode only |
+| `OUT` | "we now return to *show*" | the mid-roll break, and the card that resumes it |
+| `AFTER` | "you just watched *show*" | once the episode has ended |
+| `NEXT` | "next: *show*" | after the episode, through the closing break |
+
+So a card reading "we now return to King of the Hill" is refused after King of the
+Hill has finished — the episode is over, nothing is coming back. That is a
+*scheduling* refusal, not a tagging one: it holds even on a pool too thin to fill
+the slot, and naming the right show does not rescue it. Generated cards follow the
+same wording (`position_words` in `config/bumps-era.yaml`), which is why `AFTER`
+reads "YOU JUST WATCHED" and only `OUT` says "WE NOW RETURN TO".
+
 A mid-break with zero cards on both sides is removed rather than written as an empty
 pod, and an unmentioned mid-row is *unchanged*, not cleared — so editing the
 before/after counts never quietly deletes a hand-written mid-roll.

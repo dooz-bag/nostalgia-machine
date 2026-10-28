@@ -291,6 +291,7 @@ def fill_gap(
     items: list[PodItem] = []
     note_parts: list[str] = []
     rounds = 0
+    placed: set[str] = set()
 
     while remaining > 0 and rounds < 32:
         rounds += 1
@@ -298,7 +299,16 @@ def fill_gap(
         if not fits:
             break
 
-        order = [asset for asset in fits if asset.key not in cooling] or fits
+        # Three passes, weakest last. `placed` is what stops one round re-picking
+        # a spot the previous round just used: the loop re-draws from the whole
+        # pool every time, so without it a single gap could air the same
+        # commercial twice running, which is the most obvious "this is a
+        # playlist" tell there is.
+        order = (
+            [a for a in fits if a.key not in cooling and a.key not in placed]
+            or [a for a in fits if a.key not in placed]
+            or fits
+        )
         order = list(order)
         rng.shuffle(order)
 
@@ -310,6 +320,7 @@ def fill_gap(
         if consumed <= 0:
             break
         items.extend(PodItem(asset) for asset in used)
+        placed.update(asset.key for asset in used)
         remaining -= consumed
 
     # A short break is topped up with promos rather than left black: a station
@@ -322,13 +333,33 @@ def fill_gap(
     )
     if remaining > 0 and shorts:
         used = 0
+        taken: set[str] = set()
         while remaining > 0 and used < 24:
-            fits = [asset for asset in shorts if asset.duration_ms <= remaining]
+            # `taken` stops one promo filling two adjacent slots. Without it the
+            # loop re-drew from the whole pool every round, so a break could end
+            # on the same card twice running, which reads as a frozen stream. Only
+            # when every remaining card is too long does it fall back.
+            fits = [
+                asset
+                for asset in shorts
+                if asset.duration_ms <= remaining
+                and asset.key not in taken
+                and asset.key not in placed
+            ]
+            if not fits:
+                fits = [
+                    asset
+                    for asset in shorts
+                    if asset.duration_ms <= remaining and asset.key not in taken
+                ]
+            if not fits:
+                fits = [asset for asset in shorts if asset.duration_ms <= remaining]
             if not fits:
                 break
             order = list(fits)
             rng.shuffle(order)
             items.append(PodItem(order[0]))
+            taken.add(order[0].key)
             remaining -= order[0].duration_ms
             used += 1
         if used:

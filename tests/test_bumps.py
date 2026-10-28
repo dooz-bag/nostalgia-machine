@@ -95,6 +95,10 @@ def test_missing_show_uses_a_promo_before_a_neutral_card(pool: list[Asset]) -> N
 
     Those are what a real 2003 break was made of, so they are the *first* choice
     when a show is uncovered -- not a last resort.
+
+    The promo here carries no position, which is the overwhelmingly common case in
+    a real archive (560 of 596 cards). A *positional* card for another show cannot
+    stand in: "up next: Futurama" before Sealab is a false promise, not a promo.
     """
     request = BumpRequest(
         subject="this",
@@ -103,10 +107,27 @@ def test_missing_show_uses_a_promo_before_a_neutral_card(pool: list[Asset]) -> N
         next_show="futurama",
         year=2003,
     )
-    choice = choose(pool, request, min_score=6.0)
+    choice = choose(
+        [*pool, _bump("brak-promo", "brak", None, era=2003)], request, min_score=6.0
+    )
     assert not choice.fallback
     assert choice.asset is not None
-    assert choice.asset.subject != "sealab"
+    assert choice.asset.subject == "brak"
+
+
+def test_a_positional_card_for_another_show_is_not_a_promo(pool: list[Asset]) -> None:
+    """Without an untagged promo, a general card is the honest answer."""
+    request = BumpRequest(
+        subject="this",
+        position="INTO",
+        this_show="sealab",
+        next_show="futurama",
+        year=2003,
+    )
+    choice = choose(pool, request, min_score=6.0)
+    assert choice.asset is not None
+    assert choice.asset.is_neutral_bump
+    assert choice.fallback
 
 
 def test_missing_show_falls_back_to_neutral_when_promos_are_off(pool: list[Asset]) -> None:
