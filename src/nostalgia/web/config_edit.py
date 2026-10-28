@@ -318,6 +318,37 @@ SETTINGS: tuple[SettingsFile, ...] = (
                     ),
                 ),
             ),
+            Section(
+                "Extras instead of commercials",
+                "Put music videos or DVD extras in media/extras/ and a break can occasionally air "
+                "one instead of spots. Bump slots are never replaced. A replaced break keeps its "
+                "own length, so the next programme still starts on time.",
+                (
+                    Field(
+                        "extras_chance",
+                        "Chance of an extras break",
+                        FLOAT,
+                        help="Per break. 0.15 is roughly one break in seven, 0.2 is one in five, "
+                        "0.0 never does it. The roll is seeded from the date and slot number, so "
+                        "the same day always produces the same breaks.",
+                        minimum=0.0,
+                        maximum=1.0,
+                        step=0.01,
+                        default=0.0,
+                    ),
+                    Field(
+                        "extras_cooldown_hours",
+                        "No extras repeat within (hours)",
+                        INT,
+                        help="Longer than the commercial cooldown on purpose: the extras pool is "
+                        "small, and the same music video three times in an evening is the most "
+                        "obvious sign that a program built the schedule.",
+                        minimum=0,
+                        maximum=720,
+                        default=24,
+                    ),
+                ),
+            ),
         ),
     ),
     SettingsFile(

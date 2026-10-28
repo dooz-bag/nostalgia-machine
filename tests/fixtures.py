@@ -51,6 +51,14 @@ ADS = [
     (f"2003/ad-{index:02d}-30s.mkv", AD_30_MS) for index in range(1, 7)
 ] + [(f"2003/ad-{index:02d}-15s.mkv", AD_15_MS) for index in range(1, 7)]
 
+EXTRAS = [
+    # Long-form filler, deliberately longer than a single pod so the planner has
+    # to choose a piece that fits the break rather than cut one to size.
+    ("music-videos/video-one.mkv", 3 * 60 * 1000),
+    ("music-videos/video-two.mkv", 4 * 60 * 1000),
+    ("dvd-extras/interview.mkv", 90 * 1000),
+]
+
 
 @dataclass(frozen=True, slots=True)
 class FixtureLibrary:
@@ -84,8 +92,18 @@ def _stub(path: Path, duration_ms: int) -> None:
     )
 
 
-def build_library(root: Path, *, with_bumps: bool = True, with_ads: bool = True) -> FixtureLibrary:
-    """Create a fixture library plus a matching ``config/`` directory."""
+def build_library(
+    root: Path,
+    *,
+    with_bumps: bool = True,
+    with_ads: bool = True,
+    with_extras: bool = False,
+) -> FixtureLibrary:
+    """Create a fixture library plus a matching ``config/`` directory.
+
+    *with_extras* is off by default: an extras pool changes what airs, so a test
+    that is not about extras should not have one.
+    """
     library = FixtureLibrary(root)
     media = library.media
 
@@ -108,6 +126,10 @@ def build_library(root: Path, *, with_bumps: bool = True, with_ads: bool = True)
     if with_ads:
         for relative, duration in ADS:
             _stub(media / "commercials" / relative, duration)
+
+    if with_extras:
+        for relative, duration in EXTRAS:
+            _stub(media / "extras" / relative, duration)
 
     _stub(media / "idents" / "station-id.mkv", 5_000)
     _write_config(library)
@@ -255,6 +277,7 @@ __all__ = [
     "ADS",
     "BUMP_MS",
     "BUMPS",
+    "EXTRAS",
     "FixtureLibrary",
     "HALF_MS",
     "SHORT_MS",

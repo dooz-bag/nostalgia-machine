@@ -21,11 +21,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Iterator, Mapping, Sequence
 
 from . import programming
-from .ads import BLACK_CARD_MIN_MS, PodError, PodFill, fill_gap, fill_pod
+from .ads import BLACK_CARD_MIN_MS, PodError, PodFill, PodItem, fill_gap, fill_pod
 from .assets import NEUTRAL, Asset
 from .bumps import BumpRequest, choose
 from .catalog import Catalog
-from .config import DayConfig, RootConfig
+from .config import FILLER_KINDS, DayConfig, RootConfig
 from .cooldown import CooldownTracker
 from .continuity import (
     SegmentSpec,
@@ -34,6 +34,7 @@ from .continuity import (
     plan_budget,
 )
 from .grid import Slot, build_day, day_bounds_ms, format_wall
+from .rng import rng_for
 from .rotation import NoEpisodesError, RotationRing, build_rings, select
 from .schedule import AssignedSlot, assign_day
 from .watermark import WatermarkRule
@@ -106,6 +107,14 @@ class Plan:
     bump_fallback_reasons: list[str] = field(default_factory=list)
     """Why each fallback happened, in the same order as :attr:`bump_fallbacks`."""
 
+    extras_cooled: int = 0
+    """Breaks the extras roll chose but no piece was eligible for.
+
+    Counted rather than warned per break: the pool is small by design, so with a
+    24h cooldown most breaks after the first are in this state and repeating the
+    line for each one buries every other warning in the day.
+    """
+
     day_start_ms: int = 0
     day_end_ms: int = 0
 
@@ -161,6 +170,14 @@ class PlanContext:
     generated_dir: Path | None = None
     """Where rendered cards are cached (``media/bumps/generated`` by default)."""
 
+    extras: list[Asset] = field(default_factory=list)
+    """Long-form filler: music videos, DVD extras, anything that is not a spot.
+
+    Separate from ``ads`` because it is a different promise to the viewer and a
+    different length class -- these run for minutes, so they can only ever fill a
+    whole break, never a 30-second pod.
+    """
+
     @classmethod
     def load(
         cls,
@@ -170,10 +187,11 @@ class PlanContext:
         config_dir: Path | None = None,
         media_root: Path | None = None,
     ) -> "PlanContext":
-        all_assets = catalog.assets()
+        all_assets = catalog.assets(("bump", "ad", "ident", "extra"))
         bumps = [asset for asset in all_assets if asset.kind == "bump"]
         ads = [asset for asset in all_assets if asset.kind == "ad"]
         idents = [asset for asset in all_assets if asset.kind == "ident"]
+        extras = [asset for asset in all_assets if asset.kind == "extra"]
         orders = {show_id: show.order for show_id, show in root.shows.items()}
         rings = build_rings(catalog.episodes(), orders, seed_salt=root.channel.name)
 
@@ -195,6 +213,7 @@ class PlanContext:
             last_aired=catalog.last_aired(),
             era_file=era_file,
             generated_dir=generated_dir,
+            extras=extras,
         )
 
 
@@ -272,6 +291,15 @@ def build_plan(
         min_gap=2,
         disabled=ignore_cooldowns,
     )
+    # Extras are long and few, so they need a much wider separation than a spot --
+    # the same music video three times in an evening is the clearest possible sign
+    # that a program assembled the schedule.
+    extra_tracker = CooldownTracker.from_history(
+        context.last_aired,
+        cooldown_ms=root.ads.extras_cooldown_hours * 3_600_000,
+        min_gap=20,
+        disabled=ignore_cooldowns,
+    )
 
     mark = watermark_rule(root)
     ordered = sorted(assignments.values(), key=lambda a: a.slot.start_ms)
@@ -293,6 +321,7 @@ def build_plan(
             generated_pool=generated_pool,
             generated_budget=budget,
             mark=mark,
+            extra_tracker=extra_tracker,
         )
 
     for position, assigned in enumerate(ordered):
@@ -310,10 +339,19 @@ def build_plan(
             generated_pool=generated_pool,
             generated_budget=budget,
             mark=mark,
+            extra_tracker=extra_tracker,
         )
 
     if not plan.items:
         raise PlanError(f"{day}: nothing could be scheduled")
+
+    if plan.extras_cooled:
+        aired = sum(1 for item in plan.items if item.kind == "extra")
+        plan.warnings.append(
+            f"{day}: {plan.extras_cooled} break(s) rolled extras but every piece was "
+            f"cooling down ({root.ads.extras_cooldown_hours}h); {aired} aired -- "
+            f"add more files to media/extras/"
+        )
 
     problems = plan.validate()
     if problems:
@@ -333,6 +371,7 @@ def _apply_skips(
     generated_pool: Sequence,
     generated_budget: GeneratedBudget,
     mark: "WatermarkRule | None",
+    extra_tracker: CooldownTracker,
 ) -> list[AssignedSlot]:
     """Rewrite the running order so skipped slots air the next episode.
 
@@ -385,6 +424,7 @@ def _apply_skips(
             generated_pool=generated_pool,
             generated_budget=generated_budget,
             mark=mark,
+            extra_tracker=extra_tracker,
         )
         playing = next((item for item in probe.items if item.kind == "episode"), None)
         if playing is None:
@@ -622,6 +662,7 @@ def _plan_slot(
     generated_pool: Sequence[Asset],
     generated_budget: GeneratedBudget,
     mark: "WatermarkRule | None" = None,
+    extra_tracker: CooldownTracker | None = None,
 ) -> None:
     """Resolve one slot in two passes.
 
@@ -681,6 +722,30 @@ def _plan_slot(
     template = _template_for(assigned, context)
     script = build_script(template, episode_ms=episode.duration_ms)
     plan.warnings.extend(f"{prefix}: {warning}" for warning in script.warnings)
+
+    # -- the extras roll ------------------------------------------------------
+    # Roughly one break in N airs something from media/extras/ instead of spots.
+    # Rolled per *pod*, not per slot: a template puts two or three pods in a slot
+    # and they are separate breaks, so "1 in 5 breaks" has to count breaks. Seeded
+    # from (day, slot, pod) so it is independent of the template's shape -- editing
+    # a template cannot reshuffle which breaks are special -- and so a rebuild
+    # reproduces the day exactly.
+    extra_pool: list[Asset] = []
+    if context.extras and extra_tracker is not None:
+        cooling = extra_tracker.cooling([], slot.start_ms)
+        extra_pool = [asset for asset in context.extras if asset.key not in cooling]
+        rolled = _roll_extras(
+            plan.day, slot.index, script.specs, chance=root.ads.extras_chance
+        )
+        if any(spec.kind == "extra" for spec in rolled):
+            if extra_pool:
+                script.specs = rolled
+            else:
+                # The roll fired but there is nothing to air. Counted rather than
+                # warned per slot: with a small pool and a 24h cooldown almost
+                # every later break hits this, and 67 identical lines bury the one
+                # warning that matters. build_plan reports the total once.
+                plan.extras_cooled += 1
 
     show = root.shows.get(assigned.show_id)
     # The timeline's date is a real date so the stream is consumable today, but
@@ -805,12 +870,12 @@ def _plan_slot(
     shares = [
         spec.share
         for spec in script.specs
-        if spec.kind in ("ad_pod", "ident") and spec.share
+        if spec.kind in FILLER_KINDS and spec.share
     ]
     fixed = sum(
         spec.seconds
         for spec in script.specs
-        if spec.kind in ("ad_pod", "ident") and spec.seconds
+        if spec.kind in FILLER_KINDS and spec.seconds
     )
     shared_budget = max(0, pod_budget - fixed)
 
@@ -903,8 +968,11 @@ def _plan_slot(
             emitted += 1
             continue
 
-        if spec.kind in ("ad_pod", "ident"):
-            # `remaining` excludes the bumps that still have to air after this pod.
+        if spec.kind in FILLER_KINDS:
+            # `remaining` excludes the bumps that still have to air after this
+            # break. An extras block is sized exactly like the pod it replaced --
+            # it is the same break, so it must occupy the same span, which is what
+            # keeps every later programme starting when it would have anyway.
             reserve = bump_after_ms.get(index, 0)
             remaining = slot.end_ms - cursor_ms - reserve
             if remaining <= 0:
@@ -913,9 +981,56 @@ def _plan_slot(
                 target = round(shared_budget * spec.share)
             else:
                 target = _pod_target_ms(spec, pod_targets, remaining)
+            # The final real break fills up to (but not past) the reserved bumps;
+            # any sliver left over is covered afterwards, so the closing card still
+            # lands last and the next slot starts on its boundary.
+            last = _is_last_filler(script, spec)
+            if last:
+                target = remaining
             target = min(target, remaining)
             if target <= 0:
                 continue
+            must_fill = not _has_item_after(script, spec)
+
+            filler: PodFill | None = None
+            if spec.kind == "extra":
+                filler = _fill_extras_block(
+                    plan,
+                    prefix=prefix,
+                    extras=extra_pool,
+                    fallback=ad_pool,
+                    target_ms=target,
+                    used=used_here,
+                    on_cooldown=ad_tracker.cooling([], cursor_ms),
+                    seed_parts=(plan.day.isoformat(), slot.index, "extra", cursor_ms),
+                    root=root,
+                    must_fill=must_fill,
+                )
+                if filler is not None:
+                    cursor_ms = _emit_pod(
+                        plan,
+                        filler,
+                        cursor_ms=cursor_ms,
+                        slot=slot,
+                        suffix="e",
+                        tracker=ad_tracker,
+                        root=root,
+                        kind="extra",
+                        used=used_here,
+                        # The extras pool has its own, much longer cooldown; a spot
+                        # topping up a short block still belongs on the ad
+                        # tracker.
+                        extra_tracker=extra_tracker,
+                    )
+                    emitted += 1
+                    continue
+                # Nothing in the pool fits this break. Fall through to the
+                # commercials it was going to air: a replaced break that cannot be
+                # filled must never become a hole in the timeline.
+                plan.warnings.append(
+                    f"{prefix}: no extra fits a {target // 1000}s break; "
+                    f"airing commercials"
+                )
 
             if spec.kind == "ident":
                 pool = context.idents or context.ads
@@ -925,11 +1040,7 @@ def _plan_slot(
                 # tolerance/nearest-combination fallbacks, and on a small era pool
                 # that is enough to put the same commercial on twice in one break.
                 pool = [asset for asset in ad_pool if asset.key not in used_here] or ad_pool
-            # The final real pod fills up to (but not past) the reserved bumps; any
-            # sliver left over is covered afterwards, so the closing card still
-            # lands last and the next slot starts on its boundary.
-            if _is_last_filler(script, spec):
-                target = remaining
+            if last:
                 filler = fill_gap(
                     pool,
                     target_ms=target,
@@ -942,7 +1053,7 @@ def _plan_slot(
                     # A mid-break pod is followed by more material, which absorbs
                     # any shortfall by starting a few ms early. Only the closing pod
                     # runs to the slot boundary and has to land exactly.
-                    must_fill=not _has_item_after(script, spec),
+                    must_fill=must_fill,
                 )
             else:
                 try:
@@ -1106,6 +1217,96 @@ def _fill_bare_slot(
     )
 
 
+def _fill_extras_block(
+    plan: Plan,
+    *,
+    prefix: str,
+    extras: Sequence[Asset],
+    fallback: Sequence[Asset],
+    target_ms: int,
+    used: set[str],
+    on_cooldown: set[str],
+    seed_parts: Sequence[object],
+    root: RootConfig,
+    must_fill: bool,
+) -> PodFill | None:
+    """Fill a replaced break with long-form material.
+
+    An extra is one piece, not a pod. A music video is 3-5 minutes and a break is
+    2-7, so the honest options are "play one and let the remainder be covered" or
+    "play one and top up with a spot". Both happen; what never happens is cutting
+    a music video down to 47 seconds to hit a booking length, which is exactly the
+    kind of violent edit this feature exists to avoid.
+
+    So: take the longest extra that fits the target, then top up with other extras
+    while they still fit, and only then fall back to ``fill_gap`` on commercials.
+
+    Returns ``None`` when nothing could be placed. The caller treats that as "air
+    the commercials after all" rather than as a fatal error: a replaced break that
+    cannot be filled must never become a hole in the timeline.
+    """
+    cooling = set(on_cooldown)
+    candidates = [
+        asset for asset in extras if asset.duration_ms > 0 and asset.key not in used
+    ]
+    if not candidates:
+        return None
+
+    # Prefer something that is not cooling, but never refuse to air an extra just
+    # because everything is cooling: a blank break would be worse than a repeat.
+    fresh = [asset for asset in candidates if asset.key not in cooling]
+    pool = sorted(fresh or candidates, key=lambda asset: (asset.duration_ms, asset.key))
+
+    fitting = [asset for asset in reversed(pool) if asset.duration_ms <= target_ms]
+    if not fitting:
+        # Every extra is longer than the break. Rather than cut one mid-song --
+        # the exact "jumping around" this is meant to remove -- return None and let
+        # the caller air the spots the break was going to have anyway.
+        return None
+
+    items: list[PodItem] = [PodItem(fitting[0])]
+    remaining = target_ms - fitting[0].duration_ms
+
+    # Deliberately at most one more piece: two music videos back to back is a music
+    # channel, not a commercial break.
+    while remaining > 0 and len(items) < 2:
+        taken = {item.asset.key for item in items}
+        fits = [
+            asset
+            for asset in pool
+            if asset.duration_ms <= remaining and asset.key not in taken
+        ]
+        if not fits:
+            break
+        pick = max(fits, key=lambda asset: (asset.duration_ms, asset.key))
+        items.append(PodItem(pick))
+        remaining -= pick.duration_ms
+
+    if remaining > BLACK_CARD_MIN_MS:
+        # Top up with spots, which is what a station does when a piece runs short.
+        try:
+            top_up = fill_gap(
+                [asset for asset in fallback if asset.key not in used] or fallback,
+                target_ms=remaining,
+                on_cooldown=cooling,
+                trim_slop_ms=root.ads.trim_slop_ms,
+                seed_parts=(*seed_parts, "topup"),
+                must_fill=must_fill,
+            )
+            items.extend(top_up.items)
+        except PodError as exc:
+            plan.warnings.append(f"{prefix}: {exc}")
+
+    achieved = sum(item.duration_ms for item in items)
+    return PodFill(
+        items=tuple(items),
+        target_ms=target_ms,
+        achieved_ms=achieved,
+        note=f"extras block ({achieved}ms of {target_ms}ms)",
+        synthetic_ms=sum(item.duration_ms for item in items if item.asset.is_synthetic),
+    )
+
+
 def _emit_pod(
     plan: Plan,
     fill: PodFill,
@@ -1117,6 +1318,7 @@ def _emit_pod(
     root: RootConfig,
     kind: str = "ad",
     used: set[str] | None = None,
+    extra_tracker: CooldownTracker | None = None,
 ) -> int:
     """Append a filled pod's items and return the new cursor.
 
@@ -1126,6 +1328,12 @@ def _emit_pod(
 
     *used* collects every asset placed in this slot, so the caller can keep filler
     from repeating a card the template already aired.
+
+    *extra_tracker* is used for items whose kind is ``extra``; everything else
+    goes on *tracker*. The two pools have deliberately different cooldowns, and a
+    commercial topping up a short extras block was being recorded on the extras
+    tracker -- so it stayed eligible on the very next break, which is why the same
+    spot could appear twice within minutes of a replaced break.
     """
     for index, pod_item in enumerate(fill.items):
         if cursor_ms + pod_item.duration_ms > slot.end_ms:
@@ -1136,14 +1344,23 @@ def _emit_pod(
             break
         # A promo inside a pod keeps its own kind, so the guide never claims a
         # bumper aired as a commercial.
-        item_kind = (
-            pod_item.asset.kind if pod_item.asset.kind in ("bump", "ident") else kind
-        )
-        subtitle = (
-            "black"
-            if pod_item.asset.is_synthetic
-            else ("promo" if item_kind == "bump" else "commercial")
-        )
+        if pod_item.asset.kind in ("bump", "ident"):
+            item_kind = pod_item.asset.kind
+        elif kind == "extra" and pod_item.asset.kind == "ad":
+            # A spot topping up a short extras block is still a commercial. Folding
+            # it into "extra" would have the guide claim four minutes of music video
+            # when two of them were spots.
+            item_kind = "ad"
+        else:
+            item_kind = kind
+        if pod_item.asset.is_synthetic:
+            subtitle = "black"
+        elif item_kind == "bump":
+            subtitle = "promo"
+        elif item_kind == "extra":
+            subtitle = "extra"
+        else:
+            subtitle = "commercial"
         _append(
             plan,
             PlannedItem(
@@ -1159,6 +1376,10 @@ def _emit_pod(
                 title=(
                     _show_title(root, pod_item.asset.subject)
                     or pod_item.asset.brand
+                    # An extra has no brand and no subject, so the filename is the
+                    # only label that means anything -- and it is what the owner
+                    # named it.
+                    or (Path(pod_item.asset.path).stem if item_kind == "extra" else None)
                     or "commercial"
                 ),
                 subtitle=subtitle,
@@ -1171,7 +1392,10 @@ def _emit_pod(
             ),
         )
         if not pod_item.asset.is_synthetic:
-            tracker.record(pod_item.asset.key, cursor_ms)
+            if item_kind == "extra" and extra_tracker is not None:
+                extra_tracker.record(pod_item.asset.key, cursor_ms)
+            else:
+                tracker.record(pod_item.asset.key, cursor_ms)
         if used is not None:
             used.add(pod_item.asset.key)
         cursor_ms += pod_item.duration_ms
@@ -1221,6 +1445,61 @@ def _template_for(assigned: AssignedSlot, context: PlanContext):
     if name not in root.continuity:
         name = f"default-{assigned.slot.family}"
     return root.continuity[name]
+
+
+def _extras_roll(day: date, slot_index: int, chance: float, pod_index: int = 0) -> bool:
+    """Whether one break is replaced by something from ``extras``.
+
+    Seeded from ``(day, slot index, pod index)`` -- every break's own identity.
+    Deliberately *not* from the template or the show: the same wall-clock break
+    should always make the same decision, so editing a template cannot silently
+    reshuffle which breaks are special, and a rebuild reproduces the day exactly.
+    """
+    if chance <= 0:
+        return False
+    if chance >= 1:
+        return True
+    return rng_for("extras", day.isoformat(), slot_index, pod_index).random() < chance
+
+
+def _roll_extras(
+    day: date,
+    slot_index: int,
+    specs: Sequence[SegmentSpec],
+    *,
+    chance: float,
+) -> list[SegmentSpec]:
+    """Turn *some* commercial pods in a slot into extras blocks.
+
+    Rolled per pod, because a template puts several pods in a slot and they are
+    separate breaks: ``extras_chance`` is the chance of one *break* being
+    replaced, so two pods must not share a single coin flip.
+
+    A replaced pod keeps its own ``share``/``seconds`` and only changes what fills
+    it, so the break's length -- and therefore the slot's -- is unchanged.
+
+    Bump segments are never touched: they are continuity, not filler, and the
+    positional rules depend on them staying where the template put them. Nor is a
+    pod inside a ``mid:`` block, because a break that interrupts a show is a
+    different moment from the ones around it -- a four-minute music video there is
+    a bigger interruption than the show itself.
+
+    Seeded from ``(day, slot, pod)``, which is every break's own identity. It
+    therefore does not change when a template is edited: adding a bump to a slot
+    does not reshuffle which breaks are special.
+    """
+    out: list[SegmentSpec] = []
+    pod_index = 0
+    for spec in specs:
+        if spec.kind != "ad_pod":
+            out.append(spec)
+            continue
+        if not spec.in_mid and _extras_roll(day, slot_index, chance, pod_index):
+            out.append(replace(spec, kind="extra"))
+        else:
+            out.append(spec)
+        pod_index += 1
+    return out
 
 
 def _bump_cap(script, context: PlanContext) -> int:
@@ -1276,7 +1555,7 @@ def _absorb_remainder(plan: Plan, ms: int) -> bool:
     if ms <= 0 or not plan.items:
         return False
     last = plan.items[-1]
-    if last.kind not in ("ad", "bump", "ident", "filler"):
+    if last.kind not in ("ad", "bump", "ident", "extra", "filler"):
         return False
     plan.items[-1] = replace(last, end_ms=last.end_ms + ms)
     return True
@@ -1306,7 +1585,7 @@ def _is_last_filler(script, spec: SegmentSpec) -> bool:
     Only that one is allowed to grow to absorb the slot's slack. Every earlier pod
     honours its booked target, so the template's structure survives.
     """
-    fillers = [candidate for candidate in script.specs if candidate.kind in ("ad_pod", "ident")]
+    fillers = [candidate for candidate in script.specs if candidate.kind in FILLER_KINDS]
     return bool(fillers) and fillers[-1] is spec
 
 

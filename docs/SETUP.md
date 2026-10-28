@@ -640,6 +640,44 @@ deliberately *not* weighted by episode count: a ten-season show would otherwise
 swallow a stream that is meant to feel varied. Leave every box unticked to mean
 the whole roster — that also keeps working as you add shows.
 
+### Extras instead of commercial breaks
+
+Sometimes a break should not be commercials at all. Put music videos, DVD extras,
+station specials — anything that is not a spot — in `media/extras/` and a break can
+occasionally air one of those instead:
+
+```yaml
+# config/ads.yaml
+ads:
+  extras_chance: 0.15              # ~1 break in 7; 0.0 (default) never does it
+  extras_cooldown_hours: 24        # no extra repeats inside a day
+```
+
+Subfolders are labels, not subjects, so `media/extras/music-videos/` and
+`media/extras/dvd-extras/` both work. Each file is one *piece*: it airs whole. A
+video is never cut down to fit a break, because that is the same lurching edit the
+commercials work was meant to remove.
+
+What the roll does and does not do:
+
+- **It is per break, not per slot.** A 30-minute template has two or three pods and
+  they are separate breaks, so `0.15` means one break in seven. The roll is seeded
+  from the date, the slot and the pod's position, so the same day always produces
+  the same breaks and a rebuild reproduces them exactly. Editing a continuity
+  template does not reshuffle which breaks are special.
+- **A replaced break keeps its own length.** The extra fills the budget the
+  commercials would have used, so the next programme starts when it would have
+  started anyway. If the piece is shorter than the break, spots top it up — which
+  is what a station does.
+- **Bump slots are never replaced.** They are continuity, not filler.
+- **Neither is a mid-episode break.** A four-minute music video that interrupts a
+  show is a bigger interruption than the show itself.
+- **Nothing is ever cut.** If every extra is longer than the break, the break airs
+  commercials and says so in the plan warnings.
+
+The **Commercials** page lists the extras pool with a switch per file and states
+how often breaks are being replaced, so a bad rip can be taken out with one click.
+
 Two things worth knowing:
 
 - **Slot sizes follow the content.** A lineup cannot inherit the day files' slot

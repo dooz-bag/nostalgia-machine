@@ -140,6 +140,33 @@ class AdsConfig(_Model):
         ]
     )
 
+    extras_chance: float = Field(default=0.0, ge=0.0, le=1.0)
+    """How often a break's commercials are replaced by something from ``media/extras/``.
+
+    ``0.0`` (the default) never does, so nothing changes for an existing channel.
+    ``0.15`` swaps roughly one break in seven; ``0.2`` one in five. The roll is
+    per *slot*, seeded from ``(day, slot index)``, so it is deterministic: the same
+    date always produces the same breaks, and a rebuild does not reshuffle which
+    breaks were replaced.
+
+    A replaced break keeps its own length -- the extras fill exactly the budget the
+    commercials would have used -- so this changes *what* airs in a break, never
+    when the next programme starts. That distinction matters: the grid is the
+    channel's whole contract with the viewer.
+
+    Only ``ad_pod`` segments are swapped. Bump slots are continuity, not filler,
+    and replacing them would break the positional rules the rest of the planner
+    depends on.
+    """
+
+    extras_cooldown_hours: int = Field(default=24, ge=0)
+    """No extra repeats within this window.
+
+    Longer than the commercial cooldown on purpose. The extras pool is small by
+    nature -- a handful of music videos -- and airing the same one three times in
+    an evening is the most obvious tell that a robot built the schedule.
+    """
+
 
 class WatermarkConfig(_Model):
     """The corner bug.
@@ -328,15 +355,25 @@ class ShowConfig(_Model):
         return self
 
 
+FILLER_KINDS: frozenset[str] = frozenset({"ad_pod", "ident", "extra"})
+"""Segment kinds that are filled from a pool rather than chosen from the roster.
+
+Kept as one set because every piece of arithmetic that treats them alike -- the
+break budget, which segments are "the last filler", which may grow to absorb the
+slot's slack -- has to agree about what counts as filler, or a pod silently ends
+up outside the budget.
+"""
+
+
 class ContinuitySegment(_Model):
-    kind: Literal["episode", "bump", "ad_pod", "ident"]
+    kind: Literal["episode", "bump", "ad_pod", "ident", "extra"]
 
     # bump
     subject: BumpSubject = "this"
     position: BumpPosition = "ANY"
     max_seconds: float | None = None
 
-    # ad_pod / ident
+    # ad_pod / ident / extra
     seconds: int | None = None
     pod: str | None = None
     """Named pod target from ``ads.yaml``; ``seconds`` overrides it."""
@@ -357,8 +394,10 @@ class ContinuitySegment(_Model):
     def _check(self) -> "ContinuitySegment":
         if self.kind == "episode" and (self.seconds is not None or self.share is not None):
             raise ValueError("episode segments are sized by the episode, not by seconds")
-        if self.kind in ("ad_pod", "ident") and not (self.seconds or self.pod or self.share):
+        if self.kind in FILLER_KINDS and not (self.seconds or self.pod or self.share):
             raise ValueError(f"{self.kind} segment needs 'seconds', 'pod' or 'share'")
+        if self.kind not in FILLER_KINDS and self.pod is not None:
+            raise ValueError(f"{self.kind} segment cannot name a pod target")
         if self.share is not None and not 0 < self.share <= 1:
             raise ValueError("share must be between 0 and 1 (exclusive of 0)")
         if self.share is not None and (self.seconds or self.pod):
@@ -657,6 +696,7 @@ __all__ = [
     "DayConfig",
     "Daypart",
     "FAMILY_QUANTA",
+    "FILLER_KINDS",
     "GridConfig",
     "Resolution",
     "OrderMode",

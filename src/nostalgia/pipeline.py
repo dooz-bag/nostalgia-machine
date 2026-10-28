@@ -374,6 +374,7 @@ def scan(
         bump_root=paths.media("bumps"),
         ad_root=paths.media("commercials"),
         ident_root=paths.media("idents"),
+        extra_root=paths.media("extras"),
         ffprobe_path=ffprobe_path or config.channel.ffmpeg_path,
         write_sidecars=write_sidecars,
         # Composited watermark copies, when burn mode has produced any.
@@ -639,11 +640,33 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
         else:
             findings.append(("ok", "library", f"{show_id}: {found} episodes"))
 
-    assets = catalog.assets()
+    assets = catalog.assets(("bump", "ad", "ident", "extra"))
     bumps = [asset for asset in assets if asset.kind == "bump"]
     ads = [asset for asset in assets if asset.kind == "ad"]
     idents = [asset for asset in assets if asset.kind == "ident"]
+    extras = [asset for asset in assets if asset.kind == "extra"]
     findings.append(("ok", "library", f"{len(bumps)} bumps, {len(ads)} commercials, {len(idents)} idents"))
+
+    # Extras are optional, so they are reported only when the feature is on or a
+    # pool exists. A warning about an unused folder on every run is noise.
+    if extras:
+        findings.append(
+            (
+                "ok",
+                "extras",
+                f"{len(extras)} extra(s) in media/extras/; "
+                f"{config.ads.extras_chance:.0%} of breaks replaced with one",
+            )
+        )
+    elif config.ads.extras_chance > 0:
+        findings.append(
+            (
+                "warn",
+                "extras",
+                f"ads.extras_chance is {config.ads.extras_chance:.0%} but media/extras/ "
+                f"is empty -- every break will air commercials",
+            )
+        )
 
     generated = [asset for asset in bumps if asset.is_generated]
     if generated:

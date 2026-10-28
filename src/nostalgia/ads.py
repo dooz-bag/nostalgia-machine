@@ -481,8 +481,23 @@ def _budgeted_window(order: Sequence[Asset], target_ms: int, limit: int) -> list
     return window or list(order[:limit])
 
 
+#: Asset kinds that may fill a pod.
+#:
+#: Filler is not always a commercial. `kind: ident` segments and the extras pool
+#: both hand this module a pool that holds something else, and the original
+#: `kind == "ad"` test silently rejected every one of them: an idents-only pod fell
+#: through every branch and produced a 60-second black card, which the planner then
+#: labelled "ident". Anything that is real footage and has a duration can fill a
+#: pod, so the kind is not the right test -- `is_synthetic` is.
+FILLER_KINDS: frozenset[str] = frozenset({"ad", "ident", "extra"})
+
+
 def _ads(pool: Iterable[Asset]) -> list[Asset]:
-    return [asset for asset in pool if asset.kind == "ad" and asset.duration_ms > 0]
+    return [
+        asset
+        for asset in pool
+        if not asset.is_synthetic and asset.duration_ms > 0
+    ]
 
 
 def _to_assets(candidates: Sequence[Asset], indices: Iterable[int]) -> list[Asset]:

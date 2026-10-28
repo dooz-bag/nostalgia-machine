@@ -142,6 +142,38 @@ A break segment is sized one of two ways:
 closing bump or leaves a long tail. A share is resilient to real durations. The two
 are mutually exclusive per segment, and `config` rejects a template that sets both.
 
+## Replacing a break is a swap, not a reschedule
+
+`ads.extras_chance` lets a break air something from `media/extras/` — a music
+video, a DVD extra — instead of commercials. The whole feature is one function,
+`_roll_extras` in `plan.py`, and the design rests on three decisions:
+
+* **It swaps the filler, not the slot.** The replaced pod keeps its own `share` or
+  `seconds`, so the break is the same length and the grid is untouched. Nothing
+  about the day moves: this is what separates "a different thing aired" from "the
+  schedule changed".
+* **It rolls per break.** A 30-minute template has two or three pods and they are
+  separate breaks, so the chance is per pod and the seed is
+  `(day, slot index, pod index)`. Seeding from the template's *shape* instead would
+  mean adding a bump to a slot silently reshuffled which breaks were special — a
+  config edit with a scheduling side effect, which is the thing the day-planning
+  code goes to some trouble to avoid everywhere else.
+* **It refuses rather than cuts.** `_fill_extras_block` picks the longest piece
+  that fits and tops up with spots; if every piece is longer than the break it
+  returns `None` and the caller airs the commercials it was going to air anyway.
+  Trimming a music video to hit a booking length is precisely the artefact the
+  extras feature exists to remove.
+
+Two moments are excluded on purpose. **Bump segments** are continuity, and the
+positional rules in `bumps.py` depend on them staying where the template put them.
+**Mid-episode pods** (`SegmentSpec.in_mid`) are a break that interrupts a show —
+a four-minute video there is a bigger interruption than the show itself.
+
+Extras carry their own cooldown, much longer than the commercial one, because the
+pool is small by nature. `_emit_pod` therefore takes both trackers: a spot topping
+up a short extras block belongs on the *ad* tracker even though it was emitted as
+part of an extras run.
+
 ## The guide is not the timeline
 
 The playout JSON and the XMLTV are both derived from the same `Plan`, but they are

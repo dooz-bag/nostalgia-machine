@@ -26,3 +26,30 @@ ads:
       count: 1
     - seconds: 90
       count: 1
+
+  # -- replacing a whole break with something else ---------------------------
+  #
+  # Put music videos, DVD extras, station specials -- anything that is not a
+  # spot -- in media/extras/ and a break can occasionally air one instead of
+  # commercials. Bump slots are never replaced: they are continuity, not filler.
+  #
+  # Chance is per *break*, and a 30-minute template has two or three of them, so
+  # 0.15 is roughly one break in seven and 0.2 is one in five. 0.0 (the default)
+  # never does it.
+  #
+  # The roll is seeded from the date, the slot and the break's position, so the
+  # same day always produces the same breaks. Editing a continuity template does
+  # not reshuffle which breaks are replaced.
+  #
+  # A break in the middle of a show is never replaced: a four-minute music video
+  # there interrupts the episode more than the break would have.
+  #
+  # A replaced break keeps its own length: the extra fills the budget the
+  # commercials would have used, so the next programme still starts on time. If
+  # the chosen extra is shorter than the break, spots top it up.
+  extras_chance: 0.0
+
+  # No extra repeats within this window. Longer than the commercial cooldown on
+  # purpose -- the extras pool is small, and the same music video three times in
+  # one evening is the most obvious sign that a program built the schedule.
+  extras_cooldown_hours: 24

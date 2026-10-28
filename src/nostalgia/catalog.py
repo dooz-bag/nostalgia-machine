@@ -291,6 +291,7 @@ class Catalog:
         bump_root: Path | None,
         ad_root: Path | None,
         ident_root: Path | None,
+        extra_root: Path | None = None,
         ffprobe_path: str | None = None,
         force: bool = False,
         write_sidecars: bool = False,
@@ -340,7 +341,15 @@ class Catalog:
                     )
                 )
 
-            for root, kind in ((bump_root, "bump"), (ad_root, "ad"), (ident_root, "ident")):
+            # `extras` is flat like the others, but nested one level for grouping
+            # (media/extras/music-videos/, media/extras/dvd-extras/) is just as
+            # valid -- a subfolder there is a label, not a subject.
+            for root, kind in (
+                (bump_root, "bump"),
+                (ad_root, "ad"),
+                (ident_root, "ident"),
+                (extra_root, "extra"),
+            ):
                 if root and Path(root).is_dir():
                     rows.extend(
                         self._scan_flat(Path(root), kind, ffprobe, report, write_sidecars, pool)

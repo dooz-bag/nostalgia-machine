@@ -20,7 +20,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from typing import Sequence
 
-from .config import ContinuitySegment, ContinuityTemplate
+from .config import FILLER_KINDS, ContinuitySegment, ContinuityTemplate
 
 MIN_TAIL_POD_MS = 10_000
 """Remainders smaller than this are folded into the previous break instead."""
@@ -31,7 +31,7 @@ class SegmentSpec:
     """A slot segment *before* an asset has been chosen."""
 
     kind: str
-    """``episode`` | ``bump`` | ``ad_pod`` | ``ident``."""
+    """``episode`` | ``bump`` | ``ad_pod`` | ``ident`` | ``extra``."""
 
     # bump intent
     subject: str = "this"
@@ -60,6 +60,16 @@ class SegmentSpec:
     continuing. Only the second may carry "we now return to".
     """
 
+    in_mid: bool = False
+    """True for every segment that came from a ``mid:`` block.
+
+    Needed because a mid-episode break is a *different* break from the ones
+    around the programme: it interrupts the show rather than preceding or
+    following it. The extras swap consults this -- a 4-minute music video is a
+    fine replacement for the break before a show and a bad one for the break in
+    the middle of it.
+    """
+
 
 @dataclass
 class SlotScript:
@@ -84,13 +94,13 @@ class SlotScript:
             sum(
                 spec.seconds
                 for spec in self.specs
-                if spec.kind in ("ad_pod", "ident") and spec.seconds
+                if spec.kind in FILLER_KINDS and spec.seconds
             )
             * 1000
         )
 
     def has_shares(self) -> bool:
-        return any(spec.share for spec in self.specs if spec.kind in ("ad_pod", "ident"))
+        return any(spec.share for spec in self.specs if spec.kind in FILLER_KINDS)
 
 
 @dataclass(frozen=True, slots=True)
@@ -194,6 +204,7 @@ def _specs_from(
             share=segment.share,
             guide=segment.guide,
             resumes=resuming and segment.kind == "bump" and segment.position == "INTO",
+            in_mid=resuming,
         )
         for segment in segments
     ]
@@ -253,7 +264,7 @@ def plan_budget(
             if excess <= 0:
                 break
             spec = script.specs[index]
-            if spec.kind not in ("ad_pod", "ident") or not spec.seconds:
+            if spec.kind not in FILLER_KINDS or not spec.seconds:
                 continue
             # Cut in whole seconds: `seconds` is an int booking length, and
             # trimming it to a fraction would give the planner a pod target it
@@ -298,6 +309,9 @@ def describe_script(script: SlotScript) -> str:
         elif spec.kind == "ad_pod":
             target = f"{spec.seconds}s" if spec.seconds else (spec.pod or "?")
             parts.append(f"POD[{target}]")
+        elif spec.kind == "extra":
+            target = f"{spec.seconds}s" if spec.seconds else (spec.pod or "?")
+            parts.append(f"EXTRA[{target}]")
         else:
             parts.append(spec.kind.upper())
     return " ".join(parts)

@@ -325,7 +325,64 @@ def commercials_body(
 </div>"""
         )
 
+    body.append(_extras_section(config, catalog))
     return "".join(body)
+
+
+def _extras_section(config: RootConfig, catalog: Catalog) -> str:
+    """The extras pool, and the dial that decides how often it is used.
+
+    Extras are not commercials, but they are the other thing that can fill a break,
+    and the one thing an owner will want to switch off here: a music video that
+    turned out to be a bad rip is exactly as annoying as a bad spot and is fixed
+    the same way.
+    """
+    extras = catalog.assets(("extra",), include_disabled=True)
+    chance = config.ads.extras_chance
+    dial = (
+        f"One break in {round(1 / chance)} is replaced"
+        if chance > 0
+        else "Off &mdash; every break airs commercials"
+    )
+
+    rows: list[str] = []
+    for asset in sorted(extras, key=lambda a: (a.duration_ms, a.key)):
+        action = "enable" if asset.disabled else "disable"
+        label = "Enable" if asset.disabled else "Disable"
+        flag = ' <span class="kind">disabled</span>' if asset.disabled else ""
+        rows.append(
+            f"""<tr>
+  <td>{_h(asset.path.replace(chr(92), "/").rsplit("/", 1)[-1])}{flag}</td>
+  <td class="mono">{_h(_seconds(asset.duration_ms))}</td>
+  <td>
+    <form method="post" action="/commercials/{action}" class="inline">
+      <input type="hidden" name="key" value="{_h(asset.key)}">
+      <button type="submit">{label}</button>
+    </form>
+  </td>
+</tr>"""
+        )
+
+    if not extras:
+        return f"""<div class="card">
+  <p class="label">Extras instead of commercials</p>
+  <p class="empty">No extras catalogued. Put music videos, DVD extras or anything
+  else that is not a spot in <span class="mono">media/extras/</span> and rescan,
+  then set <span class="mono">ads.extras_chance</span> on the config page.</p>
+</div>"""
+
+    return f"""<div class="card">
+  <p class="label">Extras instead of commercials</p>
+  <p class="hint">  <b>{dial}</b> ({chance:.0%} chance). A replaced break keeps
+  its own length, so the next programme still starts on time; if the chosen piece
+  is shorter than the break, spots top it up. Bump slots are never replaced, and
+  neither is a break in the middle of a show. Switching one off here takes it out
+  of the pool at the next replan.</p>
+  <table>
+    <thead><tr><th>File</th><th>Length</th><th></th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+</div>"""
 
 
 def set_spot_enabled(catalog: Catalog, key: str, *, enabled: bool) -> str:

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Iterable, Literal, Sequence
 
-AssetKind = Literal["bump", "ad", "ident", "episode"]
+AssetKind = Literal["bump", "ad", "ident", "episode", "extra"]
 
 NEUTRAL = "neutral"
 
