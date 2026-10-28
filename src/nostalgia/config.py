@@ -69,6 +69,25 @@ class BumpGeneratedConfig(_Model):
     style_pack: str | None = None
     """Force one era style instead of picking by air date."""
 
+    lines: bool = True
+    """Say something. Cards use the approved sentences in ``config/bump-lines.yaml``
+    instead of a bare position word over the title. With no bank this changes
+    nothing, so it is safe to leave on."""
+
+    variants: int = Field(default=3, ge=1, le=10)
+    """How many different sentences each (show, position) gets rendered in."""
+
+    music: bool = True
+    """Lay a music bed under each card, from ``media/music/``. With nothing in that
+    folder, cards are silent exactly as before."""
+
+    ollama_url: str = "http://host.docker.internal:11434"
+    """Where a local model for *proposing* lines lives. Only the Lines page and
+    ``nostalgia lines generate`` use it; rendering never does."""
+
+    ollama_model: str = ""
+    """Which model. Blank means the first one Ollama reports."""
+
     era_year: int = 2003
     """Default look when the channel has no ``on_air_date``.
 
@@ -148,6 +167,32 @@ class AdsConfig(_Model):
             AdPodTarget(seconds=90, count=1),
         ]
     )
+
+    merge_breaks: bool = False
+    """Join each run of conformed break items into one file, so the streamer sees
+    one item instead of ten.
+
+    Every playout item is its own ffmpeg process on the streamer and ends in a
+    playlist discontinuity, which a player has to flush and resync on. A day has
+    ~840 items, so ~35 of those a hour -- before any footage is considered. Merging
+    is a stream-copy join of files that were conformed to identical parameters, so
+    it costs almost nothing, and the plan stays granular (airing history, the
+    commercials page and per-spot switches all still see individual spots).
+
+    Needs ``nostalgia conform`` to have run. Anything not conformed simply airs as
+    its own item, so turning this on early is safe.
+    """
+
+    dip_ms: int = Field(default=100, ge=0, le=500)
+    """The dip to black and silence at each end of a commercial, in milliseconds.
+
+    A recorded break had a few frames of black between spots; this restores them so
+    a cut reads as a seam instead of a jump. ``0`` is a hard cut. Baked in by
+    ``conform``, so changing it re-conforms the library on the next run.
+    """
+
+    merge_max_minutes: int = Field(default=8, ge=1, le=30)
+    """The longest single merged file. A run longer than this is split."""
 
     extras_enabled: bool = False
     """The master switch: air extras instead of commercials, or do not.

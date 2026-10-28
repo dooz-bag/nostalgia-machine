@@ -85,9 +85,37 @@ class PlannedItem:
     streamer.
     """
 
+    conformed: bool = False
+    """True when ``path`` is a conformed copy that may be joined to its neighbours
+    by stream copy (see :mod:`nostalgia.mergebreaks`)."""
+
+    stretched: bool = False
+    """True when the slot gave this item more time than its file has (see
+    ``_absorb_remainder``). Its file is shorter than its entry, so joining it to a
+    neighbour would move that shortfall to the end of the whole run."""
+
     @property
     def duration_ms(self) -> int:
         return self.end_ms - self.start_ms
+
+    @property
+    def mergeable(self) -> bool:
+        """Whether this item can be folded into a merged break file.
+
+        All four conditions are load-bearing: an item that is cut (``in``/``out``
+        point) would lose its dip, a ``lavfi`` source has no file to join, an
+        unconformed file has different stream parameters and cannot be copied, and
+        a programme is never merged -- it is the one thing worth keeping separate.
+        A stretched item is left out too: it has to end where its file ends.
+        """
+        return (
+            self.conformed
+            and self.kind != "episode"
+            and not self.lavfi_params
+            and self.in_point_ms is None
+            and self.out_point_ms is None
+            and not self.stretched
+        )
 
 
 @dataclass
@@ -170,6 +198,12 @@ class PlanContext:
     generated_dir: Path | None = None
     """Where rendered cards are cached (``media/bumps/generated`` by default)."""
 
+    lines_file: Path | None = None
+    """``config/bump-lines.yaml``: the approved sentences generated cards say."""
+
+    music_dirs: tuple[Path, ...] = ()
+    """``media/music/``: the beds laid under generated cards."""
+
     extras: list[Asset] = field(default_factory=list)
     """Long-form filler: music videos, DVD extras, anything that is not a spot.
 
@@ -200,10 +234,17 @@ class PlanContext:
             era_file = None
 
         generated_dir = None
+        music_dirs: tuple[Path, ...] = ()
         if media_root is not None:
+            from .music import music_roots
+
             generated_dir = media_root / "bumps" / "generated"
+            music_dirs = tuple(music_roots(media_root))
+        lines_file = (config_dir / "bump-lines.yaml") if config_dir else None
 
         return cls(
+            lines_file=lines_file,
+            music_dirs=music_dirs,
             root=root,
             catalog=catalog,
             rings=rings,
@@ -628,11 +669,32 @@ def render_generated_bumps(
     # The era decides the look. Never "now": a nostalgia channel that renders
     # this year's cards for a 2003 season is the wrong channel.
     year = context.root.era_year
+    generated = context.root.bumps.generated
+
+    # What a card says, and what it sounds like. Both are optional and both degrade
+    # to exactly the old plain, silent card, so a channel with no bank and no music
+    # renders what it always did.
+    from .bumplines import load_bank
+    from .music import load_library
+
+    bank = load_bank(context.lines_file) if generated.lines else None
+    music = None
+    if generated.music and context.music_dirs:
+        from .conform import find_tools
+
+        music = load_library(context.music_dirs, ffprobe=find_tools(ffmpeg)[1]) or None
+    positions = ("INTO", "AFTER", "NEXT", "OUT") if bank else ("INTO", "AFTER", "NEXT")
+
     specs = specs_for_schedule(
         shows=[show_id for show_id, show in context.root.shows.items() if show.enable],
         titles=titles,
         year=year,
+        positions=positions,
         max_seconds=12,
+        bank=bank,
+        music=music,
+        variants=generated.variants,
+        hold_s=pack.style_for(year).hold_ms / 1000,
     )
     target = Path(out_dir) if out_dir else context.generated_dir
     try:
@@ -900,6 +962,16 @@ def _plan_slot(
     # Only spots whose era covers the channel's era may air, so a 2000 tape does
     # not turn up in a 2008 break. Untagged spots stay eligible.
     ad_pool, widened = era_ad_pool(context.ads, era_year, root.ads.era_drift_years)
+    # Merging joins whole conformed files by stream copy, which cannot cut a spot
+    # short: a trimmed spot would lose its dip and could not join its neighbours.
+    # So when every spot in the pool is conformed, trimming is off and a pod lands
+    # on the nearest whole spots, with the tail absorbing the difference. Until the
+    # library is conformed, behaviour is exactly what it was.
+    trim_slop = (
+        0
+        if root.ads.merge_breaks and ad_pool and all(asset.is_conformed for asset in ad_pool)
+        else root.ads.trim_slop_ms
+    )
     if widened and not any("match era" in warning for warning in plan.warnings):
         matching = sum(
             1
@@ -957,7 +1029,8 @@ def _plan_slot(
                     start_ms=cursor_ms,
                     end_ms=cursor_ms + asset.duration_ms,
                     asset_key=asset.key,
-                    path=asset.path,
+                    path=asset.playable_path,
+                    conformed=asset.is_conformed,
                     title=_show_title(root, asset.subject) or "bump",
                     subtitle=f"[adult swim] {spec.position.lower()}",
                     show_id=asset.subject if asset.subject not in (None, NEUTRAL) else None,
@@ -1047,7 +1120,7 @@ def _plan_slot(
                     pool,
                     target_ms=target,
                     on_cooldown=ad_tracker.cooling([], cursor_ms),
-                    trim_slop_ms=root.ads.trim_slop_ms,
+                    trim_slop_ms=trim_slop,
                     seed_parts=(plan.day.isoformat(), slot.index, "tail", cursor_ms),
                     short_pool=_promo_pool(
                         real_bumps, generated_pool, context.idents, exclude=used_here
@@ -1064,7 +1137,7 @@ def _plan_slot(
                         target_ms=target,
                         on_cooldown=ad_tracker.cooling([], cursor_ms),
                         tolerance_ms=root.ads.pod_tolerance_ms,
-                        trim_slop_ms=root.ads.trim_slop_ms,
+                        trim_slop_ms=trim_slop,
                         seed_parts=(plan.day.isoformat(), slot.index, cursor_ms),
                     )
                 except PodError as exc:
@@ -1101,7 +1174,7 @@ def _plan_slot(
                     [asset for asset in ad_pool if asset.key not in used_here] or ad_pool,
                     target_ms=remainder,
                     on_cooldown=ad_tracker.cooling([], cursor_ms),
-                    trim_slop_ms=root.ads.trim_slop_ms,
+                    trim_slop_ms=trim_slop,
                     seed_parts=(plan.day.isoformat(), slot.index, "trail", cursor_ms),
                     short_pool=_promo_pool(
                         real_bumps, generated_pool, context.idents, exclude=used_here
@@ -1374,7 +1447,8 @@ def _emit_pod(
                 start_ms=cursor_ms,
                 end_ms=cursor_ms + pod_item.duration_ms,
                 asset_key=pod_item.asset.key,
-                path=pod_item.asset.path,
+                path=pod_item.asset.playable_path,
+                conformed=pod_item.asset.is_conformed,
                 title=(
                     _show_title(root, pod_item.asset.subject)
                     or pod_item.asset.brand
@@ -1540,6 +1614,11 @@ def _promo_pool(
     return pool
 
 
+# About one frame at 29.97 fps. A stretch this small is rounding, not a hole, so the
+# item may still be joined to its neighbours.
+STRETCH_TOLERANCE_MS = 40
+
+
 def _absorb_remainder(plan: Plan, ms: int) -> bool:
     """Stretch the last item by *ms* so the slot lands exactly. True on success.
 
@@ -1559,7 +1638,9 @@ def _absorb_remainder(plan: Plan, ms: int) -> bool:
     last = plan.items[-1]
     if last.kind not in ("ad", "bump", "ident", "extra", "filler"):
         return False
-    plan.items[-1] = replace(last, end_ms=last.end_ms + ms)
+    plan.items[-1] = replace(
+        last, end_ms=last.end_ms + ms, stretched=ms > STRETCH_TOLERANCE_MS
+    )
     return True
 
 

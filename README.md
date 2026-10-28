@@ -173,6 +173,19 @@ its own length, so the next programme still starts on time. A piece is never cut
 fit — if nothing in the pool is short enough, the break airs its commercials and
 says so. Bump slots and mid-episode breaks are never replaced.
 
+**Breaks are made to flow.** `nostalgia conform` re-encodes every commercial and
+bump to one canvas, frame rate and loudness, with a short soft cut at each end of a
+spot, and `ads.merge_breaks` joins each break into a single file so the streamer
+does not restart at every spot. Originals are never touched. A silent spot is
+switched off (and listed) rather than aired as dead air.
+
+**Generated bumps can talk, with music.** Cards print a sentence from
+`config/bump-lines.yaml` instead of only a position word. A local model (Ollama) can
+propose more on the Lines page; every line passes a check that it is true at the
+moment it airs (a "next" card never says "you just watched") and waits for your
+approval. Music comes from `media/music/` or is harvested from your own text-on-black
+bumps. No music is shipped or downloaded.
+
 **The guide is continuous.** Playout JSON lists every commercial and bumper, because
 the streamer airs each one. The XMLTV lists *programmes*, each stretched to the next
 one's start, so the guide tiles the day instead of leaking a gap at every break.
@@ -204,10 +217,11 @@ or to build a "what if [adult swim] picked it up in 2004" timeline:
 | `config/shows.yaml` | The roster: folders, slot family, airing windows, weights |
 | `config/days/*.yaml` | Dayparts: which shows run at which hours, slot family, optional `template:` |
 | `config/continuity.yaml` | Break structure: bumps, pods (`share`/`seconds`), mid-rolls — the *shape*, not the length |
-| `config/ads.yaml` | Pod targets, era drift, pod tolerance, trim slop, extras breaks |
+| `config/ads.yaml` | Pod targets, era drift, pod tolerance, trim slop, extras breaks, smooth breaks |
 | `config/watermark.yaml` | The corner bug: mode, typeface, placement, which shows |
 | `config/bumps.yaml` | Match strictness, cooldowns, generated-bump limits |
 | `config/bumps-era.yaml` | The look of generated cards, by year |
+| `config/bump-lines.yaml` | What generated cards say, by position |
 | `config/programming.yaml` | Whether the day files, a hand-built lineup, or a whole-collection shuffle decides the schedule |
 
 ## Programming: let the day files decide, or don't

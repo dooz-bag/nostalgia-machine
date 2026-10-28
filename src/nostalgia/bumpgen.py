@@ -19,16 +19,22 @@ from __future__ import annotations
 
 import shutil
 import subprocess
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Sequence
+from typing import TYPE_CHECKING, Sequence
 
 import yaml
 
 from .assets import Asset
+from .bumplines import SHOW, render_line, wrap
 from .probe import find_ffprobe, probe
+from .rng import rng_for
 from .sidecars import BumpTag
 from .sidecars import write as write_tag
+
+if TYPE_CHECKING:
+    from .bumplines import LineBank
+    from .music import MusicLibrary
 
 
 class BumpGenError(RuntimeError):
@@ -204,6 +210,19 @@ class BumpSpec:
 
     max_seconds: float | None = None
 
+    text: str | None = None
+    """The sentence the card says, already with the show substituted in.
+
+    ``None`` keeps the original plain card (a position word over the title), which is
+    also what a channel with no line bank gets.
+    """
+
+    music_path: str | None = None
+    """A music bed to lay under the card, and where in it to start."""
+    music_offset: float = 0.0
+    music_id: str = ""
+    """Names the bed and offset, so changing the music re-renders the card."""
+
 
 def cache_key(spec: BumpSpec, style: StylePack, width: int, height: int) -> str:
     parts = [
@@ -214,6 +233,17 @@ def cache_key(spec: BumpSpec, style: StylePack, width: int, height: int) -> str:
         spec.clock or "",
         f"{width}x{height}",
     ]
+    if spec.text:
+        # Different sentences for the same show and position must be different
+        # files. A short hash, not a slug: a sentence makes a poor filename, and two
+        # lines that differ by one word must not collide.
+        import hashlib
+
+        parts.append("t" + hashlib.sha1(spec.text.encode()).hexdigest()[:8])
+    if spec.music_id:
+        import hashlib
+
+        parts.append("m" + hashlib.sha1(spec.music_id.encode()).hexdigest()[:6])
     safe = "-".join(_slug(part) for part in parts if part)
     return f"gen:{safe}"
 
@@ -248,8 +278,17 @@ def render(
             raise BumpGenError(
                 "ffmpeg is required to render bumps; install it or set ffmpeg_path"
             )
+        audio_filter = None
+        if spec.music_path:
+            from .music import segment_filter
+
+            # None when the bed is silent in this stretch: no bed beats hiss.
+            audio_filter = segment_filter(
+                Path(spec.music_path), spec.music_offset, duration_ms / 1000, binary
+            )
         command = _build_command(
-            spec, style, pack, width=width, height=height, duration_ms=duration_ms
+            spec, style, pack, width=width, height=height, duration_ms=duration_ms,
+            audio_filter=audio_filter,
         )
         _run(binary, command, target)
 
@@ -377,6 +416,7 @@ def _build_command(
     width: int,
     height: int,
     duration_ms: int,
+    audio_filter: str | None = None,
 ) -> list[str]:
     """ffmpeg arguments for one card.
 
@@ -396,7 +436,16 @@ def _build_command(
 
     if brand:
         lines.append((_case(brand, style), margin_y - round(font_size * 1.4)))
-    if style.show_position_word:
+    if spec.text:
+        # A sentence, not a title: wrap it to the card's width and stack the lines.
+        # A typographic apostrophe, because a straight one cannot be escaped inside
+        # a quoted drawtext value and would end the string mid-sentence.
+        usable = max(1, width - 2 * margin_x)
+        per_line = max(14, int(usable / (0.66 * font_size)))
+        sentence = _case(spec.text.replace("'", "\u2019"), style)
+        for number, row in enumerate(wrap(sentence, per_line)[:5]):
+            lines.append((row, margin_y + round(font_size * 1.5 * number)))
+    elif style.show_position_word:
         word = pack.word_for(spec.position, style.key)
         lines.append((_case(word, style), margin_y))
         lines.append((_case(subject, style), margin_y + round(font_size * 1.5)))
@@ -435,27 +484,32 @@ def _build_command(
     # Film grain is incompressible: at CRF 20 a grainy card ballooned to ~17 MB.
     # Cards are cheap to regenerate, so a softer CRF keeps the cache sane.
     crf = "30" if style.grain > 0 else "22"
-    return [
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-f",
-        "lavfi",
-        "-i",
-        filters[0],
-        "-vf",
-        ",".join(filters[1:]),
-        "-t",
-        f"{seconds:.3f}",
-        "-c:v",
-        "libx264",
-        "-preset",
-        "veryfast",
-        "-crf",
-        crf,
-        "-pix_fmt",
-        "yuv420p",
-        "-an",
+
+    # Every card carries an audio track, music or not: a card with no track at all
+    # is the one thing that cannot be joined to its neighbours by stream copy, and a
+    # silent card in a break of sound is a hole. A bed that is itself silent in the
+    # chosen stretch is dropped for the same reason hiss would be worse.
+    command = ["-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", filters[0]]
+    if spec.music_path and audio_filter:
+        command += ["-ss", f"{spec.music_offset:.3f}", "-t", f"{seconds:.3f}", "-i", spec.music_path]
+        sound = audio_filter
+    else:
+        command += ["-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo"]
+        sound = "anull"
+    return command + [
+        "-map", "0:v:0",
+        "-map", "1:a:0",
+        "-vf", ",".join(filters[1:]),
+        "-af", sound,
+        "-t", f"{seconds:.3f}",
+        "-c:v", "libx264",
+        "-preset", "veryfast",
+        "-crf", crf,
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-ar", "48000",
+        "-ac", "2",
         "-y",
     ]
 
@@ -590,9 +644,22 @@ def specs_for_schedule(
     year: int | None,
     positions: Sequence[str] = ("INTO", "AFTER", "NEXT"),
     max_seconds: float | None = 12,
+    bank: "LineBank | None" = None,
+    music: "MusicLibrary | None" = None,
+    variants: int = 3,
+    general: int = 3,
+    hold_s: float = 4.2,
 ) -> list[BumpSpec]:
-    """The full cross-product of shows x positions, for pre-rendering a cache."""
-    return [
+    """The cards to pre-render: every show x position, in as many voices as asked.
+
+    With no *bank* this is the original cross-product of plain cards. With one, each
+    (show, position) gets *variants* different sentences, and each position gets
+    *general* show-less cards that fit beside any show.
+
+    A (show, position) the bank has nothing for still gets a plain card, so adding
+    lines can only ever add variety -- it never leaves a slot with nothing to air.
+    """
+    plain = [
         BumpSpec(
             subject=show,
             position=position,
@@ -603,6 +670,60 @@ def specs_for_schedule(
         for show in shows
         for position in positions
     ]
+    if not bank:
+        return plain
+
+    specs: list[BumpSpec] = []
+    for show in shows:
+        title = titles.get(show) or show.replace("-", " ").title()
+        for position in positions:
+            own = [line for line in bank.for_position(position, show) if SHOW in line]
+            picks = _pick_distinct(own, variants, ("show", show, position, year))
+            if not picks:
+                specs.append(
+                    BumpSpec(subject=show, position=position, year=year,
+                             show_title=titles.get(show), max_seconds=max_seconds)
+                )
+            for line in picks:
+                specs.append(
+                    BumpSpec(subject=show, position=position, year=year,
+                             show_title=titles.get(show), max_seconds=max_seconds,
+                             text=render_line(line, title))
+                )
+
+    # General cards say nothing about any one show, so they are rendered once per
+    # position rather than once per show.
+    for position in dict.fromkeys((*positions, "ANY")):
+        lines = [line for line in bank.for_position(position) if SHOW not in line]
+        for line in _pick_distinct(lines, general if position != "ANY" else max(general, 6),
+                                   ("general", position, year)):
+            specs.append(
+                BumpSpec(subject="neutral", position=position, year=year,
+                         max_seconds=max_seconds, text=line)
+            )
+
+    if music:
+        specs = [_with_music(spec, music, year, hold_s) for spec in specs]
+    return specs
+
+
+def _pick_distinct(pool: Sequence[str], count: int, seed: Sequence[object]) -> list[str]:
+    ordered = sorted(set(pool))
+    rng_for("bump-specs", *seed).shuffle(ordered)
+    return ordered[: max(0, count)]
+
+
+def _with_music(spec: BumpSpec, music: "MusicLibrary", year: int | None, hold_s: float) -> BumpSpec:
+    """Choose the bed for one card, deterministically from what the card is."""
+    identity = (spec.subject, spec.position, spec.text or "")
+    bed = music.pick(year=year, seed_parts=identity)
+    if bed is None:
+        return spec
+    offset = music.offset_for(bed, hold_s, identity)
+    return replace(
+        spec, music_path=str(bed.path), music_offset=offset,
+        music_id=f"{bed.path.name}@{offset:g}",
+    )
 
 
 __all__ = [

@@ -53,6 +53,14 @@ class Asset:
     without a rescan, so a bad commercial stops airing the moment it is clicked.
     """
 
+    air_path: str | None = None
+    """The conformed copy that airs *instead of* ``path``, when one exists.
+
+    ``path`` stays the original on purpose: tags, sidecars and the on/off switch
+    are all keyed to it. Only the thing handed to the streamer changes, and
+    ``duration_ms`` then describes this file, not the original.
+    """
+
     contains_multiple_spots: bool | None = None
     """Whether the file actually holds several commercials back to back.
 
@@ -60,6 +68,15 @@ class Asset:
     break is the main source of jolting playback: it airs as a single item, so a
     60-second pod becomes one 70-second clip and has to be chopped to fit.
     """
+
+    @property
+    def playable_path(self) -> str:
+        """What the streamer should open: the conformed copy if there is one."""
+        return self.air_path or self.path
+
+    @property
+    def is_conformed(self) -> bool:
+        return self.air_path is not None
 
     @property
     def is_neutral_bump(self) -> bool:

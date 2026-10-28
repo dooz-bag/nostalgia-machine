@@ -20,6 +20,7 @@ this one is presentation.
 
 from __future__ import annotations
 
+import re
 from html import escape
 from datetime import datetime
 
@@ -260,6 +261,15 @@ def commercials_body(
         )
 
     rows = _rows(airings, timezone=timezone, show_disabled=show_disabled)
+    if airings and not rows:
+        # Everything recent is switched off. Saying "nothing recorded" here was
+        # wrong, and worse, it dropped the toggle -- the one control that reveals
+        # the rows -- so a click that disabled the last visible spot hid its own
+        # undo.
+        rows = (
+            '<tr><td colspan="4" class="empty">Every recent airing is switched off. '
+            "Use <b>Show switched-off</b> to see them.</td></tr>"
+        )
     if rows:
         toggle = (
             '<a class="button" href="/commercials">Hide switched-off</a>'
@@ -325,8 +335,124 @@ def commercials_body(
 </div>"""
         )
 
+    body.append(_smooth_section(config, catalog))
+    body.append(_compilations_section(all_ads))
     body.append(_extras_section(config, catalog))
     return "".join(body)
+
+
+#: A source needs at least this many numbered files before it is worth listing as a
+#: compilation: below it, switching off "the family" is just switching off a spot.
+MIN_FAMILY_SIZE = 5
+
+#: The most compilations the page lists, largest first.
+FAMILY_LIMIT = 30
+
+
+def ad_family(asset) -> str:
+    """The recording a spot was sliced from, e.g. ``2000/cartoon-network-jan-18-2000-ads``.
+
+    A library imported from recorded breaks is mostly numbered slices
+    (``...-ads-013.mp4``), so the filename minus its trailing number plus its folder
+    names the *tape*. That is the unit that actually looks or sounds bad: a worn
+    tape, a station bug in the corner, a bad capture -- all of it shared by every
+    slice.
+    """
+    path = asset.path.replace("\\", "/")
+    parts = path.rsplit("/", 2)
+    folder = parts[-2] if len(parts) >= 2 else ""
+    stem = parts[-1].rsplit(".", 1)[0]
+    stem = re.sub(r"[-_ ]?\d{1,3}$", "", stem)
+    return f"{folder}/{stem}"
+
+
+def families(assets) -> dict[str, list]:
+    """Spots grouped by source recording, keeping only real compilations."""
+    grouped: dict[str, list] = {}
+    for asset in assets:
+        grouped.setdefault(ad_family(asset), []).append(asset)
+    return {name: members for name, members in grouped.items() if len(members) >= MIN_FAMILY_SIZE}
+
+
+def _compilations_section(assets) -> str:
+    groups = sorted(families(assets).items(), key=lambda item: (-len(item[1]), item[0]))
+    if not groups:
+        return ""
+    rows: list[str] = []
+    for name, members in groups[:FAMILY_LIMIT]:
+        off = sum(1 for asset in members if asset.disabled)
+        on = len(members) - off
+        # One button, whichever way it would change things most usefully: if anything
+        # is still on, offer to switch the lot off; once all are off, offer to undo.
+        action, label = ("disable", "Switch all off") if on else ("enable", "Switch all on")
+        status = (
+            f'<span class="kind">all off</span>'
+            if not on
+            else (f'<span class="dim">{off} off</span>' if off else "")
+        )
+        rows.append(
+            f"""<tr>
+  <td class="mono">{_h(name)}</td>
+  <td class="mono">{len(members)}</td>
+  <td>{status}</td>
+  <td>
+    <form method="post" action="/commercials/family/{action}" class="inline">
+      <input type="hidden" name="family" value="{_h(name)}">
+      <button type="submit">{label}</button>
+    </form>
+  </td>
+</tr>"""
+        )
+    shown = f"the {FAMILY_LIMIT} largest of {len(groups)}" if len(groups) > FAMILY_LIMIT else f"all {len(groups)}"
+    return f"""<div class="card">
+  <p class="label">Compilations &mdash; switch off a whole source</p>
+  <p class="hint">Most spots in a recorded-break library are numbered slices of a
+  small number of recordings. If one recording looks or sounds bad &mdash; a worn
+  tape, a station logo in the corner, a poor capture &mdash; every slice shares the
+  fault, so switching off the source is one click instead of dozens. Showing
+  {shown} compilations, largest first. Reversible: the files stay catalogued.</p>
+  <table>
+    <thead><tr><th>Recording</th><th>Spots</th><th></th><th></th></tr></thead>
+    <tbody>{''.join(rows)}</tbody>
+  </table>
+</div>"""
+
+
+def _smooth_section(config: RootConfig, catalog: Catalog) -> str:
+    """Whether breaks are conformed and merged, in plain words."""
+    from ..pipeline import conform_params
+
+    stats = catalog.conform_stats(conform_params(config).signature())
+    ads, bumps = stats.get("ad"), stats.get("bump")
+    if not ads:
+        return ""
+    done = ads["conformed"] + (bumps["conformed"] if bumps else 0)
+    total = ads["total"] + (bumps["total"] if bumps else 0)
+    stale = ads["stale"] + (bumps["stale"] if bumps else 0)
+    merging = config.ads.merge_breaks
+
+    if done == 0:
+        headline = "Not conformed yet"
+        advice = (
+            "Spots are played exactly as recorded, so the picture width changes "
+            "between spots and every spot is a separate item for the player to "
+            "resync on. Run <span class=\"mono\">nostalgia conform</span> once to fix "
+            "the footage, then turn on <b>Join each break into one file</b> on the "
+            "config page."
+        )
+    else:
+        headline = f"{done} of {total} break files conformed"
+        notes = []
+        if stale:
+            notes.append(f"{stale} out of date &mdash; re-run <span class=\"mono\">nostalgia conform</span>")
+        if done < total:
+            notes.append("breaks only merge where every piece is conformed")
+        notes.append("merging is <b>on</b>" if merging else "merging is <b>off</b> &mdash; turn on <b>Join each break into one file</b> on the config page")
+        advice = "; ".join(notes) + "."
+    return f"""<div class="card">
+  <p class="label">Smooth breaks</p>
+  <p class="hint"><b>{headline}.</b> {advice}</p>
+</div>"""
 
 
 def _extras_section(config: RootConfig, catalog: Catalog) -> str:
@@ -397,6 +523,19 @@ def _extras_section(config: RootConfig, catalog: Catalog) -> str:
 </div>"""
 
 
+def set_family_enabled(catalog: Catalog, family: str, *, enabled: bool) -> str:
+    """Switch every spot of one compilation on or off, returning a sentence.
+
+    Raises ``LookupError`` for an unknown family, for the same reason a bad key
+    does: a click that reports success and changes nothing is worse than an error.
+    """
+    members = families(catalog.assets(("ad",), include_disabled=True)).get(family)
+    if not members:
+        raise LookupError(f"no compilation named {family!r}")
+    catalog.set_disabled_many([asset.key for asset in members], not enabled)
+    return f"{len(members)} spots from {family} {'switched on' if enabled else 'switched off'}"
+
+
 def set_spot_enabled(catalog: Catalog, key: str, *, enabled: bool) -> str:
     """Enable or disable one spot, returning a sentence for the page.
 
@@ -412,8 +551,12 @@ def set_spot_enabled(catalog: Catalog, key: str, *, enabled: bool) -> str:
 
 __all__ = [
     "AIRING_LIMIT",
+    "MIN_FAMILY_SIZE",
     "MULTI_SPOT_HINT_MS",
     "SHORT_POD_HINT_MS",
+    "ad_family",
     "commercials_body",
+    "families",
+    "set_family_enabled",
     "set_spot_enabled",
 ]

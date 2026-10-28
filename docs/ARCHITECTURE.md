@@ -36,7 +36,11 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `watermark` | The corner bug: card render, placement layer, burn compositing | writes files |
 | `catalog` | Scan, tags, airing history (SQLite) | I/O |
 | `probe` | ffprobe with a sidecar fallback | I/O |
-| `bumpgen` | Render typographic cards with ffmpeg | I/O |
+| `bumpgen` | Render typographic cards with ffmpeg, with sentences and a music bed | I/O |
+| `bumplines` | The line bank, the truth guard, the approval queue, the local-model client | I/O |
+| `music` | The bed library, levelling a bed under a card, harvesting beds from your bumps | I/O |
+| `conform` | One canvas, frame rate and loudness for every spot and bump | I/O |
+| `mergebreaks` | Finding runs of conformed spots and joining each into one file | I/O |
 | `web.commercials` | The commercial history page: what aired, and switching spots off | I/O |
 | `pipeline`, `cli`, `web` | Wiring and presentation | I/O |
 
@@ -337,7 +341,7 @@ broadcaster does, and what makes "9pm" mean 9pm.
 `bumpgen` renders one card per `(era style, position, show)` with ffmpeg
 `drawtext` over a generated background. Two deliberate constraints:
 
-* **The text is never model-generated.** Text-to-image models still mangle
+* **Letters are never model-generated.** Text-to-image models still mangle
   letterforms; compositing crisp text over a generated background keeps every word
   correct. Any Tier 2 image model is therefore limited to backgrounds.
 * **Output is cached and deterministic.** Styles are constants keyed by year, so a
@@ -347,6 +351,30 @@ broadcaster does, and what makes "9pm" mean 9pm.
 Tags live in a `.tags.json` sidecar next to each file, which is what lets
 `bumps/generated/` be a folder that is *not* a show. The sidecar is also what the
 review queue writes, so there is one on-disk representation of "what this bump is".
+
+## What a generated card says
+
+A card's sentence comes from `config/bump-lines.yaml`, a plain-text bank grouped by
+the moment the card airs (`INTO`, `NEXT`, `AFTER`, `OUT`, `ANY`). A local model may
+*propose* lines, but it is never in the playout path: proposals go through
+`bumplines.check_line`, wait in a queue on the Lines page, and enter the bank only
+when a person approves them. Rendering reads the bank, picks with the seeded RNG
+and caches the card, so a card is the same on every run.
+
+The guard exists because the failure that matters is a card that lies about its
+moment. Each position has a set of tenses it may not use: a card shown *before*
+another show must not speak in the past ("you just watched"), a card shown *after*
+an episode must not promise the future, and `OUT` appears both at the start of a
+break and on the resume, so it may talk about returning but never about ending
+or what is next. A line that names a show other than its own is refused outright.
+This is a structural check, not a language model's judgement, so it runs the same
+way on seed lines, proposals and at plan time.
+
+Music follows the same rule. Beds come from the user's own files or are harvested
+from their own text-on-black bumps; a bed is chosen deterministically from its
+position and era and levelled over the segment that will be heard. A bed that is
+near-silent is dropped rather than boosted, because normalising it makes the hiss
+the music.
 
 ## A generated card must not pass for an archive card
 
@@ -364,6 +392,32 @@ tag), and quietness (low enough to read as grime during playback).
 The settings live at the top of `config/bumps-era.yaml` and are merged into each
 style, because the mark is a channel-wide policy rather than an era look — while
 still allowing one style to override it.
+
+## Breaks are conformed, then merged
+
+The streamer plays each playout item as its own encode. For a break of several
+spots that means a new process, a new playlist discontinuity, and, because each
+spot is scaled to fit on its own, black bars that change width at every cut.
+Measured on the real library, 59% of spot-to-spot transitions changed bar width.
+
+Two steps fix this without changing the plan:
+
+1. **Conform** (`conform.py`) re-encodes every spot and bump once to a canvas,
+   frame rate, codec, GOP and loudness that are identical for everything. It is
+   keyed by a hash of its recipe, so it is idempotent, and stored beside the
+   original (`media/derived/conformed/`) with the catalog's `air_path` pointing at
+   the copy. The original path stays the key for tags and sidecars. B-frames are
+   disabled in the encode because a stream-copy join of B-frame streams produced
+   duplicate timestamps at the seams.
+2. **Merge** (`mergebreaks.py`) stream-copies a run of consecutive conformed items
+   into one file, only at the serialisation step. The plan, the guide, the airing
+   history and the per-spot switches still see every spot. A run is only merged if
+   every member is conformed, contiguous, and not an episode, a lavfi card, or a
+   trimmed item; anything else splits the run and airs item by item, so the
+   feature degrades to the old behaviour instead of failing.
+
+Because spots arrive pre-fitted, `trim_slop` is forced to zero when merging is on
+and the whole pool is conformed: a spot is never cut short to land on a pod length.
 
 ## The corner bug belongs to one side or the other
 

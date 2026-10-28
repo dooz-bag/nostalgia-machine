@@ -214,6 +214,29 @@ def test_disabled_airings_are_hidden_unless_asked_for(paths, config, catalog):
     assert "Hide switched-off" in shown
 
 
+def test_switching_off_the_only_recent_airing_keeps_the_way_back(paths, config, catalog):
+    """When *every* recent airing is switched off, the page must not claim nothing
+    was recorded and must still offer the toggle.
+
+    It used to do both, so disabling the last visible spot removed the only control
+    that reveals it. This is also what made the neighbouring test pass or fail
+    depending on whether the replan happened to have recorded any other airings,
+    i.e. on the time of day.
+    """
+    from nostalgia.web.commercials import commercials_body
+
+    spot = _first_ad(catalog)
+    _record(catalog, spot.key)
+    # Straight through the catalog: no replan, so no other airing can sneak in.
+    catalog.set_disabled(spot.key, True)
+
+    body = commercials_body(config, catalog, show_disabled=False)
+    section = _airing_section(body)
+    assert "Nothing recorded yet" not in section
+    assert "Every recent airing is switched off" in section
+    assert "Show switched-off" in section
+
+
 def test_an_unknown_key_reports_an_error_instead_of_pretending(paths, config, catalog):
     response = _client(paths, config).post(
         "/commercials/disable", data={"key": "no/such/spot.mp4"}, follow_redirects=False

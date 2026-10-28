@@ -470,6 +470,8 @@ Docker runs the page as its own service, so it is up whenever the stack is:
 | On now | `http://<host>:8099/` |
 | Schedule | `http://<host>:8099/schedule` |
 | Bump review | `http://<host>:8099/bumps` |
+| Commercials | `http://<host>:8099/commercials` |
+| Lines | `http://<host>:8099/lines` |
 | Config | `http://<host>:8099/config` |
 
 Published on `${WEB_PORT:-8099}`, and bound to `0.0.0.0` inside the container —
@@ -484,6 +486,22 @@ nostalgia serve --host 0.0.0.0 --port 8099
 
 Go to **Schedule** (`/schedule`). This is the one place you can change *what the
 channel is* without editing YAML.
+
+Two things worth knowing:
+
+- **Slot sizes follow the content.** A lineup cannot inherit the day files' slot
+  sizes: a 22-minute episode in a 15-minute slot overruns and the planner will
+  refuse to emit. In lineup and shuffle modes the grid is generated from each
+  show's own `slot` family and filled to the millisecond, ending with a shorter
+  slot if the day needs one.
+- **Saving replans immediately.** The page writes `config/programming.yaml` and
+  rebuilds the channel horizon, so the playout files and the guide change under
+  you. Nothing is saved if the form is invalid — the page shows the error and
+  leaves the file alone.
+
+The mode is recorded in a file rather than in a database, so a wipe of
+`data/catalog.db` does not forget your schedule, and `git diff` shows what you
+changed.
 
 ### Every other setting
 
@@ -549,6 +567,117 @@ prints what it found. It never disables anything. Scene-cut counting and silence
 detection were both tried for this and rejected: neither separates a 70-second
 recorded break from a 70-second single spot. Duration is arithmetic — a file longer
 than the longest pod cannot play whole — so it is the only honest signal available.
+
+### Making breaks flow
+
+A break is a run of separate files, and the streamer plays each one as its own
+encode. Every file boundary is a place where a player can stutter, and a spot
+recorded at 4:3 next to one recorded at 16:9 changes the width of the black bars
+at the cut. Two steps remove both causes.
+
+**1. Conform** re-encodes every commercial and bump once, to one shape:
+
+```bash
+docker compose exec scheduler nostalgia conform --jobs 3     # resumable
+docker compose exec scheduler nostalgia conform --status     # how far along, per kind
+```
+
+- **Wide** sources (16:9 and wider) fill a 1280x720 frame. **4:3** sources are shown
+  as 4:3 with the same fixed pillars every time, so the bars do not move between
+  spots. Anything narrower keeps its shape.
+- One frame rate (29.97) with an exact frame count, one codec, and loudness levelled
+  to the same target on a measured pass, so one spot is not louder than the next.
+- A 100 ms dip at each end of a **commercial** so a cut between two spots is a soft
+  cut. Bumps are cut hard, as they were on air.
+- Copies go to `media/derived/conformed/`. Your originals are never touched, and a
+  deleted copy simply falls back to the original. The recipe is hashed into each
+  copy, so changing the frame size or `dip_ms` re-conforms only what is stale.
+  `--force` redoes everything. Expect roughly 12 MB per file.
+- Spots with **no usable audio** (a near-silent compilation slice) are switched off
+  so they do not air as a picture with dead air. They are listed, and the
+  **Commercials** page switches any of them back on. `--keep-silent` skips this.
+
+**2. Merge** joins each break into a single file at playout time:
+
+```yaml
+# config/ads.yaml
+ads:
+  merge_breaks: true    # false = every spot is its own file, as before (a no-op until conformed)
+  dip_ms: 100           # the soft cut at each end of a spot (applied at conform time)
+  merge_max_minutes: 8  # a run longer than this is split rather than built whole
+```
+
+With it on, consecutive conformed spots become **one** stream-copied file, so a
+five-spot break is one item instead of five. The schedule itself is unchanged: the
+guide, the airing history and the per-spot switches still see every spot. Only
+the playout JSON collapses runs. Anything not conformed yet airs file by file, so
+turning this on while a conform is half done is safe. Once the whole commercial
+pool is conformed, trimming a spot to fit a pod is no longer needed and is turned
+off.
+
+Merged files are cached under `media/derived/merged/` and pruned automatically.
+`nostalgia doctor` reports how much of the library is conformed and whether
+merging is on.
+
+The **Commercials** page also groups spots by the recording they were cut from.
+Many archives are numbered slices of one recorded break, which is the usual cause
+of a spot that begins mid-sentence. Switching off a whole family is one click.
+
+### Bump text and music
+
+Generated bump cards can say something and have music under them, instead of a
+silent position word and a title.
+
+```yaml
+# config/bumps.yaml
+bumps:
+  generated:
+    lines: true        # print a sentence from the line bank (false = the plain card)
+    variants: 3        # sentences per show and position, so a card does not repeat
+    music: true        # lay a music bed under the card, if the library has any
+    ollama_url: http://host.docker.internal:11434
+    ollama_model: ""   # blank = the first model Ollama has installed
+```
+
+**Lines** live in `config/bump-lines.yaml`, grouped by when the card airs:
+`INTO` (the show is about to start), `NEXT` (another show follows), `AFTER` (the
+episode just ended), `OUT` (the show is coming back from a break) and `ANY` (says
+nothing about what is on). `{show}` is replaced with the title. A set of original
+seed lines ships in the file.
+
+Every line is checked against what its position may truthfully say. A `NEXT` card
+can never say "you just watched", an `AFTER` card never says "up next", and a line
+that names a different show is refused. The check runs on the seed lines, on
+model proposals, and again at plan time. An `OUT` card airs both at the start of a
+break and when the show returns, so it may talk about coming back but never about
+ending or what is next.
+
+**The Lines page** (`/lines`) asks a local model (Ollama) for more. What comes
+back is filtered by the same check, queued, and only enters the bank when you
+click **Approve**. The model is never in the playout path: generation happens on
+that page, the sentences are plain text in the YAML, and a card renders the same
+way every time. The command line does the same:
+
+```bash
+nostalgia lines generate --position NEXT --count 12
+nostalgia lines list          # what is in the bank
+nostalgia lines check         # run the truth check over the bank
+```
+
+**Music** comes from your own files. Nothing is downloaded and nothing ships with
+the repository:
+
+- Put audio (`mp3`, `m4a`, `wav`, `flac`, `ogg`) in `media/music/`. Subfolders
+  are fine.
+- `nostalgia music harvest` extracts the bed from those of your own archive bumps
+  that are text on black, because their audio is just the music. It never takes
+  audio from show footage, since that is dialogue. Beds are levelled to one
+  loudness, remember the year of the bump they came from, and are listed with
+  `nostalgia music list`.
+
+A card picks its bed deterministically (era first), starts at an offset inside the
+track, and fades in and out. A near-silent bed is dropped rather than boosted into
+hiss.
 
 ### Skipping the episode that is on
 
@@ -695,22 +824,6 @@ off" when they are, so a pool that is sitting there unused says so rather than
 looking like every other card. `nostalgia doctor` reports the same three states:
 in use, switched on with an empty folder (a warning, because nothing would ever
 happen), and a pool ready but switched off.
-
-Two things worth knowing:
-
-- **Slot sizes follow the content.** A lineup cannot inherit the day files' slot
-  sizes: a 22-minute episode in a 15-minute slot overruns and the planner will
-  refuse to emit. In lineup and shuffle modes the grid is generated from each
-  show's own `slot` family and filled to the millisecond, ending with a shorter
-  slot if the day needs one.
-- **Saving replans immediately.** The page writes `config/programming.yaml` and
-  rebuilds the channel horizon, so the playout files and the guide change under
-  you. Nothing is saved if the form is invalid — the page shows the error and
-  leaves the file alone.
-
-The mode is recorded in a file rather than in a database, so a wipe of
-`data/catalog.db` does not forget your schedule, and `git diff` shows what you
-changed.
 
 ## 2. Configure the channel
 

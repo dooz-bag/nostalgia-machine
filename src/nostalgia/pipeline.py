@@ -25,6 +25,7 @@ from .emit import (
     write_playout,
 )
 from .grid import GridError, build_day, is_dst_transition_day
+from .mergebreaks import MergedRun, merge_plan, prune_merged
 from .plan import Plan, PlanContext, PlanError, build_plan
 from .paths import Paths
 from .skip import (
@@ -50,6 +51,9 @@ class BuildResult:
     fallbacks: int = 0
     fallback_reasons: list[str] = field(default_factory=list)
     lineup: Path | None = None
+    merged_runs: int = 0
+    """Break runs written as one file, and ``merged_items`` how many items they hold."""
+    merged_items: int = 0
 
 
 def watermark_card_path(paths: Paths) -> Path:
@@ -319,6 +323,103 @@ def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
     return summary
 
 
+def conform_tools(explicit: str | None = None) -> tuple[str | None, str | None]:
+    """``(ffmpeg, ffprobe)`` for the conform and merge steps."""
+    from .conform import find_tools
+
+    return find_tools(explicit)
+
+
+def conform_params(config: RootConfig):
+    """The conform recipe this config asks for.
+
+    Built from the *encoding* settings, so the library is conformed to the same
+    frame the streamer outputs. A mismatch would leave the streamer rescaling every
+    spot, which is the work conforming exists to remove.
+    """
+    from .conform import ConformParams
+
+    return ConformParams(
+        width=config.encoding.width,
+        height=config.encoding.height,
+        dip_ms=config.ads.dip_ms,
+    )
+
+
+@dataclass
+class ConformReport:
+    done: int = 0
+    skipped: int = 0
+    failed: list[tuple[str, str]] = field(default_factory=list)
+    silent: list[str] = field(default_factory=list)
+
+
+def conform_library(
+    config: RootConfig,
+    catalog: Catalog,
+    paths: Paths,
+    *,
+    kinds: tuple[str, ...] = ("ad", "bump"),
+    jobs: int = 3,
+    limit: int | None = None,
+    force: bool = False,
+    disable_silent: bool = True,
+    on_result=None,
+) -> ConformReport:
+    """Conform every file that is not already up to date, and record the copies.
+
+    Resumable by construction: a file is skipped when its recorded recipe matches and
+    the copy is on disk, so an interrupted run picks up where it stopped and a config
+    change (the dip length, the frame size) re-conforms exactly what it affects.
+    """
+    from .conform import conform_many
+
+    params = conform_params(config)
+    ffmpeg, ffprobe = conform_tools(config.channel.ffmpeg_path)
+    if not ffmpeg or not ffprobe:
+        raise BuildError("conform needs ffmpeg and ffprobe on PATH (or channel.ffmpeg_path)")
+
+    signature = params.signature()
+    if force:
+        queue = [
+            {"key": a.key, "kind": a.kind, "path": a.path}
+            for a in catalog.assets(kinds)
+        ]
+    else:
+        queue = catalog.conform_queue(kinds, signature)
+    if limit:
+        queue = queue[:limit]
+
+    report = ConformReport(skipped=0)
+    if not queue:
+        return report
+
+    def record(result, done, total):
+        if result.ok and result.path is not None:
+            catalog.set_conformed(result.key, result.path, result.duration_ms, result.signature)
+            report.done += 1
+        elif result.silent:
+            report.silent.append(result.key)
+            catalog.clear_conformed(result.key)
+            if disable_silent:
+                catalog.set_disabled(result.key, True)
+        else:
+            report.failed.append((result.key, result.note))
+        if on_result:
+            on_result(result, done, total)
+
+    conform_many(
+        queue,
+        out_root=paths.media("derived", "conformed"),
+        params=params,
+        ffmpeg=ffmpeg,
+        ffprobe=ffprobe,
+        workers=jobs,
+        on_result=record,
+    )
+    return report
+
+
 def _is_video(path: Path) -> bool:
     from .probe import VIDEO_EXTENSIONS
 
@@ -439,6 +540,8 @@ def build(
         )
 
     result = BuildResult()
+    merged_dir = paths.media("derived", "breaks")
+    kept_merged: set[Path] = set()
     emit_paths = EmitPaths(paths.playout_dir, paths.xmltv_dir)
     # Overlay mode only. Burn mode already replaced the paths during scan, so a
     # layer here would double the mark; `plan.watermark_rule` enforces that.
@@ -485,11 +588,28 @@ def build(
         )
 
         if emit:
+            runs: list[MergedRun] = []
+            if config.ads.merge_breaks:
+                runs, merge_warnings = merge_plan(
+                    plan,
+                    merged_dir,
+                    ffmpeg=conform_tools()[0],
+                    max_ms=config.ads.merge_max_minutes * 60_000,
+                )
+                result.warnings.extend(merge_warnings)
+                kept_merged.update(run.path for run in runs)
+                result.merged_runs += len(runs)
+                result.merged_items += sum(run.count for run in runs)
             result.playout_files.append(
-                write_playout(plan, emit_paths, watermark_layer=watermark_layer)
+                write_playout(
+                    plan, emit_paths, watermark_layer=watermark_layer, merged=runs
+                )
             )
 
     if emit:
+        # Every playout was just rewritten, so `kept_merged` is the complete set of
+        # joined files anything still refers to; the rest are stale.
+        prune_merged(merged_dir, kept_merged)
         # One guide for the whole horizon. Writing it per day overwrote the same
         # file each time, so only the *last* day survived -- the stream served,
         # but the schedule started 48 hours in the future and a player showed an
@@ -574,6 +694,44 @@ def _programming_findings(
     return findings
 
 
+def _conform_findings(config: RootConfig, catalog: Catalog) -> list[tuple[str, str, str]]:
+    """How far conforming has got, and whether merging can do anything yet."""
+    stats = catalog.conform_stats(conform_params(config).signature())
+    ads, bumps = stats.get("ad"), stats.get("bump")
+    if not ads or not bumps:
+        return []
+    done = ads["conformed"] + bumps["conformed"]
+    total = ads["total"] + bumps["total"]
+    stale = ads["stale"] + bumps["stale"]
+    merge = config.ads.merge_breaks
+
+    if done == 0:
+        if merge:
+            return [(
+                "warn", "conform",
+                "merge_breaks is on but nothing is conformed, so it has no effect -- "
+                "run 'nostalgia conform' (about 20-90 minutes for a large library)",
+            )]
+        return [(
+            "ok", "conform",
+            f"not conformed (0 of {total}); 'nostalgia conform' gives breaks one picture "
+            f"shape and loudness",
+        )]
+    detail = f"{done} of {total} break files conformed"
+    if stale:
+        detail += f", {stale} out of date (a setting changed -- re-run 'nostalgia conform')"
+    if done < total:
+        # Breaks only merge where *every* piece is conformed, so a partial library
+        # gets partial benefit rather than none -- worth saying plainly.
+        detail += "; breaks only merge where every piece is conformed"
+    level = "ok" if done == total and not stale else "warn"
+    if merge:
+        detail += "; merging on"
+    else:
+        detail += "; set ads.merge_breaks: true to join each break into one file"
+    return [(level, "conform", detail)]
+
+
 def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str, str, str]]:
     """Return ``(level, area, message)`` diagnostics."""
     findings: list[tuple[str, str, str]] = []
@@ -646,6 +804,8 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
     idents = [asset for asset in assets if asset.kind == "ident"]
     extras = [asset for asset in assets if asset.kind == "extra"]
     findings.append(("ok", "library", f"{len(bumps)} bumps, {len(ads)} commercials, {len(idents)} idents"))
+
+    findings.extend(_conform_findings(config, catalog))
 
     # Extras are optional, so they are reported only when the feature is on or a
     # pool exists. A warning about an unused folder on every run is noise.

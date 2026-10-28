@@ -27,6 +27,24 @@ ads:
     - seconds: 90
       count: 1
 
+  # -- smoother breaks --------------------------------------------------------
+  #
+  # Spots were recorded off different networks and tapes, so cutting between them
+  # exposes every difference: the black bars change width, and each spot is a
+  # separate item the player must resync on. `nostalgia conform` fixes the footage
+  # once (one picture shape, one loudness, a dip between spots); merge_breaks then
+  # joins each break into a single file so the player crosses far fewer seams.
+  #
+  # Anything not yet conformed airs as before, so this is safe to turn on early.
+  merge_breaks: true
+
+  # A few frames of black and silence between commercials, like a recorded break.
+  # 0 is a hard cut. Baked in by `conform`: changing it re-conforms the library.
+  dip_ms: 100
+
+  # The longest single merged file. A longer run is split.
+  merge_max_minutes: 8
+
   # -- replacing a whole break with something else ---------------------------
   #
   # Put music videos, DVD extras, station specials -- anything that is not a

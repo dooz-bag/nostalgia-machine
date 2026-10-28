@@ -319,6 +319,44 @@ SETTINGS: tuple[SettingsFile, ...] = (
                 ),
             ),
             Section(
+                "Smooth breaks",
+                "Spots come from different networks and tapes, so cutting between them "
+                "exposes every difference. Run `nostalgia conform` once to give them one "
+                "picture shape, one loudness and a short dip between spots; this joins "
+                "each break into a single file so the player has far fewer seams to cross.",
+                (
+                    Field(
+                        "merge_breaks",
+                        "Join each break into one file",
+                        BOOL,
+                        help="Needs `nostalgia conform` to have run. Anything not conformed "
+                        "still airs normally, so it is safe to turn on early. Cuts the number "
+                        "of playlist boundaries a day from ~840 to ~300.",
+                        default=False,
+                    ),
+                    Field(
+                        "dip_ms",
+                        "Dip between spots (ms)",
+                        INT,
+                        help="A few frames of black and silence between commercials, like a "
+                        "recorded break. 0 is a hard cut. Changing it re-conforms the library "
+                        "the next time you run `nostalgia conform`.",
+                        minimum=0,
+                        maximum=500,
+                        default=100,
+                    ),
+                    Field(
+                        "merge_max_minutes",
+                        "Longest merged break (minutes)",
+                        INT,
+                        help="A longer run is split into several files.",
+                        minimum=1,
+                        maximum=30,
+                        default=8,
+                    ),
+                ),
+            ),
+            Section(
                 "Extras instead of commercials",
                 "Put music videos or DVD extras in media/extras/ and a break can occasionally air "
                 "one instead of spots. Bump slots are never replaced. A replaced break keeps its "
@@ -459,6 +497,47 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         "Force style pack",
                         TEXT,
                         help="Blank picks by air date. A pack name (e.g. 2003) forces one look.",
+                    ),
+                    Field(
+                        "generated.lines",
+                        "Cards say a sentence",
+                        BOOL,
+                        help="Use the approved lines on the Lines page instead of a bare "
+                        "\"NEXT / SHOW TITLE\". With no lines approved this changes nothing.",
+                        default=True,
+                    ),
+                    Field(
+                        "generated.variants",
+                        "Sentences per show and position",
+                        INT,
+                        help="How many different lines each show gets for each position, so "
+                        "a card is not the same twice in a row.",
+                        minimum=1,
+                        maximum=10,
+                        default=3,
+                    ),
+                    Field(
+                        "generated.music",
+                        "Lay a music bed under cards",
+                        BOOL,
+                        help="Uses files in media/music/. Run `nostalgia music harvest` to take "
+                        "beds from the text-on-black bumps in your own archive. With none "
+                        "there, cards are silent.",
+                        default=True,
+                    ),
+                    Field(
+                        "generated.ollama_url",
+                        "Local model address",
+                        TEXT,
+                        help="Where Ollama runs, for proposing new lines. Only the Lines page "
+                        "uses it; rendering never does.",
+                        default="http://host.docker.internal:11434",
+                    ),
+                    Field(
+                        "generated.ollama_model",
+                        "Local model",
+                        TEXT,
+                        help="Blank uses the first model Ollama reports.",
                     ),
                 ),
             ),

@@ -1,0 +1,104 @@
+# What generated bump cards say.
+#
+# A generated card used to print a position word and a title ("NEXT / FUTURAMA").
+# Correct, and as exciting as a train departure board. A real [adult swim] card was
+# a joke told in four seconds: deadpan, terse, a little too honest. These lines are
+# that voice. They are original -- written for this project, not copied from anything
+# that aired.
+#
+# `{show}` is replaced with the show a card is about. A line with no `{show}` is a
+# general card: it is rendered with no subject and can sit next to any show.
+#
+# EVERY LINE IS CHECKED against what its position is allowed to claim, because a
+# card that says something false about the running order is worse than a plain one:
+#
+#   INTO   the show is about to start. May say "stay tuned", "coming up".
+#          May NOT say anything has ended, or is coming back.
+#   NEXT   another show follows this one. May say "next", "after this".
+#          May NOT say anything was watched, or is coming back.
+#   AFTER  the episode has just ended. May say "that was", "you just watched".
+#          May NOT say anything is coming up, next, soon, or returning.
+#   OUT    the show is coming back from a break. May say "we now return", "resuming".
+#          May NOT say anything has ended or is coming up next.
+#   ANY    valid at any moment, so it may claim none of the above. No {show}.
+#
+# `nostalgia lines check` re-runs that check over this file. Lines written by a local
+# model arrive in a queue (the Lines page) and only land here once you approve them.
+#
+# Keep them short -- 16 words at most -- and never use an exclamation mark.
+lines:
+  INTO:
+    - "stay tuned for {show}. it will be on shortly."
+    - "{show} is about to start. nobody has stopped it."
+    - "coming up: {show}. we did not make this decision lightly."
+    - "{show} begins now. please remain seated."
+    - "stay tuned. {show} has been informed."
+    - "{show} starts in a moment. you are still here, which is nice."
+    - "up shortly: {show}. adjust your expectations accordingly."
+    - "{show}, in a moment. we are as surprised as you."
+    - "now loading {show}. it does not take long."
+    - "get comfortable. {show} is happening."
+    - "brace for {show}. gently."
+    - "stay tuned. the alternative is the wall."
+    - "something is about to start. it is probably fine."
+    - "stay tuned. we will wait."
+
+  NEXT:
+    - "next: {show}. we checked. it is real."
+    - "up next: {show}. there is no way to prevent it."
+    - "{show} is next. you are free to leave, but where would you go."
+    - "after this: {show}. it has been scheduled and everything."
+    - "next up: {show}. we have notified no one."
+    - "next on the schedule: {show}. it seemed fine at the time."
+    - "{show} is coming next. try to act natural."
+    - "still ahead: {show}. nothing has gone wrong yet."
+    - "next: {show}. same channel, different feelings."
+    - "{show}, next. we made a note of it."
+    - "next: more of this. it is the same as before but later."
+
+  AFTER:
+    - "you just watched {show}. no one is going to ask how you feel."
+    - "that was {show}. it is over now."
+    - "{show} has ended. you are free to continue existing."
+    - "you have just watched {show}. it will not happen again until it does."
+    - "that was {show}. we apologize to no one."
+    - "{show} is finished. we are as relieved as you."
+    - "thank you for watching {show}. this was not a test."
+    - "{show} has concluded. please carry on with your evening."
+    - "you watched {show}. it is in your records now."
+    - "that was {show}. you were present for it."
+    - "that was it. there is nothing else to say about it."
+
+  OUT:
+    - "we now return to {show}. thank you for your patience, which we did not earn."
+    - "back to {show}. it did not wait for you."
+    - "returning to {show}, already in progress."
+    - "{show} resumes. the break was necessary, officially."
+    - "we now return to {show}. nothing was missed. probably."
+    - "and now, {show} again."
+    - "{show}, resuming. please act like you never left."
+    - "back to {show}. the interruption is complete."
+    - "we now return to the program. you know the one."
+
+  # General cards: safe at any moment, so they say nothing about what ended, what is
+  # next, or what is coming back.
+  ANY:
+    - "this is a channel. you are watching it."
+    - "please do not adjust your set. it is working as intended."
+    - "nothing is wrong. this is just what it looks like."
+    - "we are still here. thank you for noticing."
+    - "this card is brought to you by the card before it."
+    - "no part of this was an accident."
+    - "quality television, by the standards of the hour."
+    - "the management would like you to know that things continue."
+    - "it is late. the programming is aware."
+    - "please remain calm. the schedule has been kept."
+
+# Lines for one show only. Use these for jokes that lean on a character or premise,
+# which would be wrong for any other show. They follow the same position rules.
+#
+# per_show:
+#   aqua-teen-hunger-force:
+#     NEXT:
+#       - "next: {show}. the meat has opinions."
+per_show: {}

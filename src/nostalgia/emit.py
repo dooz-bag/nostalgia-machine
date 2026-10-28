@@ -15,10 +15,13 @@ import os
 from dataclasses import dataclass
 from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable
+from typing import TYPE_CHECKING, Iterable, Sequence
 from xml.sax.saxutils import escape
 
 from .plan import Plan, PlannedItem
+
+if TYPE_CHECKING:
+    from .mergebreaks import MergedRun
 from .timeutil import compact_stamp, from_epoch_ms, rfc3339, tz
 
 PLAYOUT_VERSION = "https://ersatztv.org/playout/version/0.0.7"
@@ -92,16 +95,44 @@ def _zone_hint(plan: Plan) -> str:
     return _ZONE_CACHE.get("name", "America/New_York")
 
 
-def to_playout_json(plan: Plan, *, watermark_layer: dict | None = None) -> dict:
+def to_playout_json(
+    plan: Plan,
+    *,
+    watermark_layer: dict | None = None,
+    merged: "Sequence[MergedRun] | None" = None,
+) -> dict:
     """Serialise a plan to the ErsatzTV Next playout document.
 
     *watermark_layer* is a ready-made ``graphics`` layer (see
     :func:`nostalgia.watermark.graphics_layer`). It is only attached to items the
     planner flagged, so a commercial never gets a programme's corner bug.
+
+    *merged* collapses runs of break items into one entry each. The plan is not
+    touched -- only what the streamer is told changes -- so the guide and the
+    airing history keep seeing every individual spot.
     """
     zone = tz(_zone_hint(plan))
     items = []
-    for item in plan.items:
+    runs = {run.first: run for run in merged or ()}
+    resume_at = 0
+    for index, item in enumerate(plan.items):
+        if index < resume_at:
+            continue
+        run = runs.get(index)
+        if run is not None:
+            last = plan.items[run.last]
+            items.append(
+                {
+                    # `+N` names how many further items this entry swallowed, so a
+                    # merged break is recognisable in the file at a glance.
+                    "id": f"{item.item_id}+{run.count - 1}",
+                    "start": rfc3339(from_epoch_ms(item.start_ms, zone)),
+                    "finish": rfc3339(from_epoch_ms(last.end_ms, zone)),
+                    "source": {"source_type": "local", "path": _seen_by_streamer(run.path)},
+                }
+            )
+            resume_at = run.last + 1
+            continue
         start = from_epoch_ms(item.start_ms, zone)
         finish = from_epoch_ms(item.end_ms, zone)
         if item.lavfi_params:
@@ -129,11 +160,15 @@ def to_playout_json(plan: Plan, *, watermark_layer: dict | None = None) -> dict:
 
 
 def write_playout(
-    plan: Plan, paths: EmitPaths, *, watermark_layer: dict | None = None
+    plan: Plan,
+    paths: EmitPaths,
+    *,
+    watermark_layer: dict | None = None,
+    merged: "Sequence[MergedRun] | None" = None,
 ) -> Path:
     paths.playout_dir.mkdir(parents=True, exist_ok=True)
     target = paths.playout_dir / playout_filename(plan)
-    payload = to_playout_json(plan, watermark_layer=watermark_layer)
+    payload = to_playout_json(plan, watermark_layer=watermark_layer, merged=merged)
     _write_atomic(target, json.dumps(payload, indent=2) + "\n")
     return target
 

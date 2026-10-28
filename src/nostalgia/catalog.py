@@ -39,6 +39,23 @@ from .sidecars import (
 )
 from .sidecars import read as read_tags
 
+def _conformed_playback(row) -> tuple[str | None, int]:
+    """``(path, duration_ms)`` of what actually airs for this row.
+
+    Falls back to the original unless the conformed copy is recorded *and* still on
+    disk, so a deleted ``media/derived/`` degrades to the old behaviour instead of
+    pointing the streamer at a file that is not there.
+    """
+    try:
+        conformed = row["conformed_path"]
+        length = row["conformed_duration_ms"]
+    except (IndexError, KeyError):
+        return None, row["duration_ms"]
+    if conformed and length and Path(conformed).is_file():
+        return str(conformed), int(length)
+    return None, row["duration_ms"]
+
+
 def _bug_from_row(row) -> bool | None:
     """Read ``burned_in_mark`` defensively.
 
@@ -81,6 +98,15 @@ def _migrate(connection: sqlite3.Connection) -> None:
         connection.execute(
             "ALTER TABLE media ADD COLUMN contains_multiple_spots INTEGER"
         )
+    for name, ddl in (
+        ("conformed_path", "TEXT"),
+        ("conformed_duration_ms", "INTEGER"),
+        ("conformed_sig", "TEXT"),
+    ):
+        # NULL for existing rows: nothing has been conformed yet, so the original
+        # airs exactly as before until `nostalgia conform` runs.
+        if name not in columns:
+            connection.execute(f"ALTER TABLE media ADD COLUMN {name} {ddl}")
     connection.execute(
         "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
         (str(SCHEMA_VERSION),),
@@ -88,8 +114,9 @@ def _migrate(connection: sqlite3.Connection) -> None:
     connection.commit()
 
 
-SCHEMA_VERSION = 3
-"""Bumped for ``media.burned_in_mark``, ``disabled`` and ``contains_multiple_spots``.
+SCHEMA_VERSION = 4
+"""Bumped for ``media.burned_in_mark``, ``disabled``, ``contains_multiple_spots`` and
+the ``conformed_*`` trio (a conformed copy that airs *instead of* the original).
 
 An existing catalog is *migrated in place* rather than refused: the new column is
 added by ``ALTER TABLE`` and left NULL, which reads as "not examined yet" and
@@ -133,7 +160,13 @@ CREATE TABLE IF NOT EXISTS media (
     -- 1 when the file holds several commercials back to back. A recorded break
     -- masquerading as one spot is the main reason playback lurches: the pod
     -- arithmetic sees a single 70-second "commercial" and has to cut it.
-    contains_multiple_spots INTEGER
+    contains_multiple_spots INTEGER,
+    -- A conformed copy (one picture shape, one loudness, exact frames) that airs
+    -- in place of the original. The original row keeps its tags, history and
+    -- on/off switch; only what is *played* changes. NULL until `conform` has run.
+    conformed_path TEXT,
+    conformed_duration_ms INTEGER,
+    conformed_sig TEXT
 );
 CREATE INDEX IF NOT EXISTS media_kind  ON media(kind);
 CREATE INDEX IF NOT EXISTS media_show  ON media(show_id, season, episode);
@@ -784,6 +817,77 @@ class Catalog:
             )
         return cursor.rowcount > 0
 
+    def set_disabled_many(self, keys: Sequence[str], disabled: bool) -> int:
+        """Switch many assets on or off in one transaction. Returns how many changed."""
+        value = 1 if disabled else 0
+        with self.transaction() as connection:
+            connection.executemany(
+                "UPDATE media SET disabled = ? WHERE key = ?", [(value, key) for key in keys]
+            )
+            changed = connection.execute("SELECT changes()").fetchone()[0]
+        return int(changed)
+
+    # -- conformed copies --------------------------------------------------
+
+    def set_conformed(self, key: str, path: Path | str, duration_ms: int, signature: str) -> bool:
+        """Record that *key* now has a conformed copy that airs in its place."""
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                "UPDATE media SET conformed_path = ?, conformed_duration_ms = ?, "
+                "conformed_sig = ? WHERE key = ?",
+                (str(path), int(duration_ms), signature, key),
+            )
+        return cursor.rowcount > 0
+
+    def clear_conformed(self, key: str) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                "UPDATE media SET conformed_path = NULL, conformed_duration_ms = NULL, "
+                "conformed_sig = NULL WHERE key = ?",
+                (key,),
+            )
+
+    def conform_queue(self, kinds: Sequence[str], signature: str) -> list[dict]:
+        """Files that still need conforming for *signature*, disabled ones last-skipped.
+
+        A file is up to date only when its recorded signature matches *and* the
+        conformed copy is still on disk -- deleting ``media/derived/`` must simply
+        queue everything again rather than leave the catalog pointing at nothing.
+        """
+        placeholders = ",".join("?" for _ in kinds)
+        rows = self.connect().execute(
+            f"SELECT key, kind, path, conformed_path, conformed_sig FROM media "
+            f"WHERE kind IN ({placeholders}) AND disabled = 0 ORDER BY kind, key",
+            tuple(kinds),
+        ).fetchall()
+        return [
+            {"key": row["key"], "kind": row["kind"], "path": row["path"]}
+            for row in rows
+            if not (
+                row["conformed_sig"] == signature
+                and row["conformed_path"]
+                and Path(row["conformed_path"]).is_file()
+            )
+        ]
+
+    def conform_stats(self, signature: str | None = None) -> dict[str, dict[str, int]]:
+        """Per kind: how many enabled files exist and how many are conformed."""
+        out: dict[str, dict[str, int]] = {}
+        rows = self.connect().execute(
+            "SELECT kind, COUNT(*) AS total, "
+            "SUM(CASE WHEN conformed_path IS NOT NULL THEN 1 ELSE 0 END) AS done, "
+            "SUM(CASE WHEN conformed_path IS NOT NULL AND conformed_sig != ? THEN 1 ELSE 0 END) AS stale "
+            "FROM media WHERE kind IN ('ad','bump','ident','extra') AND disabled = 0 GROUP BY kind",
+            (signature or "",),
+        )
+        for row in rows:
+            out[row["kind"]] = {
+                "total": int(row["total"] or 0),
+                "conformed": int(row["done"] or 0),
+                "stale": int(row["stale"] or 0) if signature else 0,
+            }
+        return out
+
     def set_multi_spot(self, key: str, multi: bool | None) -> bool:
         """Record whether a file holds several commercials back to back."""
         value = None if multi is None else (1 if multi else 0)
@@ -834,11 +938,15 @@ class Catalog:
             brand = None
 
         get = row.__getitem__ if not hasattr(row, "get") else row.get
+        air_path, duration_ms = _conformed_playback(row)
         return Asset(
             key=row["key"],
             path=str(path),
             kind=row["kind"],
-            duration_ms=row["duration_ms"],
+            # A conformed copy has its own, exact length, and the planner has to
+            # sum *that* -- the original's duration is no longer what airs.
+            duration_ms=duration_ms,
+            air_path=air_path,
             subject=subject,
             position=position,
             era_from=era_from,

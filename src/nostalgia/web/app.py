@@ -47,7 +47,8 @@ from .continuity_edit import (
     read_all,
     template_for,
 )
-from .commercials import commercials_body, set_spot_enabled
+from . import lines as lines_web
+from .commercials import commercials_body, set_family_enabled, set_spot_enabled
 from .schedule import (
     ScheduleFormError,
     load_schedule,
@@ -600,7 +601,7 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
 {_test_card(card)}
 <header>
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
-  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/config", "Config")}</nav>
+  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/lines", "Lines")}{nav("/config", "Config")}</nav>
 </header>
 <main>{body}</main>
 <footer>Nostalgia Machine &middot; {standard}</footer>
@@ -990,6 +991,74 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 error=error,
             )
         return _render(_page("Commercials", body, active="/commercials", card=_card(current)))
+
+    @app.get("/lines", response_class=HTMLResponse)
+    def lines_page(saved: str = "", error: str = "") -> Any:
+        current = _reload(config, paths)
+        body = lines_web.lines_body(current, paths, saved=saved, error=error)
+        return _render(_page("Lines", body, active="/lines", card=_card(current)))
+
+    @app.post("/lines/{action}")
+    async def lines_action(action: str, request: Request) -> Any:
+        """Generate, approve or reject bump lines.
+
+        Every outcome is a redirect back to the page with a sentence, including
+        failures: the model being offline is an ordinary state, not a server error.
+        """
+        form_data = await request.form()
+        current = _reload(config, paths)
+        try:
+            if action == "generate":
+                message = lines_web.generate(
+                    current,
+                    paths,
+                    position=str(form_data.get("position") or "NEXT"),
+                    show=str(form_data.get("show") or "") or None,
+                    count=int(str(form_data.get("count") or "12")),
+                )
+            elif action == "approve":
+                message = lines_web.approve(paths, str(form_data.get("id") or ""))
+            elif action == "approve-all":
+                message = lines_web.approve_all(paths)
+            elif action == "reject":
+                message = lines_web.reject(paths, str(form_data.get("id") or ""))
+            elif action == "clear":
+                message = lines_web.clear(paths)
+            else:
+                raise HTTPException(status_code=404, detail=f"no action {action!r}")
+        except HTTPException:
+            raise
+        except (LookupError, ValueError, lines_web.bl.ModelError) as exc:
+            return RedirectResponse("/lines?error=" + quote_plus(str(exc)), status_code=303)
+        return RedirectResponse("/lines?saved=" + quote_plus(message), status_code=303)
+
+    @app.post("/commercials/family/{action}")
+    async def toggle_family(action: str, request: Request) -> Any:
+        """Switch a whole compilation off (or back on) and replan.
+
+        The unit that goes bad is usually the *recording*, not the spot: a worn tape
+        or a station logo in the corner is shared by every slice of it.
+        """
+        if action not in ("disable", "enable"):
+            raise HTTPException(status_code=404, detail=f"no action {action!r}")
+        form_data = await request.form()
+        family = str(form_data.get("family") or "")
+        if not family:
+            return RedirectResponse(
+                "/commercials?error=" + quote_plus("No compilation was named"), status_code=303
+            )
+        with Catalog(paths.catalog) as catalog:
+            try:
+                message = set_family_enabled(catalog, family, enabled=action == "enable")
+            except LookupError as exc:
+                return RedirectResponse(
+                    "/commercials?error=" + quote_plus(str(exc)), status_code=303
+                )
+        built = _replan(config, paths)
+        return RedirectResponse(
+            f"/commercials?saved={quote_plus(message)}&built={quote_plus(built)}",
+            status_code=303,
+        )
 
     @app.post("/commercials/{action}")
     async def toggle_spot(action: str, request: Request) -> Any:

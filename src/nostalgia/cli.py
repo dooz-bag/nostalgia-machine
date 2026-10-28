@@ -46,6 +46,9 @@ def main(argv: list[str] | None = None) -> int:
         "plan": _cmd_plan,
         "emit": _cmd_emit,
         "doctor": _cmd_doctor,
+        "conform": _cmd_conform,
+        "lines": _cmd_lines,
+        "music": _cmd_music,
         "shows": _cmd_shows,
         "review": _cmd_review,
         "bumps": _cmd_bumps,
@@ -108,6 +111,71 @@ def _parser() -> argparse.ArgumentParser:
     _add_common_plan_args(emit_cmd)
 
     sub.add_parser("doctor", help="check config, media and catalog")
+
+    conform_cmd = sub.add_parser(
+        "conform",
+        help="re-encode break footage to one picture shape and loudness, so cuts flow",
+        description=(
+            "Conforms commercials and bumps so the channel does not have to "
+            "reconcile them live: one frame size (4:3 or 16:9, never seven "
+            "widths), one loudness, exact frame counts, and a short dip to black "
+            "between spots. Originals are never touched, and the run is resumable."
+        ),
+    )
+    conform_cmd.add_argument(
+        "--kind",
+        default="ad,bump",
+        help="comma list of: ad, bump, ident, extra (default: ad,bump)",
+    )
+    conform_cmd.add_argument("--jobs", type=int, default=3, help="files encoded at once")
+    conform_cmd.add_argument("--limit", type=int, default=None, help="stop after N files")
+    conform_cmd.add_argument(
+        "--force", action="store_true", help="re-conform files that are already up to date"
+    )
+    conform_cmd.add_argument(
+        "--keep-silent",
+        action="store_true",
+        help="do not switch off commercials with no usable audio (they are reported either way)",
+    )
+    conform_cmd.add_argument(
+        "--status", action="store_true", help="show how much is conformed, then exit"
+    )
+
+    lines_cmd = sub.add_parser(
+        "lines",
+        help="the sentences generated bump cards say",
+        description=(
+            "Generated cards say the lines in config/bump-lines.yaml. A local model "
+            "(Ollama) can propose more; every proposal is checked against what its "
+            "position may truthfully claim, then waits for your approval."
+        ),
+    )
+    lines_sub = lines_cmd.add_subparsers(dest="lines_command", required=True)
+    lines_sub.add_parser("list", help="how many lines each position has, and what is pending")
+    lines_sub.add_parser("check", help="re-check every line in the bank against its position")
+    gen = lines_sub.add_parser("generate", help="ask a local model for new lines")
+    gen.add_argument("--position", default="INTO,NEXT,AFTER,OUT,ANY", help="comma list")
+    gen.add_argument("--show", default=None, help="write lines for one show id (default: general)")
+    gen.add_argument("--count", type=int, default=12, help="lines to ask for per position")
+    gen.add_argument("--model", default=None, help="Ollama model (default: config, else the first)")
+    appr = lines_sub.add_parser("approve", help="move pending lines into the bank")
+    appr.add_argument("--all", action="store_true", help="approve everything pending")
+    appr.add_argument("--id", default=None, help="approve one pending line by id")
+    lines_sub.add_parser("clear", help="discard every pending line")
+
+    music_cmd = sub.add_parser(
+        "music",
+        help="music beds laid under generated bump cards",
+        description=(
+            "Beds come from media/music/ (anything you drop in) and from "
+            "`music harvest`, which extracts the audio of text-on-black bumps in your "
+            "own archive. Nothing is downloaded and nothing is committed."
+        ),
+    )
+    music_sub = music_cmd.add_subparsers(dest="music_command", required=True)
+    music_sub.add_parser("list", help="the beds available")
+    harvest_cmd = music_sub.add_parser("harvest", help="take beds from your own real bumps")
+    harvest_cmd.add_argument("--limit", type=int, default=None, help="look at N bumps only")
 
     shows_cmd = sub.add_parser("shows", help="list shows and episode counts")
     shows_cmd.add_argument("--verbose", action="store_true")
@@ -269,6 +337,215 @@ def _cmd_scan(args, config, paths: Paths) -> int:
     return 0
 
 
+def _cmd_conform(args, config, paths: Paths) -> int:
+    from .conform import CONFORM_KINDS
+    from .pipeline import conform_library, conform_params
+
+    kinds = tuple(part.strip() for part in args.kind.split(",") if part.strip())
+    unknown = [kind for kind in kinds if kind not in CONFORM_KINDS]
+    if unknown:
+        print(f"error: unknown kind(s) {', '.join(unknown)}; choose from {', '.join(CONFORM_KINDS)}", file=sys.stderr)
+        return 2
+
+    signature = conform_params(config).signature()
+    with Catalog(paths.catalog) as catalog:
+        stats = catalog.conform_stats(signature)
+        print("conformed library:")
+        for kind in CONFORM_KINDS:
+            row = stats.get(kind)
+            if row:
+                stale = f", {row['stale']} stale" if row["stale"] else ""
+                print(f"  {kind:<6} {row['conformed']:>4} of {row['total']:<4}{stale}")
+        if args.status:
+            merge = "on" if config.ads.merge_breaks else "off"
+            print(f"\nmerge_breaks is {merge}; frame {config.encoding.width}x{config.encoding.height}, dip {config.ads.dip_ms} ms")
+            return 0
+
+        def progress(result, done, total):
+            if done % 25 == 0 or done == total:
+                print(f"  {done}/{total}", flush=True)
+            if not result.ok and not result.silent:
+                print(f"  failed {result.key}: {result.note}", file=sys.stderr)
+
+        print(f"\nconforming {', '.join(kinds)} (frame {config.encoding.width}x{config.encoding.height}, dip {config.ads.dip_ms} ms)")
+        report = conform_library(
+            config,
+            catalog,
+            paths,
+            kinds=kinds,
+            jobs=max(1, args.jobs),
+            limit=args.limit,
+            force=args.force,
+            disable_silent=not args.keep_silent,
+            on_result=progress,
+        )
+
+    print(f"\nconformed {report.done} file(s)")
+    if report.silent:
+        verb = "reported" if args.keep_silent else "switched off"
+        print(f"{len(report.silent)} commercial(s) with no usable audio {verb}:")
+        for key in report.silent[:15]:
+            print(f"  {key}")
+        if len(report.silent) > 15:
+            print(f"  ... and {len(report.silent) - 15} more")
+        if not args.keep_silent:
+            print("  re-enable any of them from the Commercials page")
+    if report.failed:
+        print(f"{len(report.failed)} file(s) failed and still air as the original:")
+        for key, note in report.failed[:10]:
+            print(f"  {key}: {note}")
+    if report.done and not config.ads.merge_breaks:
+        print(
+            "\nnext: set ads.merge_breaks: true (config page or ads.yaml), then emit, "
+            "to join each break into one file"
+        )
+    return 0 if not report.failed else 1
+
+
+def _lines_paths(paths: Paths):
+    from .bumplines import CandidateStore
+
+    return paths.config_dir / "bump-lines.yaml", CandidateStore(paths.data_dir / "bump-line-candidates.json")
+
+
+def _cmd_lines(args, config, paths: Paths) -> int:
+    from . import bumplines as bl
+
+    bank_file, store = _lines_paths(paths)
+    bank = bl.load_bank(bank_file)
+    titles = [show.title for show in config.shows.values()]
+
+    if args.lines_command == "list":
+        print(f"bank: {bank_file}")
+        for position in bl.POSITIONS:
+            own = len(bank.lines.get(position, ()))
+            show_specific = sum(len(t.get(position, ())) for t in bank.per_show.values())
+            pending = len(store.pending(position))
+            extra = f" + {show_specific} show-specific" if show_specific else ""
+            wait = f", {pending} pending approval" if pending else ""
+            print(f"  {position:<6} {own:>3}{extra}{wait}")
+        return 0
+
+    if args.lines_command == "check":
+        bad = 0
+        for position, items in bank.lines.items():
+            for text in items:
+                for problem in bl.check_line(position, text, other_titles=titles):
+                    bad += 1
+                    print(f"  {position}: {text!r}\n      {problem}")
+        for show, table in bank.per_show.items():
+            for position, items in table.items():
+                for text in items:
+                    for problem in bl.check_line(position, text, other_titles=titles):
+                        bad += 1
+                        print(f"  {show}/{position}: {text!r}\n      {problem}")
+        print("every line is acceptable for its position" if not bad else f"\n{bad} problem(s)")
+        return 0 if not bad else 1
+
+    if args.lines_command == "clear":
+        print(f"discarded {store.clear()} pending line(s)")
+        return 0
+
+    if args.lines_command == "approve":
+        if not args.all and not args.id:
+            print("error: give --all or --id <id>", file=sys.stderr)
+            return 2
+        approved = 0
+        for candidate in store.pending():
+            if not args.all and candidate.id != args.id:
+                continue
+            store.remove(candidate.id)
+            if bl.append_line(bank_file, candidate.position, candidate.text, show=candidate.show):
+                approved += 1
+        print(f"approved {approved} line(s) into {bank_file.name}")
+        return 0
+
+    # generate
+    generated = config.bumps.generated
+    try:
+        url, models = bl.find_ollama(generated.ollama_url)
+    except bl.ModelError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    model = args.model or generated.ollama_model or (models[0] if models else "")
+    if not model:
+        print("error: Ollama has no models installed; `ollama pull` one first", file=sys.stderr)
+        return 1
+
+    show_title = config.shows[args.show].title if args.show in config.shows else None
+    if args.show and show_title is None:
+        print(f"error: unknown show {args.show!r}", file=sys.stderr)
+        return 2
+    positions = [p.strip().upper() for p in args.position.split(",") if p.strip()]
+    print(f"asking {model} at {url}")
+    queued = 0
+    for position in positions:
+        if position not in bl.POSITIONS:
+            print(f"error: unknown position {position!r}", file=sys.stderr)
+            return 2
+        try:
+            result = bl.propose(
+                position, bank=bank, url=url, model=model, count=args.count,
+                show=args.show, show_title=show_title, other_titles=titles,
+                existing=[c.text for c in store.pending(position)],
+            )
+        except bl.ModelError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
+        for text in result.accepted:
+            if store.add(position, text, show=args.show):
+                queued += 1
+        print(f"  {position:<6} {len(result.accepted):>2} accepted, {len(result.rejected):>2} rejected by the truth guard")
+        for text, problems in result.rejected[:2]:
+            print(f"           x {text!r}: {problems[0]}")
+    print(f"\n{queued} line(s) waiting for your approval: the Lines page, or `nostalgia lines approve --all`")
+    return 0
+
+
+def _cmd_music(args, config, paths: Paths) -> int:
+    from .conform import find_tools
+    from .music import harvest, load_library, music_roots
+
+    media_root = paths.media()
+    roots = music_roots(media_root)
+    harvest_dir = media_root / "derived" / "music" / "harvested"
+    ffmpeg, ffprobe = find_tools(config.channel.ffmpeg_path)
+
+    if args.music_command == "list":
+        library = load_library(roots, ffprobe=ffprobe)
+        if not library:
+            print(f"no beds in {roots[0]}\n  drop audio files there, or run `nostalgia music harvest`")
+            return 0
+        print(f"{len(library.beds)} bed(s)")
+        for bed in library.beds:
+            era = f" [{bed.era}]" if bed.era else ""
+            where = next((r for r in roots if r in bed.path.parents), bed.path.parent)
+            print(f"  {bed.duration_s:5.1f}s{era:<8} {bed.path.relative_to(where).as_posix()}")
+        return 0
+
+    if not ffmpeg:
+        print("error: harvest needs ffmpeg", file=sys.stderr)
+        return 1
+    with Catalog(paths.catalog) as catalog:
+        bumps = catalog.assets(("bump",))
+    print(f"looking at {len(bumps)} bump(s) for text cards with a music bed ...")
+
+    def progress(done, total):
+        if done % 50 == 0 or done == total:
+            print(f"  {done}/{total}", flush=True)
+
+    report = harvest(
+        bumps, harvest_dir, ffmpeg=ffmpeg, ffprobe=ffprobe,
+        limit=args.limit, on_progress=progress,
+    )
+    print(f"\ntook {len(report.taken)} bed(s) from {report.scanned} bump(s)")
+    print(f"  {report.skipped} left alone (show footage, silent, or already taken)")
+    for key, note in report.failed[:5]:
+        print(f"  failed {key}: {note}", file=sys.stderr)
+    print(f"\nbeds are in {harvest_dir}; delete any you do not like")
+    return 0
+
+
 def _cmd_plan(args, config, paths: Paths) -> int:
     return _run_build(args, config, paths, emit=args.emit, show=args.show, quiet=args.quiet)
 
@@ -394,6 +671,12 @@ def _run_build(args, config, paths: Paths, *, emit: bool, show: bool, quiet: boo
             )
 
     if emit:
+        if result.merged_runs:
+            print(
+                f"\nmerged {result.merged_items} break item(s) into {result.merged_runs} "
+                f"file(s): {result.merged_items - result.merged_runs} fewer playlist "
+                f"boundaries"
+            )
         print(f"\nwrote {len(result.playout_files)} playout file(s) to {paths.playout_dir}")
         print(f"wrote {len(result.xmltv_files)} guide file(s) to {paths.xmltv_dir}")
         if result.lineup:
