@@ -644,14 +644,28 @@ the whole roster — that also keeps working as you add shows.
 
 Sometimes a break should not be commercials at all. Put music videos, DVD extras,
 station specials — anything that is not a spot — in `media/extras/` and a break can
-occasionally air one of those instead:
+occasionally air one of those instead.
+
+It is a **yes/no switch** first, and a rate second:
 
 ```yaml
 # config/ads.yaml
 ads:
-  extras_chance: 0.15              # ~1 break in 7; 0.0 (default) never does it
-  extras_cooldown_hours: 24        # no extra repeats inside a day
+  extras_enabled: true      # false (default) = full commercials at every break
+  extras_chance: 0.15       # ~1 break in 7. Only read when the switch is on
+  extras_cooldown_hours: 24 # no extra repeats inside a day
 ```
+
+Tick **Air extras instead of some commercial breaks** on the config page to say
+yes; leave it unticked and the channel operates normally with full commercials at
+every break. Leaving `extras_chance` at its default gives you one break in seven
+without having to pick a number.
+
+The two settings are separate on purpose: "do I want this at all" is a yes/no, and
+"how often" is a rate you tune afterwards. Folding them into one number meant
+turning the feature back off destroyed the rate you had chosen. With the switch off,
+`extras_chance` is ignored entirely — so you can leave a tuned rate in place and
+flip the feature on and off without losing it.
 
 Subfolders are labels, not subjects, so `media/extras/music-videos/` and
 `media/extras/dvd-extras/` both work. Each file is one *piece*: it airs whole. A
@@ -676,7 +690,11 @@ What the roll does and does not do:
   commercials and says so in the plan warnings.
 
 The **Commercials** page lists the extras pool with a switch per file and states
-how often breaks are being replaced, so a bad rip can be taken out with one click.
+whether extras are on and how often breaks are being replaced — including "switched
+off" when they are, so a pool that is sitting there unused says so rather than
+looking like every other card. `nostalgia doctor` reports the same three states:
+in use, switched on with an empty folder (a warning, because nothing would ever
+happen), and a pool ready but switched off.
 
 Two things worth knowing:
 

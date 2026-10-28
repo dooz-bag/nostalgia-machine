@@ -27,7 +27,7 @@ from nostalgia.paths import Paths
 from nostalgia.pipeline import day_config_for, scan
 from nostalgia.plan import PlanContext, _extras_roll, _roll_extras, build_plan
 
-from fixtures import build_library
+from fixtures import FixtureLibrary, build_library
 
 DAY = date(2003, 6, 4)
 
@@ -106,10 +106,19 @@ continuity:
 """
 
 
-def _context(root: Path, *, extras_chance: float, with_extras: bool = True) -> PlanContext:
+def _library_and_context(
+    root: Path,
+    *,
+    extras_chance: float,
+    with_extras: bool = True,
+    extras_enabled: bool = True,
+) -> tuple[FixtureLibrary, PlanContext]:
     library = build_library(root, with_extras=with_extras)
     (library.config / "ads.yaml").write_text(
-        f"ads:\n  extras_chance: {extras_chance}\n  extras_cooldown_hours: 24\n",
+        "ads:\n"
+        f"  extras_enabled: {str(extras_enabled).lower()}\n"
+        f"  extras_chance: {extras_chance}\n"
+        "  extras_cooldown_hours: 24\n",
         encoding="utf-8",
     )
     (library.config / "continuity.yaml").write_text(_CONTINUITY.lstrip(), encoding="utf-8")
@@ -118,9 +127,24 @@ def _context(root: Path, *, extras_chance: float, with_extras: bool = True) -> P
     paths.ensure_runtime_dirs()
     catalog = Catalog(paths.catalog)
     scan(config, catalog, paths)
-    return PlanContext.load(
+    return library, PlanContext.load(
         config, catalog, config_dir=paths.config_dir, media_root=paths.media_root
     )
+
+
+def _context(
+    root: Path,
+    *,
+    extras_chance: float,
+    with_extras: bool = True,
+    extras_enabled: bool = True,
+) -> PlanContext:
+    return _library_and_context(
+        root,
+        extras_chance=extras_chance,
+        with_extras=with_extras,
+        extras_enabled=extras_enabled,
+    )[1]
 
 
 def _plan(context: PlanContext):
@@ -131,12 +155,116 @@ def _plan(context: PlanContext):
 
 @pytest.fixture()
 def off_context(tmp_path: Path) -> PlanContext:
-    return _context(tmp_path / "off", extras_chance=0.0)
+    """Full commercials: the master switch is off."""
+    return _context(tmp_path / "off", extras_chance=1.0, extras_enabled=False)
 
 
 @pytest.fixture()
 def on_context(tmp_path: Path) -> PlanContext:
-    return _context(tmp_path / "on", extras_chance=1.0)
+    return _context(tmp_path / "on", extras_chance=1.0, extras_enabled=True)
+
+
+# -- the master switch ------------------------------------------------------
+
+
+def test_the_switch_off_means_full_commercials_even_with_a_live_rate(
+    tmp_path: Path,
+):
+    """The question the owner actually asks -- "do I want this at all" -- must win
+    over the rate. A chance of 1.0 with the switch off airs no extras at all."""
+    context = _context(tmp_path, extras_chance=1.0, extras_enabled=False)
+    plan = _plan(context)
+    assert not [item for item in plan.items if item.kind == "extra"]
+    assert not plan.validate()
+
+
+def test_the_switch_on_at_the_default_rate_airs_extras(tmp_path: Path):
+    """Turning the switch on without choosing a rate still does something."""
+    from nostalgia.config import DEFAULT_EXTRAS_CHANCE
+
+    assert DEFAULT_EXTRAS_CHANCE > 0
+    context = _context(tmp_path, extras_chance=DEFAULT_EXTRAS_CHANCE)
+    assert [item for item in _plan(context).items if item.kind == "extra"]
+
+
+def test_the_rate_is_honoured_only_when_the_switch_is_on(tmp_path: Path):
+    """One place combines the two settings, so no call site can half-honour them."""
+    on = _context(tmp_path / "a", extras_chance=0.3, extras_enabled=True).root.ads
+    off = _context(tmp_path / "b", extras_chance=0.3, extras_enabled=False).root.ads
+    assert on.extras_rate == 0.3
+    assert off.extras_rate == 0.0
+
+
+def test_a_quoted_no_is_read_as_no(tmp_path: Path):
+    """`enabled: "no"` must not be truthy just because it is a non-empty string."""
+    library = build_library(tmp_path, with_extras=True)
+    (library.config / "ads.yaml").write_text(
+        'ads:\n  extras_enabled: "no"\n  extras_chance: 1.0\n', encoding="utf-8"
+    )
+    assert load_config(library.config).ads.extras_enabled is False
+
+
+@pytest.mark.parametrize("text", ["yes", "true", "on", "1"])
+def test_yes_spellings_turn_it_on(tmp_path: Path, text: str):
+    library = build_library(tmp_path, with_extras=True)
+    (library.config / "ads.yaml").write_text(
+        f'ads:\n  extras_enabled: "{text}"\n  extras_chance: 1.0\n', encoding="utf-8"
+    )
+    assert load_config(library.config).ads.extras_enabled is True
+
+
+# -- what `doctor` says about it --------------------------------------------
+
+
+def _extras_findings(
+    context: PlanContext, library: FixtureLibrary
+) -> list[tuple[str, str]]:
+    """The `extras` findings `doctor` would print.
+
+    Reads the *catalog*, exactly as `doctor` does, so "the folder is empty" has to
+    be simulated with a library that genuinely has no `media/extras/` -- clearing
+    `context.extras` would test a state the running channel never reaches.
+    """
+    from nostalgia.pipeline import doctor
+
+    findings = doctor(context.root, context.catalog, Paths(library.root))
+    return [(level, message) for level, area, message in findings if area == "extras"]
+
+
+def test_doctor_reports_extras_in_use(tmp_path: Path):
+    library, context = _library_and_context(tmp_path, extras_chance=0.15)
+    findings = _extras_findings(context, library)
+    assert findings and findings[0][0] == "ok"
+    assert "15% of breaks replaced" in findings[0][1]
+
+
+def test_doctor_warns_when_switched_on_with_an_empty_folder(tmp_path: Path):
+    """A switch nobody can see the effect of is the worst state to leave a
+    channel in: every break looks normal and nothing says why."""
+    library, context = _library_and_context(
+        tmp_path, extras_chance=0.15, with_extras=False
+    )
+    findings = _extras_findings(context, library)
+    assert findings and findings[0][0] == "warn"
+    assert "media/extras/ is empty" in findings[0][1]
+
+
+def test_doctor_says_nothing_when_switched_off_with_no_pool(tmp_path: Path):
+    """Switched off is the default. Warning about it on every run would be noise
+    on a channel that has never used the feature."""
+    library, context = _library_and_context(
+        tmp_path, extras_chance=0.15, extras_enabled=False, with_extras=False
+    )
+    assert _extras_findings(context, library) == []
+
+
+def test_doctor_notes_a_pool_that_is_ready_but_off(tmp_path: Path):
+    library, context = _library_and_context(
+        tmp_path, extras_chance=0.15, extras_enabled=False
+    )
+    findings = _extras_findings(context, library)
+    assert findings and findings[0][0] == "ok"
+    assert "switched off" in findings[0][1]
 
 
 # -- the roll ---------------------------------------------------------------

@@ -144,9 +144,10 @@ are mutually exclusive per segment, and `config` rejects a template that sets bo
 
 ## Replacing a break is a swap, not a reschedule
 
-`ads.extras_chance` lets a break air something from `media/extras/` — a music
-video, a DVD extra — instead of commercials. The whole feature is one function,
-`_roll_extras` in `plan.py`, and the design rests on three decisions:
+`ads.extras_enabled` lets a break air something from `media/extras/` — a music
+video, a DVD extra — instead of commercials, at the rate `ads.extras_chance`
+sets. The whole feature is one function, `_roll_extras` in `plan.py`, and the
+design rests on four decisions:
 
 * **It swaps the filler, not the slot.** The replaced pod keeps its own `share` or
   `seconds`, so the break is the same length and the grid is untouched. Nothing
@@ -163,6 +164,13 @@ video, a DVD extra — instead of commercials. The whole feature is one function
   returns `None` and the caller airs the commercials it was going to air anyway.
   Trimming a music video to hit a booking length is precisely the artefact the
   extras feature exists to remove.
+* **One place combines on/off with how-often.** `AdsConfig.extras_rate` returns
+  the chance when the switch is on and `0.0` when it is off, and every caller
+  reads *that* rather than `extras_chance`. Two settings that must agree at every
+  call site is how a feature ends up half working — a switch honoured in the
+  planner and forgotten in a diagnostic, or the reverse. `0.0` also makes "off"
+  and "rate happens to be zero" the same value downstream, so there is no second
+  branch to keep in step.
 
 Two moments are excluded on purpose. **Bump segments** are continuity, and the
 positional rules in `bumps.py` depend on them staying where the template put them.

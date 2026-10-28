@@ -325,16 +325,25 @@ SETTINGS: tuple[SettingsFile, ...] = (
                 "own length, so the next programme still starts on time.",
                 (
                     Field(
+                        "extras_enabled",
+                        "Air extras instead of some commercial breaks",
+                        BOOL,
+                        help="Off (the default) means operate normally with full commercials at "
+                        "every break. On replaces roughly one break in seven with something from "
+                        "media/extras/, at the rate below.",
+                        default=False,
+                    ),
+                    Field(
                         "extras_chance",
                         "Chance of an extras break",
                         FLOAT,
-                        help="Per break. 0.15 is roughly one break in seven, 0.2 is one in five, "
-                        "0.0 never does it. The roll is seeded from the date and slot number, so "
-                        "the same day always produces the same breaks.",
+                        help="Only used when the switch above is on. 0.15 is roughly one break in "
+                        "seven, 0.2 is one in five. The roll is seeded from the date and the "
+                        "break's position, so the same day always produces the same breaks.",
                         minimum=0.0,
                         maximum=1.0,
                         step=0.01,
-                        default=0.0,
+                        default=0.15,
                     ),
                     Field(
                         "extras_cooldown_hours",

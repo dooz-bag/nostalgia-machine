@@ -339,11 +339,26 @@ def _extras_section(config: RootConfig, catalog: Catalog) -> str:
     """
     extras = catalog.assets(("extra",), include_disabled=True)
     chance = config.ads.extras_chance
-    dial = (
-        f"One break in {round(1 / chance)} is replaced"
-        if chance > 0
-        else "Off &mdash; every break airs commercials"
-    )
+    if not config.ads.extras_enabled:
+        # Off is a deliberate state, not a misconfiguration: say how to turn it on
+        # rather than only that it is off.
+        dial = "Switched off &mdash; every break airs full commercials"
+        advice = (
+            "Turn it on with <b>Air extras instead of some commercial breaks</b> "
+            "on the config page."
+        )
+    elif chance <= 0:
+        dial = "Switched on, but the chance is 0% &mdash; every break airs full commercials"
+        advice = "Raise <b>Chance of an extras break</b> on the config page."
+    else:
+        dial = f"On &mdash; one break in {round(1 / chance)} is replaced"
+        advice = (
+            "A replaced break keeps its own length, so the next programme still "
+            "starts on time; if the chosen piece is shorter than the break, spots "
+            "top it up. Bump slots are never replaced, and neither is a break in "
+            "the middle of a show. Switching one off here takes it out of the "
+            "pool at the next replan."
+        )
 
     rows: list[str] = []
     for asset in sorted(extras, key=lambda a: (a.duration_ms, a.key)):
@@ -366,18 +381,15 @@ def _extras_section(config: RootConfig, catalog: Catalog) -> str:
     if not extras:
         return f"""<div class="card">
   <p class="label">Extras instead of commercials</p>
-  <p class="empty">No extras catalogued. Put music videos, DVD extras or anything
-  else that is not a spot in <span class="mono">media/extras/</span> and rescan,
-  then set <span class="mono">ads.extras_chance</span> on the config page.</p>
+  <p class="hint"><b>{dial}</b>. {advice}</p>
+  <p class="empty">No extras catalogued yet. Put music videos, DVD extras or
+  anything else that is not a spot in <span class="mono">media/extras/</span> and
+  rescan; they appear here with a switch each.</p>
 </div>"""
 
     return f"""<div class="card">
   <p class="label">Extras instead of commercials</p>
-  <p class="hint">  <b>{dial}</b> ({chance:.0%} chance). A replaced break keeps
-  its own length, so the next programme still starts on time; if the chosen piece
-  is shorter than the break, spots top it up. Bump slots are never replaced, and
-  neither is a break in the middle of a show. Switching one off here takes it out
-  of the pool at the next replan.</p>
+  <p class="hint"><b>{dial}</b>. {advice}</p>
   <table>
     <thead><tr><th>File</th><th>Length</th><th></th></tr></thead>
     <tbody>{''.join(rows)}</tbody>

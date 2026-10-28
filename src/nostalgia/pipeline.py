@@ -649,22 +649,33 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
 
     # Extras are optional, so they are reported only when the feature is on or a
     # pool exists. A warning about an unused folder on every run is noise.
-    if extras:
+    if config.ads.extras_enabled and extras:
         findings.append(
             (
                 "ok",
                 "extras",
                 f"{len(extras)} extra(s) in media/extras/; "
-                f"{config.ads.extras_chance:.0%} of breaks replaced with one",
+                f"{config.ads.extras_rate:.0%} of breaks replaced with one",
             )
         )
-    elif config.ads.extras_chance > 0:
+    elif config.ads.extras_enabled:
         findings.append(
             (
                 "warn",
                 "extras",
-                f"ads.extras_chance is {config.ads.extras_chance:.0%} but media/extras/ "
-                f"is empty -- every break will air commercials",
+                f"ads.extras_enabled is on but media/extras/ is empty -- every "
+                f"break will air commercials; add files or switch it off",
+            )
+        )
+    elif extras:
+        # Switched off with a pool present is a deliberate state, not a problem:
+        # the owner has the files ready and has chosen full commercials for now.
+        findings.append(
+            (
+                "ok",
+                "extras",
+                f"{len(extras)} extra(s) ready in media/extras/, switched off -- "
+                f"set ads.extras_enabled: true to use them",
             )
         )
 

@@ -33,9 +33,14 @@ ads:
   # spot -- in media/extras/ and a break can occasionally air one instead of
   # commercials. Bump slots are never replaced: they are continuity, not filler.
   #
-  # Chance is per *break*, and a 30-minute template has two or three of them, so
-  # 0.15 is roughly one break in seven and 0.2 is one in five. 0.0 (the default)
-  # never does it.
+  # The master switch. false (the default) means operate normally with full
+  # commercials at every break; extras_chance is ignored entirely. true means a
+  # break can occasionally air something from media/extras/ instead.
+  extras_enabled: false
+
+  # How often, when the switch above is on. Per *break*, and a 30-minute template
+  # has two or three of them, so 0.15 is roughly one break in seven and 0.2 is one
+  # in five. Ignored while extras_enabled is false.
   #
   # The roll is seeded from the date, the slot and the break's position, so the
   # same day always produces the same breaks. Editing a continuity template does
@@ -47,7 +52,7 @@ ads:
   # A replaced break keeps its own length: the extra fills the budget the
   # commercials would have used, so the next programme still starts on time. If
   # the chosen extra is shorter than the break, spots top it up.
-  extras_chance: 0.0
+  extras_chance: 0.15
 
   # No extra repeats within this window. Longer than the commercial cooldown on
   # purpose -- the extras pool is small, and the same music video three times in

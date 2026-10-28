@@ -731,11 +731,13 @@ def _plan_slot(
     # a template cannot reshuffle which breaks are special -- and so a rebuild
     # reproduces the day exactly.
     extra_pool: list[Asset] = []
-    if context.extras and extra_tracker is not None:
+    # `extras_rate` is 0.0 whenever the master switch is off, so there is no
+    # separate "is it enabled" test here to drift out of step with the config.
+    if context.extras and extra_tracker is not None and root.ads.extras_rate > 0:
         cooling = extra_tracker.cooling([], slot.start_ms)
         extra_pool = [asset for asset in context.extras if asset.key not in cooling]
         rolled = _roll_extras(
-            plan.day, slot.index, script.specs, chance=root.ads.extras_chance
+            plan.day, slot.index, script.specs, chance=root.ads.extras_rate
         )
         if any(spec.kind == "extra" for spec in rolled):
             if extra_pool:

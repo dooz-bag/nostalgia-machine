@@ -115,6 +115,15 @@ class BumpConfig(_Model):
     generated: BumpGeneratedConfig = Field(default_factory=BumpGeneratedConfig)
 
 
+DEFAULT_EXTRAS_CHANCE = 0.15
+"""The rate used when extras are switched on without choosing one.
+
+Roughly one break in seven. Deliberately a rate a viewer notices without it
+becoming the channel's format -- the point is an occasional surprise, not a
+music-video block.
+"""
+
+
 class AdPodTarget(_Model):
     seconds: int = Field(gt=0)
     count: int = Field(gt=0)
@@ -140,14 +149,46 @@ class AdsConfig(_Model):
         ]
     )
 
-    extras_chance: float = Field(default=0.0, ge=0.0, le=1.0)
-    """How often a break's commercials are replaced by something from ``media/extras/``.
+    extras_enabled: bool = False
+    """The master switch: air extras instead of commercials, or do not.
 
-    ``0.0`` (the default) never does, so nothing changes for an existing channel.
-    ``0.15`` swaps roughly one break in seven; ``0.2`` one in five. The roll is
-    per *slot*, seeded from ``(day, slot index)``, so it is deterministic: the same
-    date always produces the same breaks, and a rebuild does not reshuffle which
-    breaks were replaced.
+    ``false`` (the default) means **operate normally with full commercials** --
+    ``extras_chance`` is ignored entirely, so a channel that has never heard of this
+    feature behaves exactly as it did before the feature existed.
+
+    ``true`` means a break can occasionally air something from ``media/extras/``
+    instead of spots, at the rate ``extras_chance`` sets. Left at its default that
+    is one break in seven, so "yes, do random extras" is one word.
+
+    An explicit switch rather than "``chance: 0`` means off": the two questions are
+    genuinely different. "Do I want this at all" is a yes/no, and "how often" is a
+    rate you tune afterwards -- folding them into one number meant turning the
+    feature back off destroyed the rate you had chosen.
+    """
+
+    @field_validator("extras_enabled", mode="before")
+    @classmethod
+    def _forgive_yes_no(cls, value: Any) -> Any:
+        # PyYAML already reads a bare `yes`/`no` as a boolean, but a *quoted*
+        # `"yes"` stays a string -- and `enabled: "no"` being truthy would turn the
+        # feature on for someone who wrote exactly what they meant.
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in ("yes", "y", "on", "true", "1"):
+                return True
+            if text in ("no", "n", "off", "false", "0", ""):
+                return False
+        return value
+
+    extras_chance: float = Field(default=DEFAULT_EXTRAS_CHANCE, ge=0.0, le=1.0)
+    """How often a break's commercials are replaced, when ``extras_enabled`` is on.
+
+    ``0.15`` (the default) swaps roughly one break in seven; ``0.2`` one in five.
+    Ignored entirely when ``extras_enabled`` is false.
+
+    The roll is per *break*, seeded from ``(day, slot index, break position)``, so
+    it is deterministic: the same date always produces the same breaks, and a
+    rebuild does not reshuffle which breaks were replaced.
 
     A replaced break keeps its own length -- the extras fill exactly the budget the
     commercials would have used -- so this changes *what* airs in a break, never
@@ -166,6 +207,17 @@ class AdsConfig(_Model):
     nature -- a handful of music videos -- and airing the same one three times in
     an evening is the most obvious tell that a robot built the schedule.
     """
+
+    @property
+    def extras_rate(self) -> float:
+        """The chance a break is replaced, with the master switch applied.
+
+        The one place the two settings are combined. Callers ask for the *rate*
+        rather than reading ``extras_chance`` directly, so "switched off" cannot be
+        forgotten at one call site and honoured at another -- the kind of split
+        that produces a feature that half works.
+        """
+        return self.extras_chance if self.extras_enabled else 0.0
 
 
 class WatermarkConfig(_Model):
@@ -687,6 +739,7 @@ __all__ = [
     "AdPodTarget",
     "AdsConfig",
     "BreakSlot",
+    "DEFAULT_EXTRAS_CHANCE",
     "BumpConfig",
     "BumpGeneratedConfig",
     "ChannelConfig",
