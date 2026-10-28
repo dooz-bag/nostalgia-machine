@@ -1,0 +1,59 @@
+name: tests
+
+# The suite is the project's main claim to correctness -- determinism, the grid
+# invariant and the bump-position rules are pinned by tests rather than by prose.
+# Running it on every push is what makes that claim checkable by someone who has
+# just cloned the repo.
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 is what the Dockerfile ships, so it is the version that actually
+        # runs the channel. 3.13 is the next one a user is likely to have.
+        python-version: ["3.12", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # ffmpeg is only needed by the tests that shell out to it; the rest read
+      # durations from .json sidecars. Installing it keeps the suite honest
+      # rather than skipping those cases.
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+
+      # `[web]` is not optional here. The web tests use
+      # `pytest.importorskip("fastapi.testclient")`, so without it they skip
+      # silently and the run reports green while testing less than it claims.
+      # `[tag]` is deliberately omitted: OCR needs the tesseract binary, and
+      # `autotag.available()` already degrades cleanly without it.
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[web,dev]"
+
+      - name: Test
+        run: python -m pytest -q
+
+      # A silent skip is the failure mode this job exists to catch: a green run
+      # that quietly tested nothing. Fail if the web tests did not actually run.
+      - name: Check the web tests were not skipped
+        run: |
+          python -m pytest tests/test_commercials_web.py tests/test_schedule_web.py \
+            -q -rs --no-header | tee /tmp/web.txt
+          if grep -qi "skipped" /tmp/web.txt; then
+            echo "::error::web tests were skipped -- the [web] extra did not install"
+            exit 1
+          fi

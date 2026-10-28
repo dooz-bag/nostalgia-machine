@@ -8,6 +8,12 @@ show they sit next to.
 > folders you already own and builds a schedule from them. It is for personal
 > copies; do not rebroadcast it.
 
+> **Scope.** This is a personal project built to run one channel well, not a
+> general-purpose TV platform. It is deliberately not a Plex plugin, not
+> multi-channel, and it will not fetch media for you. Issues that ask it to become
+> something else are likely to be closed — but bug reports, accuracy fixes and
+> "this didn't work on my machine" are genuinely welcome.
+
 ```mermaid
 flowchart LR
   subgraph media["media/ (read-only)"]
@@ -345,6 +351,10 @@ grid alignment across DST, purity of rotation, exactness of ad pods, that a bump
 only ever names an adjacent show, and that rebuilding a date produces byte-identical
 output. Fixtures are zero-byte stubs with duration sidecars, so no real media is
 needed (or committed).
+
+CI runs the same suite on Python 3.12 (what the Dockerfile ships) and 3.13, and
+fails if the web tests *skip* rather than run — a green build that quietly tested
+nothing is the failure mode worth guarding against.
 
 ## Limitations
 
