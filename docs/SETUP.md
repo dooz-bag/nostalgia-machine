@@ -178,7 +178,7 @@ When importing several series at once, declare the ones whose folder or filename
 do not name them:
 
 ```powershell
-.\run.ps1 import "D:\Video Library\Nostalgia Machine Shows" `
+.\run.ps1 import "D:\Video Library\My Shows" `
     --show-root "King of the Hill=king-of-the-hill" `
     --show-root "Harvey.Birdman.Attorney.At.Law.Complete=harvey-birdman" `
     --apply

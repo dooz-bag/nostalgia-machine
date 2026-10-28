@@ -160,6 +160,13 @@ iterations and stalls a build. The search tracks spot *indices* in a frozenset a
 carries a hard iteration budget, so a tail pod resolves in milliseconds and still
 lands exactly.
 
+**A break can be something other than commercials.** Put music videos or DVD extras
+in `media/extras/` and switch on `ads.extras_enabled` and roughly one break in seven
+airs one of those instead. It is a swap, not a reschedule: the replaced break keeps
+its own length, so the next programme still starts on time. A piece is never cut to
+fit — if nothing in the pool is short enough, the break airs its commercials and
+says so. Bump slots and mid-episode breaks are never replaced.
+
 **The guide is continuous.** Playout JSON lists every commercial and bumper, because
 the streamer airs each one. The XMLTV lists *programmes*, each stretched to the next
 one's start, so the guide tiles the day instead of leaking a gap at every break.
@@ -191,7 +198,7 @@ or to build a "what if [adult swim] picked it up in 2004" timeline:
 | `config/shows.yaml` | The roster: folders, slot family, airing windows, weights |
 | `config/days/*.yaml` | Dayparts: which shows run at which hours, slot family, optional `template:` |
 | `config/continuity.yaml` | Break structure: bumps, pods (`share`/`seconds`), mid-rolls — the *shape*, not the length |
-| `config/ads.yaml` | Pod targets, era drift, pod tolerance, trim slop |
+| `config/ads.yaml` | Pod targets, era drift, pod tolerance, trim slop, extras breaks |
 | `config/watermark.yaml` | The corner bug: mode, typeface, placement, which shows |
 | `config/bumps.yaml` | Match strictness, cooldowns, generated-bump limits |
 | `config/bumps-era.yaml` | The look of generated cards, by year |
