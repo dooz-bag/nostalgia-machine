@@ -98,6 +98,10 @@ continuity:
         subject: this
         position: INTO
         max_seconds: 16
+      - kind: bump
+        subject: this
+        position: INTO
+        max_seconds: 16
       - kind: episode
       - kind: bump
         subject: this
@@ -105,6 +109,10 @@ continuity:
         max_seconds: 16
       - kind: ad_pod
         share: 0.70
+      - kind: bump
+        subject: next
+        position: NEXT
+        max_seconds: 16
       - kind: bump
         subject: next
         position: NEXT
