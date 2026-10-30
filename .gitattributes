@@ -1,0 +1,49 @@
+# Line endings are normalised to LF in the repository and left alone in the
+# working tree. This matters more here than in most projects: the config files are
+# YAML that a person edits on Windows and the scheduler reads inside a Linux
+# container, and a CRLF round-trip through a browser form would otherwise turn one
+# save into a whole-file diff. Python, the shell scripts run inside the container,
+# and the workflow that runs on ubuntu-latest all want LF too.
+* text=auto eol=lf
+
+# Windows-native helpers, kept as they are written.
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Binary: never diff, never convert.
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.ico binary
+*.webp binary
+*.woff binary
+*.woff2 binary
+*.ttf binary
+*.otf binary
+*.pdf binary
+*.zip binary
+*.gz binary
+*.sqlite binary
+*.db binary
+
+# Media is never tracked (see .gitignore), but a stray file must not be mangled
+# into the repo if it is ever added by accident.
+*.mkv binary
+*.mp4 binary
+*.m4v binary
+*.avi binary
+*.mov binary
+*.webm binary
+*.mp3 binary
+*.m4a binary
+*.wav binary
+*.flac binary
+*.ogg binary
+*.aac binary
+*.ts binary
+
+# `git diff` and `git log -p` on the lock-style files stay readable.
+*.json linguist-language=JSON
+*.ipynb -diff

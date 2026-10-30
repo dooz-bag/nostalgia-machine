@@ -1,5 +1,9 @@
 # Nostalgia Machine
 
+[![tests](https://github.com/dooz-bag/nostalgia-machine/actions/workflows/tests.yml/badge.svg)](https://github.com/dooz-bag/nostalgia-machine/actions/workflows/tests.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+![python](https://img.shields.io/badge/python-3.12%20%7C%203.13-blue)
+
 A deterministic 24/7 IPTV channel that recreates an early-2000s **[adult swim]**
 programming block — correct shows, correct order, and bumps that actually name the
 show they sit next to.
@@ -316,15 +320,23 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia review` | List bumps awaiting subject confirmation |
 | `nostalgia tag` | Confirm one bump's subject from the terminal |
 | `nostalgia bumps` | Render generated bump cards (`--dry-run`, `--style`) |
-| `nostalgia serve` | Web UI: what's on now, the schedule editor, bump review, commercial history and settings, styled as a broadcast test card |
+| `nostalgia conform` | Re-encode every spot and bump to one shape, loudness and frame rate (`--jobs`, `--status`, `--force`, `--keep-silent`) |
+| `nostalgia lines` | The bump-sentence bank: `list`, `check`, `generate` (asks a local model), `approve`, `clear` |
+| `nostalgia music` | Music beds for generated cards: `list`, `harvest` (takes them from your own text-on-black bumps) |
+| `nostalgia serve` | Web UI: what's on now, the schedule editor, bump review, commercial history, the lines queue and settings — styled as a broadcast test card. Saving stages a new schedule; a second button launches it |
 | `scripts/import-breaks.ps1` | Bulk-import commercial breaks from archive.org and split them into spots |
 
 ## Layout
 
 ```
-config/          channel, shows, dayparts, continuity, ads, bumps, era styles
+config/          channel, shows, dayparts, continuity, ads, bumps, era styles, lines
 src/nostalgia/   grid, rotation, schedule, continuity, ads, bumps, plan, emit
+                 conform: one picture shape and loudness for every spot
+                 mergebreaks: join each break into one file the player can seek
+                 deploy: stage a schedule, then launch it at a boundary
+                 bumplines, music, bumpgen: what a generated card says and sounds like
                  mediaimport: download → library layout, tagged and dry-run first
+docs/            SETUP (nearly everything), ARCHITECTURE, OPTIONS, TAGGING
 media/           your content (never committed)
 playout/         generated playout JSON (never committed)
 xmltv/           generated guide data (never committed)
@@ -410,30 +422,36 @@ Things a new user has to do that the repo cannot do for them:
    [docs/TAGGING.md](docs/TAGGING.md).
 3. `nostalgia scan`, then `docker compose up -d`.
 
-Publish it as-is: there is nothing machine-specific left to strip. Two things to
-know if you fork it for a different channel:
+### Publishing it
+
+There is nothing machine-specific left to strip: no media, no runtime state, no
+secrets, and no tracked file over 1 MB. One script does the whole job — it installs
+the GitHub CLI if it is missing, **prompts you to authenticate**, checks what is
+about to be published, then creates the repository and pushes:
+
+```powershell
+.\scripts\publish.ps1                      # asks for the repo name and visibility
+.\scripts\publish.ps1 -Name my-channel -Public
+```
+
+The first run renames the branch to `main`, which is what a new reader and every CI
+default expect. Authentication is `gh auth login` — a browser or a token, whichever
+you prefer — and the script never stores a credential itself.
+
+If you would rather do it by hand, the equivalent is:
+
+```powershell
+git branch -M main
+gh auth login
+gh repo create <you>/nostalgia-machine --public --source . --remote origin --push
+```
+
+Two things to know if you fork it for a different channel:
 
 * `config/channel.yaml` holds the name, tvg-id, timezone and era year. Changing the
   era year alone re-points every commercial and every generated card.
 * `config/shows.yaml` is the show roster. A show id that is not in `media/shows/`
   is reported by `nostalgia doctor` rather than silently skipped.
-
-### Publishing it
-
-This repository has no remote configured by default — commits live in your own
-`.git` until you add one. To create the GitHub repo and push:
-
-```powershell
-# requires the GitHub CLI (winget install GitHub.cli) and `gh auth login` once
-.\scripts\publish.ps1 -User <your-github-username>
-
-# or, publicly
-.\scripts\publish.ps1 -User <your-github-username> -Public
-```
-
-Without `gh` the script prints the two steps to do it in the browser, then pushes.
-It refuses to run if an `origin` already exists, and warns about any tracked file
-over 5 MB so an accidental media commit is caught before GitHub rejects it.
 
 ### Licence
 
