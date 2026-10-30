@@ -494,9 +494,10 @@ Two things worth knowing:
   refuse to emit. In lineup and shuffle modes the grid is generated from each
   show's own `slot` family and filled to the millisecond, ending with a shorter
   slot if the day needs one.
-- **Saving replans immediately.** The page writes `config/programming.yaml` and
-  rebuilds the channel horizon, so the playout files and the guide change under
-  you. Nothing is saved if the form is invalid — the page shows the error and
+- **Saving stages a new schedule.** The page writes `config/programming.yaml` and
+  builds the whole horizon into a staging folder; the stream keeps playing what it
+  was playing. See [Replan, then launch](#replan-then-launch) for how it goes on
+  air. Nothing is saved if the form is invalid — the page shows the error and
   leaves the file alone.
 
 The mode is recorded in a file rather than in a database, so a wipe of
@@ -679,19 +680,65 @@ A card picks its bed deterministically (era first), starts at an offset inside t
 track, and fades in and out. A near-silent bed is dropped rather than boosted into
 hiss.
 
+### Replan, then launch
+
+Every change to the schedule is prepared first and deployed on purpose. That matters
+because the streamer re-reads the playout file at every item boundary and positions
+itself by wall clock: rewriting that file *is* changing the channel, and it lands on
+whatever is airing next — which may be the middle of an episode.
+
+So every save (Schedule, Config, Bump review, Commercials, a skip) **stages** a new
+schedule instead:
+
+```text
+playout/pending/    the staged days, waiting
+xmltv/pending/      the staged guide, waiting
+playout/deploy.json  written only when a stage has fully succeeded
+```
+
+The live `playout/` and `xmltv/` folders are not touched, so the stream is
+unaffected. A **Schedule changes pending** notice then appears on *On now*,
+*Schedule* and *Config*, naming how many days are staged and when they would switch
+over. It carries the two buttons that matter:
+
+| Button | What it does |
+|---|---|
+| **Launch new schedule** | rebuilds the staged days from the settings as they are now, then swaps them in |
+| **Discard** | deletes the staging folder; the stream keeps playing what it was playing |
+
+**The switch lands on a boundary.** The boundary is the end of the programme that is
+on air when the launch happens — never a break, because half a break followed by a
+different schedule is worse than finishing it. A programme ending within five seconds
+switches immediately; with nothing on air the next whole minute is used, which is
+always an item boundary. The item already on air when the boundary passes is carried
+over **whole**, so the screen is never replaced mid-episode. Everything after it comes
+from the new schedule, so there is no gap and no overlap.
+
+Two honest limits:
+
+* **ErsatzTV buffers about 40 seconds.** That much of the old schedule can still play
+  after the boundary. The switch is clean, not frame-exact.
+* **A player already watching keeps its own buffer**, so the change can arrive at its
+  next reconnect rather than live.
+
+The unattended path is unchanged: the scheduler's `emit` every `PLAN_INTERVAL_SECONDS`
+still writes the live files, because a horizon that stopped rolling overnight would
+take the channel down. Launching is for a change *you* just made.
+
 ### Skipping the episode that is on
 
 **On now** (`/`) has a **Skip this episode** button under the title. It swaps in the
-next episode of the same show and replans the channel immediately.
+next episode of the same show, and — like every other schedule change — stages it, so
+it appears under **Schedule changes pending** until you launch it.
 
 A live channel cannot skip the way a video player can: the whole day is written in
 advance and ErsatzTV plays it by wall clock, so the only honest implementation is to
 change what the playout file says. Two consequences are worth knowing before you
 press it:
 
-* The change lands when a player **next connects**. Cutting into a session already
-  running would drop every viewer and desync the rest of the hour.
-* The skip is recorded in `data/skips.json` and **consumed once**. The next rebuild
+* The change reaches the stream at the next launch, and a player picks it up at its
+  next reconnect.
+* The skip is recorded in `data/skips.json` and **consumed once**. The next build
   marks it used and the schedule returns to normal behind it — this is not a
   programming change.
 

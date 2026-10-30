@@ -551,6 +551,8 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
   font-size: 13px;
 }
 .saved.bad { border-left-color: var(--red); }
+.pending { border-left: 3px solid var(--yellow); }
+.pending .label { color: var(--yellow); }
 
 @media (max-width: 620px) {
   main, header, footer { padding-left: 16px; padding-right: 16px; }
@@ -686,8 +688,10 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 + "</div>"
             )
 
+        pending = pending_deploy(config, paths)
         body = f"""
 {flash}
+{pending}
 <div class="card now">
   <p class="label">{state.day} &middot; {state.now_clock}</p>
   {current_html}
@@ -761,22 +765,51 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             )
             label = f"Skipped {playing.title} {playing.subtitle}"
 
-        # Rebuild immediately: a skip only becomes real when the playout file says
-        # so, and a click that changes nothing reads as a broken button.
-        message = ""
-        try:
-            with Catalog(paths.catalog) as catalog:
-                result = build(config, catalog, paths)
-            message = f"{len(result.plans)} day(s) replanned"
-        except Exception as exc:  # noqa: BLE001 - surfaced to the page
-            message = f"skip saved, but replanning failed: {exc}"
+        # Staged rather than written live: a skip is a change to the schedule, and
+        # it waits for a launch like every other change.
+        message = queue_deploy(config, paths).replace("saved, but", "skip saved, but")
         return RedirectResponse(
             f"/?skipped={quote_plus(label)}&built={quote_plus(message)}",
             status_code=303,
         )
 
+    @app.post("/schedule/replan")
+    def replan_schedule() -> Any:
+        """Build the settings into a staged schedule. The stream does not change."""
+        current = _reload(config, paths)
+        message = queue_deploy(current, paths)
+        return RedirectResponse(
+            f"/schedule?built={quote_plus(message)}", status_code=303
+        )
+
+    @app.post("/schedule/launch")
+    def launch_schedule() -> Any:
+        """Swap the staged schedule in, at the end of what is on air."""
+        current = _reload(config, paths)
+        try:
+            message = _launch(current, paths)
+        except (LookupError, ValueError) as exc:
+            return RedirectResponse(
+                f"/schedule?error={quote_plus(str(exc))}", status_code=303
+            )
+        return RedirectResponse(
+            f"/schedule?launched={quote_plus(message)}", status_code=303
+        )
+
+    @app.post("/schedule/cancel")
+    def cancel_schedule() -> Any:
+        """Throw the staged schedule away and keep serving what is on air."""
+        from ..deploy import cancel as discard
+
+        removed = discard(_request_deploy_paths(paths))
+        noun = "file" if removed == 1 else "files"
+        return RedirectResponse(
+            f"/schedule?launched={quote_plus(f'pending schedule discarded ({removed} {noun})')}",
+            status_code=303,
+        )
+
     @app.get("/schedule", response_class=HTMLResponse)
-    def schedule(saved: str = "", built: str = "") -> Any:
+    def schedule(saved: str = "", built: str = "", launched: str = "", error: str = "") -> Any:
         # Read what is on disk rather than what was loaded at startup: a save -- or
         # a hand edit -- happens after this process starts, and rendering the
         # stale values would make the page look like it ignored the change.
@@ -785,7 +818,14 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             episodes = catalog.episodes()
         return _render(
             _schedule_page(
-                current, episodes, card=_card(current), saved=saved, built=built
+                current,
+                episodes,
+                card=_card(current),
+                saved=saved,
+                built=built,
+                launched=launched,
+                error=error,
+                paths=paths,
             )
         )
 
@@ -831,15 +871,9 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             )
 
         write_schedule(paths.config_dir / "programming.yaml", form)
-        # Rebuild immediately so the page's "on now" matches what was just saved;
-        # waiting for a cron run would look like the edit was ignored.
-        message = ""
-        try:
-            with Catalog(paths.catalog) as catalog:
-                result = build(new_config, catalog, paths)
-            message = f"{len(result.plans)} day(s) replanned"
-        except Exception as exc:  # noqa: BLE001 - surfaced to the page
-            message = f"saved, but replanning failed: {exc}"
+        # Staged, not live: the schedule you can see changing is the one being
+        # prepared, and it goes on air when you launch it.
+        message = queue_deploy(new_config, paths)
         return RedirectResponse(
             f"/schedule?saved=1&built={quote_plus(message)}", status_code=303
         )
@@ -885,13 +919,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 _bumps_body(_reload(config, paths), paths, error=str(exc))
             )
 
-        message = ""
-        try:
-            with Catalog(paths.catalog) as catalog:
-                result = build(updated, catalog, paths)
-            message = f"{len(result.plans)} day(s) replanned"
-        except Exception as exc:  # noqa: BLE001 - surfaced to the page
-            message = f"saved, but replanning failed: {exc}"
+        message = queue_deploy(updated, paths)
         query = f"saved={quote_plus(FAMILY_LABELS.get(family, family))}"
         if message:
             query += f"&built={quote_plus(message)}"
@@ -1054,7 +1082,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 return RedirectResponse(
                     "/commercials?error=" + quote_plus(str(exc)), status_code=303
                 )
-        built = _replan(config, paths)
+        built = queue_deploy(config, paths)
         return RedirectResponse(
             f"/commercials?saved={quote_plus(message)}&built={quote_plus(built)}",
             status_code=303,
@@ -1085,14 +1113,16 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                     "/commercials?error=" + quote_plus(str(exc)), status_code=303
                 )
 
-        built = _replan(config, paths)
+        built = queue_deploy(config, paths)
         return RedirectResponse(
             f"/commercials?saved={quote_plus(message)}&built={quote_plus(built)}",
             status_code=303,
         )
 
     @app.get("/config", response_class=HTMLResponse)
-    def config_page(saved: str = "", built: str = "", error: str = "") -> Any:
+    def config_page(
+        saved: str = "", built: str = "", error: str = "", launched: str = ""
+    ) -> Any:
         return _render(
             _config_page(
                 _reload(config, paths),
@@ -1101,6 +1131,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 saved=saved.split("|") if saved else None,
                 built=built,
                 error=error,
+                launched=launched,
             )
         )
 
@@ -1150,14 +1181,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 )
             )
 
-        message = ""
-        if changed:
-            try:
-                with Catalog(paths.catalog) as catalog:
-                    result = build(updated, catalog, paths)
-                message = f"{len(result.plans)} day(s) replanned"
-            except Exception as exc:  # noqa: BLE001 - surfaced to the page
-                message = f"saved, but replanning failed: {exc}"
+        message = queue_deploy(updated, paths) if changed else ""
 
         query = f"saved={'|'.join(quote_plus(name) for name in changed)}"
         if message:
@@ -1194,18 +1218,53 @@ def _reload(config: RootConfig, paths: Paths) -> RootConfig:
         return config
 
 
-def _replan(config: RootConfig, paths: Paths) -> str:
-    """Rebuild the channel horizon, returning a one-line report for the page.
+def _request_deploy_paths(paths: Paths):
+    from ..deploy import Roots
 
-    Never raises: a failed replan still means the setting was saved, and saying
-    both halves ("saved, but replanning failed: ...") is the only honest report.
+    return Roots.of(paths.playout_dir, paths.xmltv_dir)
+
+
+def queue_deploy(config: RootConfig, paths: Paths) -> str:
+    """Stage the whole horizon, ready to launch. Returns a sentence for the page.
+
+    Never raises: the settings are already saved, and saying both halves is the
+    honest report. The live schedule is untouched either way, which is the point.
     """
+    from ..deploy import fingerprint
+
     try:
         with Catalog(paths.catalog) as catalog:
-            result = build(config, catalog, paths)
+            result = build(config, catalog, paths, deploy=True)
     except Exception as exc:  # noqa: BLE001 - surfaced to the page
-        return f"saved, but replanning failed: {exc}"
-    return f"{len(result.plans)} day(s) replanned"
+        return f"saved, but staging the new schedule failed: {exc}"
+    return (
+        f"{len(result.plans)} day(s) staged with {fingerprint(config)}"
+        " -- launch it when you want it on air"
+    )
+
+
+def _launch(config: RootConfig, paths: Paths) -> str:
+    """Rebuild the staged horizon, then swap it in. Raises only on unusable input.
+
+    Rebuilt first on purpose: the files on disk were built from the settings at the
+    time, and a launch is the one moment where "what is live" is about to change, so
+    it should reflect the settings as they are now.
+    """
+    from ..deploy import launch as push
+    from ..deploy import missing_inputs
+
+    roots = _request_deploy_paths(paths)
+    with Catalog(paths.catalog) as catalog:
+        build(config, catalog, paths, deploy=True)
+    gone = missing_inputs(roots)
+    if gone:
+        raise LookupError(f"{len(gone)} file(s) the staged schedule needs are missing; press Replan")
+    report = push(roots)
+    from ..grid import format_clock
+
+    zone = __import__("zoneinfo").ZoneInfo(config.channel.grid.timezone)
+    at = format_clock(report.swap_ms, config.channel.grid)
+    return f"launched {report.days} day(s) at {at}; {report.note}"
 
 
 def _episodes(paths: Paths) -> list[EpisodeRef]:
@@ -1228,6 +1287,60 @@ def _order_options(selected: str) -> str:
     )
 
 
+def pending_deploy(config: RootConfig, paths: Paths) -> str:
+    """The "schedule changes pending" notice, or "" when nothing is waiting.
+
+    Shows what is staged and when it would take over, with the two actions that
+    matter: launch it, or throw it away. ``launch`` rebuilds before swapping, so the
+    time quoted here is an estimate of the seam, not a promise.
+    """
+    from ..deploy import clock as at_clock
+    from ..deploy import fingerprint, load, missing_inputs, plan_switch, intervals
+    import json as _json
+
+    roots = _request_deploy_paths(paths)
+    deploy = load(roots)
+    if deploy is None:
+        return ""
+
+    zone = __import__("zoneinfo").ZoneInfo(config.channel.grid.timezone)
+    switch = deploy.switch_at_ms
+    try:
+        from ..deploy import live_day_for
+
+        today = live_day_for(roots, deploy.staged_at_ms)
+        if today is not None:
+            spans = intervals(_json.loads(today.read_text(encoding="utf-8")))
+            horizon = spans[-1].finish_ms if spans else None
+            switch = plan_switch(spans, deploy.staged_at_ms, horizon)
+    except (OSError, ValueError):
+        pass
+
+    stale = deploy.fingerprint and deploy.fingerprint != fingerprint(config)
+    gone = missing_inputs(roots)
+    notes = []
+    if stale:
+        notes.append("Settings have changed since this was prepared; launching rebuilds it first.")
+    if gone:
+        notes.append(f"{len(gone)} file(s) it needs have gone missing; press Replan again.")
+    detail = " ".join(notes)
+
+    return f"""<div class="card pending">
+  <p class="label">Schedule changes pending</p>
+  <p><b>{len(deploy.days)} day(s)</b> staged, ready to go on air at
+  <b>{_h(at_clock(switch, zone))}</b> &mdash; the end of the programme on air now.</p>
+  <form method="post" action="/schedule/launch" class="inline">
+    <button type="submit">Launch new schedule</button>
+  </form>
+  <form method="post" action="/schedule/cancel" class="inline">
+    <button type="submit">Discard</button>
+  </form>
+  {f'<p class="warn">{_h(detail)}</p>' if detail else ''}
+  <p class="hint">The stream keeps playing the old schedule until the launch. The
+  switch finishes the programme that is on air, so it never cuts mid-episode.</p>
+</div>"""
+
+
 def _schedule_page(
     config: RootConfig,
     episodes: Sequence[EpisodeRef],
@@ -1236,6 +1349,8 @@ def _schedule_page(
     saved: str = "",
     built: str = "",
     error: str = "",
+    launched: str = "",
+    paths: Paths | None = None,
 ) -> str:
     """The schedule editor.
 
@@ -1328,11 +1443,13 @@ def _schedule_page(
     )
 
     banner = ""
+    if launched:
+        banner = f'<div class="saved">{_h(launched)}</div>'
     if error:
         banner = f'<div class="saved bad">{_h(error)}</div>'
     elif saved:
         banner = (
-            f'<div class="saved">Schedule saved &middot; {_h(built or "not replanned")}'
+            f'<div class="saved">Schedule saved &middot; {_h(built or "not staged")}'
             f"</div>"
         )
 
@@ -1343,8 +1460,10 @@ def _schedule_page(
             f"<span>{text}</span></label>"
         )
 
+    pending = pending_deploy(config, paths) if paths is not None else ""
     body = f"""
 {banner}
+{pending}
 <div class="card">
   <form method="post" action="/schedule">
     <p class="label">Programming mode</p>
@@ -1389,14 +1508,15 @@ def _schedule_page(
       </div>
     </div>
 
-    <p style="margin-top:18px"><button type="submit">Save &amp; replan</button></p>
+    <p style="margin-top:18px"><button type="submit">Save &amp; stage</button></p>
   </form>
 </div>
 
 <div class="card">
   <p class="label">How this is stored</p>
   <p class="hint">Saved to <code>config/programming.yaml</code>, so the schedule
-  is diffable and survives a wiped catalog. Saving replans the channel horizon
+  is diffable and survives a wiped catalog. Saving stages a new schedule; launch it
+  from the notice on this page when you want it on air.
   immediately: playout files and the guide are rewritten in place.</p>
 </div>
 """
@@ -1412,6 +1532,7 @@ def _config_page(
     saved: list[str] | None = None,
     built: str = "",
     error: str = "",
+    launched: str = "",
 ) -> str:
     """The settings editor: every editable field in every file, grouped by purpose.
 
@@ -1428,14 +1549,16 @@ def _config_page(
         '<p class="label">Settings</p>',
         '<p class="hint">Every option here writes straight back to the YAML file in '
         "<code>config/</code>. Comments and anything this page does not show are left "
-        "untouched, so the files stay hand-editable. Saving replans the channel "
-        "immediately.</p>",
+        "untouched, so the files stay hand-editable. Saving prepares a new "
+        "schedule without touching the stream.</p>",
         "</div>",
     ]
     grouped: dict[str, list[SettingsFile]] = {}
     for entry in SETTINGS:
         grouped.setdefault(entry.category, []).append(entry)
     sections = []
+    if launched:
+        body.append(f'<div class="saved">{_h(launched)}</div>')
     for category, entries in grouped.items():
         sections.append(f'<h2 class="category">{_h(category)}</h2>')
         sections.extend(
@@ -1450,6 +1573,7 @@ def _config_page(
             + (f" &middot; {_h(built)}" if built else "")
             + "</div>"
         )
+    body.append(pending_deploy(config, paths))
     body.extend(sections)
     return _page("Config", "".join(body), active="/config", card=card)
 

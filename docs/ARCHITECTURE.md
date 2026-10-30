@@ -40,6 +40,7 @@ without touching the logic (see `docs/OPTIONS.md`).
 | `bumplines` | The line bank, the truth guard, the approval queue, the local-model client | I/O |
 | `music` | The bed library, levelling a bed under a card, harvesting beds from your bumps | I/O |
 | `conform` | One canvas, frame rate and loudness for every spot and bump | I/O |
+| `deploy` | Staged schedules: the switch boundary, and the swap that honours it | writes files |
 | `mergebreaks` | Finding runs of conformed spots and joining each into one file | I/O |
 | `web.commercials` | The commercial history page: what aired, and switching spots off | I/O |
 | `pipeline`, `cli`, `web` | Wiring and presentation | I/O |
@@ -418,6 +419,38 @@ Two steps fix this without changing the plan:
 
 Because spots arrive pre-fitted, `trim_slop` is forced to zero when merging is on
 and the whole pool is conformed: a spot is never cut short to land on a pod length.
+
+## A schedule change is staged, then launched
+
+Rewriting a playout file *is* changing the channel: the streamer re-reads it at
+every item boundary and positions itself by wall clock. So a save cannot be allowed
+to write the live files directly, or an edit lands on whatever is airing next — a
+commercial, or the middle of an episode.
+
+`build(..., deploy=True)` writes the same plans into `playout/pending/` instead, and
+records a `Deploy` last, so a half-built staging folder is never mistaken for a
+deploy that is ready. The launch is where the two rules live:
+
+1. **The boundary** is the end of the programme on air, never a break: cutting a
+   break in half shows the tail of the old commercials and then a different
+   schedule. A programme ending within five seconds switches at once (waiting would
+   itself be a mid-item seam); with nothing on air, the next whole minute is used,
+   because items are whole milliseconds and that is certainly a boundary.
+2. **The merge** keeps every live item that had started before the boundary, whole,
+   and takes the rest from the staged document. Keeping them whole rather than
+   trimming them to the boundary is what makes "finish the programme" true even when
+   the switch fires slightly early; a staged item that would start inside a kept one
+   is moved to its end, and one that would end before it is dropped, so the result
+   has no gap and no overlap.
+
+Every file is written before anything is replaced, so the live folders are
+inconsistent for a couple of `os.replace` calls rather than for the length of a
+build, and a launch that fails before that point changes nothing. Merged break files
+are made by the build before the swap, and they are not pruned during a stage: the
+live document still names them.
+
+The unattended scheduler `emit` still writes live. It is the path that keeps the
+horizon rolling overnight, and a channel with no future playout is down.
 
 ## The corner bug belongs to one side or the other
 

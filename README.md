@@ -186,6 +186,11 @@ moment it airs (a "next" card never says "you just watched") and waits for your
 approval. Music comes from `media/music/` or is harvested from your own text-on-black
 bumps. No music is shipped or downloaded.
 
+**A schedule change is staged, then launched.** Saving anything prepares a new
+schedule in `playout/pending/` and leaves the stream alone; a notice on the pages
+carries **Launch new schedule** and **Discard**. The launch finishes the programme
+that is on air and takes over at its end, so it never cuts mid-episode.
+
 **The guide is continuous.** Playout JSON lists every commercial and bumper, because
 the streamer airs each one. The XMLTV lists *programmes*, each stretched to the next
 one's start, so the guide tiles the day instead of leaking a gap at every break.

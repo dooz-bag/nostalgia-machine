@@ -379,8 +379,13 @@ def test_the_history_is_capped_at_the_most_recent_few(paths, config, catalog):
 
 
 @pytest.mark.parametrize("action", ["disable", "enable"])
-def test_toggling_replans_the_channel(paths, config, catalog, action):
-    """A click that leaves the channel unchanged for six hours reads as broken."""
+def test_toggling_stages_a_new_schedule(paths, config, catalog, action):
+    """A click that changes nothing at all reads as broken.
+
+    Since schedule changes are staged rather than written live, what a click must
+    produce is a *pending* deploy -- the switch itself waits for a launch, which is
+    the point of the change.
+    """
     spot = _first_ad(catalog)
     _record(catalog, spot.key)
     client = _client(paths, config)
@@ -391,5 +396,8 @@ def test_toggling_replans_the_channel(paths, config, catalog, action):
         f"/commercials/{action}", data={"key": spot.key}, follow_redirects=False
     )
     location = response.headers["location"]
-    # Either it replanned, or it says plainly that it could not.
-    assert "replanned" in location or "replanning+failed" in location
+    # Either it staged a new schedule, or it says plainly that it could not.
+    assert "staged" in location or "staging+the+new+schedule+failed" in location
+    from nostalgia.deploy import Roots, load
+
+    assert load(Roots.of(paths.playout_dir, paths.xmltv_dir)) is not None

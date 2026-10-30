@@ -7,6 +7,7 @@ can produce a playout file. Anything that "just changes one thing" goes through
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from dataclasses import dataclass, field
@@ -14,6 +15,16 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from .catalog import Catalog, ScanReport
+from .deploy import (
+    LAST_NAME,
+    Deploy,
+    Roots,
+    fingerprint,
+    intervals,
+    live_day_for,
+    plan_switch,
+    save_request,
+)
 from .config import DayConfig, RootConfig, load_config
 from .emit import (
     EmitPaths,
@@ -54,6 +65,8 @@ class BuildResult:
     merged_runs: int = 0
     """Break runs written as one file, and ``merged_items`` how many items they hold."""
     merged_items: int = 0
+    pending: bool = False
+    """True when this build was staged rather than written live."""
 
 
 def watermark_card_path(paths: Paths) -> Path:
@@ -503,12 +516,18 @@ def build(
     ignore_cooldowns: bool = False,
     allow_generated: bool | None = None,
     use_skips: bool = True,
+    deploy: bool = False,
 ) -> BuildResult:
     """Build and (optionally) write playout + XMLTV for a run of days.
 
     ``use_skips`` applies pending "skip this programme" overrides from
     ``data/skips.json``. They are consumed as they are planned, so a skip fires
     once and the schedule returns to normal behind it.
+
+    ``deploy`` stages the result in ``playout/pending`` instead of writing it live,
+    so the schedule on air is untouched until someone launches it. The lineup file
+    is not rewritten and merged files are not pruned in that mode: both describe or
+    serve what is *live*, which a stage does not change.
     """
     set_channel_timezone(config.channel.grid.timezone)
     # Inside Docker the mounts do not mirror the repo, so emitted media paths are
@@ -539,10 +558,11 @@ def build(
             "in media/shows/<show-id>/"
         )
 
-    result = BuildResult()
+    result = BuildResult(pending=deploy)
     merged_dir = paths.media("derived", "breaks")
     kept_merged: set[Path] = set()
-    emit_paths = EmitPaths(paths.playout_dir, paths.xmltv_dir)
+    roots = Roots.of(paths.playout_dir, paths.xmltv_dir)
+    emit_paths = roots.pending if deploy else roots.live
     # Overlay mode only. Burn mode already replaced the paths during scan, so a
     # layer here would double the mark; `plan.watermark_rule` enforces that.
     watermark_layer = _overlay_layer(config, paths)
@@ -608,8 +628,11 @@ def build(
 
     if emit:
         # Every playout was just rewritten, so `kept_merged` is the complete set of
-        # joined files anything still refers to; the rest are stale.
-        prune_merged(merged_dir, kept_merged)
+        # joined files anything still refers to; the rest are stale. A staged build
+        # leaves the live playout in place, and that file may still name some of
+        # these, so pruning would delete a file the stream is using.
+        if not deploy:
+            prune_merged(merged_dir, kept_merged)
         # One guide for the whole horizon. Writing it per day overwrote the same
         # file each time, so only the *last* day survived -- the stream served,
         # but the schedule started 48 hours in the future and a player showed an
@@ -622,20 +645,35 @@ def build(
         # been rebuilt with a fix, so the channel plays the old, broken version and
         # nothing on disk says why. Pruning is what makes "rebuild" mean rebuilt.
         prune_playouts(emit_paths, keep_days=[plan.day for plan in result.plans])
-        lineup, _ = write_ersatztv_config(
-            emit_paths,
-            channel_number=config.channel.number,
-            channel_name=config.channel.name,
-            tvg_id=config.channel.tvg_id,
-            width=config.encoding.width,
-            height=config.encoding.height,
-            bitrate_kbps=config.encoding.bitrate_kbps,
-            audio_bitrate_kbps=config.encoding.audio_bitrate_kbps,
-            logo=config.channel.logo,
-            group=config.channel.group,
-            config_dir=paths.ersatztv_dir,
-        )
-        result.lineup = lineup
+        if deploy:
+            # Written last: its presence is what makes the staging folder a deploy
+            # the pages will offer to launch.
+            save_request(
+                roots,
+                Deploy(
+                    staged_at_ms=_now_ms(),
+                    switch_at_ms=_switch_for(roots),
+                    days=tuple(plan.day.isoformat() for plan in result.plans),
+                    fingerprint=fingerprint(config),
+                ),
+            )
+        if not deploy:
+            # The lineup is the streamer's own configuration and describes what is
+            # live, so a staged build leaves it alone until the launch.
+            lineup, _ = write_ersatztv_config(
+                emit_paths,
+                channel_number=config.channel.number,
+                channel_name=config.channel.name,
+                tvg_id=config.channel.tvg_id,
+                width=config.encoding.width,
+                height=config.encoding.height,
+                bitrate_kbps=config.encoding.bitrate_kbps,
+                audio_bitrate_kbps=config.encoding.audio_bitrate_kbps,
+                logo=config.channel.logo,
+                group=config.channel.group,
+                config_dir=paths.ersatztv_dir,
+            )
+            result.lineup = lineup
 
         # Only now are the clicks consumed. If any day failed to plan, the build
         # raised above and every override is still pending -- which is correct: the
@@ -644,6 +682,26 @@ def build(
         prune(paths.skips, before=start_day)
 
     return result
+
+
+def _switch_for(roots) -> int:
+    """When a stage written now would take over, so the page can say so.
+
+    Best effort on purpose: it reads the live document only to name a time, and a
+    stage that cannot work that out is still a useful stage.
+    """
+    moment = _now_ms()
+    # The day on air, not the last day of the horizon: reading the horizon's last
+    # file would name a boundary from a schedule that is not playing yet.
+    today = live_day_for(roots, moment)
+    if today is None:
+        return moment
+    try:
+        spans = intervals(json.loads(today.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        return moment
+    horizon = spans[-1].finish_ms if spans else None
+    return plan_switch(spans, moment, horizon)
 
 
 def _programming_findings(
