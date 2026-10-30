@@ -24,7 +24,6 @@ from ..pipeline import build
 from ..rotation import EpisodeRef
 from .config_edit import (
     BOOL,
-    BY_SLUG,
     CHOICE,
     DAY,
     FLOAT,
@@ -32,9 +31,9 @@ from .config_edit import (
     LIST,
     SETTINGS,
     ConfigEditError,
+    Section,
     SettingsFile,
     read_values,
-    save_values,
 )
 from .continuity_edit import (
     FAMILY_LABELS,
@@ -430,6 +429,49 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
 .shows input { flex: 0 0 auto; }
 
 /* -- settings editor ------------------------------------------------ */
+/* One form for the whole page, so the save control is pinned to the top of the
+   scroll rather than repeated per section. */
+/* The panel blocks inside the form are `display: flex` at the top level, which
+   put the intro paragraph and the first category heading side by side. The form
+   is a column of full-width blocks. */
+.settings-form { display: block; }
+.settings-form > .hint { display: block; margin: 12px 0 0; max-width: 80ch; }
+.settings-form > .category { margin-top: 24px; }
+.save-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 10px 0;
+  position: sticky;
+  top: 0;
+  z-index: 3;
+  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+}
+.save-bar .label { margin: 0; }
+.save-bar.bottom { position: static; justify-content: flex-end; margin-top: 22px; }
+.save-bar button { flex: 0 0 auto; }
+.settings-form > .hint { margin: 12px 0 0; }
+/* Advanced is collapsed by default: the main list is "what this channel is",
+   and these are the numbers behind it. */
+details.advanced { margin-top: 26px; }
+details.advanced > summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-size: 12px;
+  letter-spacing: .22em;
+  text-transform: uppercase;
+  padding: 10px 0;
+  border-top: 2px solid var(--accent);
+  border-bottom: 1px solid var(--line);
+  list-style: none;
+}
+details.advanced > summary::-webkit-details-marker { display: none; }
+details.advanced > summary::before { content: "▸ "; margin-right: 6px; }
+details.advanced[open] > summary::before { content: "▾ "; margin-right: 6px; }
+details.advanced > summary .dim { letter-spacing: .08em; text-transform: none; }
+.panel-block.tucked { border-left: 2px solid var(--line); padding-left: 14px; }
 .category {
   font-size: 12px;
   letter-spacing: .26em;
@@ -1135,57 +1177,51 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             )
         )
 
-    @app.post("/config/{slug}")
-    async def save_config_section(slug: str, request: Request) -> Any:
-        entry = BY_SLUG.get(slug)
-        if entry is None:
-            raise HTTPException(status_code=404, detail=f"no settings file {slug!r}")
+    @app.post("/config")
+    async def save_config(request: Request) -> Any:
+        """Write the whole page in one submission.
+
+        One button, one namespace (``<slug>::<key>``), one round of validation over
+        the result. Only the files whose fields actually changed are rewritten, so
+        a save cannot disturb a file the user did not touch -- which is what the
+        per-file buttons used to guarantee, now without asking the user to remember
+        which file a setting lives in.
+        """
+        from .config_edit import save_all
 
         form = await request.form()
         submitted = {
-            str(key): ("" if value is None else str(value))
-            for key, value in form.items()
-            if key != "current"
+            str(key): ("" if value is None else str(value)) for key, value in form.items()
         }
-        # A checkbox that is unticked submits nothing at all, so its absence has
-        # to mean "false" rather than "leave as it was". Without this, a boolean
-        # could be turned on from the page and never off again.
-        for spec in entry.all_fields():
-            if spec.kind == BOOL and spec.key not in submitted:
-                submitted[spec.key] = ""
-
+        before = _snapshot(paths, [entry for entry in SETTINGS])
         try:
-            changed = save_values(entry, paths.config_dir, submitted)
-            # Reload and re-validate the whole config before reporting success: a
-            # save that cannot be loaded would break the channel at the next plan,
-            # and the user would not know which edit did it.
+            written = save_all(paths.config_dir, submitted)
+            # Re-validate the *whole* config before claiming success: a day file
+            # claiming a weekday another file also claims is only wrong in
+            # combination, and a saved config that cannot load would break the
+            # channel at the next plan with no clue which edit did it.
             updated = load_config(paths.config_dir)
         except ConfigEditError as exc:
+            _restore(paths, before)
             return _render(
-                _config_page(
-                    _reload(config, paths),
-                    paths,
-                    card=_card(config),
-                    error=str(exc),
-                    current=slug,
-                )
+                _config_page(_reload(config, paths), paths, card=_card(config), error=str(exc))
             )
         except ConfigError as exc:
+            _restore(paths, before)
             return _render(
                 _config_page(
                     _reload(config, paths),
                     paths,
                     card=_card(config),
-                    error=f"saved, but the config is now invalid:\n{exc}",
-                    current=slug,
+                    error=f"That would leave the config invalid, so nothing was saved:\n{exc}",
                 )
             )
 
-        message = queue_deploy(updated, paths) if changed else ""
-
-        query = f"saved={'|'.join(quote_plus(name) for name in changed)}"
+        names = [f"{title} ({len(changed)})" for title, changed in written]
+        message = queue_deploy(updated, paths) if written else ""
+        query = f"saved={quote_plus('|'.join(names))}" if names else ""
         if message:
-            query += f"&built={quote_plus(message)}"
+            query += ("&" if query else "") + f"built={quote_plus(message)}"
         return RedirectResponse(f"/config?{query}", status_code=303)
 
     @app.get("/api/now")
@@ -1265,6 +1301,29 @@ def _launch(config: RootConfig, paths: Paths) -> str:
     zone = __import__("zoneinfo").ZoneInfo(config.channel.grid.timezone)
     at = format_clock(report.swap_ms, config.channel.grid)
     return f"launched {report.days} day(s) at {at}; {report.note}"
+
+
+def _snapshot(paths: Paths, entries: Sequence[SettingsFile]) -> dict[Path, str | None]:
+    """The current bytes of every file the form can write, so a bad save can be undone.
+
+    Validation runs *after* writing, because a rule like "a weekday may only appear
+    in one file" spans files and can only be judged on the whole document. That
+    meant a rejected submission used to leave the edited file on disk; this is what
+    makes "nothing was saved" true.
+    """
+    snapshot: dict[Path, str | None] = {}
+    for entry in entries:
+        path = paths.config_dir / entry.path
+        snapshot[path] = path.read_text(encoding="utf-8") if path.is_file() else None
+    return snapshot
+
+
+def _restore(paths: Paths, snapshot: dict[Path, str | None]) -> None:
+    for path, text in snapshot.items():
+        if text is None:
+            path.unlink(missing_ok=True)
+        else:
+            path.write_text(text, encoding="utf-8")
 
 
 def _episodes(paths: Paths) -> list[EpisodeRef]:
@@ -1541,30 +1600,9 @@ def _config_page(
     into a hunt. Each file is a panel with its own save button, so a mistake in
     one file cannot block saving another.
     """
-    # Grouped by *category* rather than by file, because two files can serve one
-    # idea (channel.yaml holds both the channel and its encode) and a reader wants
-    # the idea. Order follows the registry so the page has a fixed shape.
-    body = [
-        '<div class="panel-block">',
-        '<p class="label">Settings</p>',
-        '<p class="hint">Every option here writes straight back to the YAML file in '
-        "<code>config/</code>. Comments and anything this page does not show are left "
-        "untouched, so the files stay hand-editable. Saving prepares a new "
-        "schedule without touching the stream.</p>",
-        "</div>",
-    ]
-    grouped: dict[str, list[SettingsFile]] = {}
-    for entry in SETTINGS:
-        grouped.setdefault(entry.category, []).append(entry)
-    sections = []
+    body: list[str] = []
     if launched:
         body.append(f'<div class="saved">{_h(launched)}</div>')
-    for category, entries in grouped.items():
-        sections.append(f'<h2 class="category">{_h(category)}</h2>')
-        sections.extend(
-            _settings_panel(entry, paths, config, open_panel=(entry.slug == current))
-            for entry in entries
-        )
     if error:
         body.append(f'<div class="saved bad">{_h(error)}</div>')
     elif saved:
@@ -1574,30 +1612,85 @@ def _config_page(
             + "</div>"
         )
     body.append(pending_deploy(config, paths))
-    body.extend(sections)
+
+    # One form for every file. The save button sits at the top where a long page
+    # needs it, and again at the bottom so the last field is not a discouraging
+    # scroll away from the control.
+    main: list[str] = []
+    advanced: list[str] = []
+    previous = None
+    for entry in SETTINGS:
+        shown = [s for s in entry.sections if not s.advanced]
+        tucked = [s for s in entry.sections if s.advanced]
+        if shown:
+            if entry.category != previous:
+                main.append(f'<h2 class="category">{_h(entry.category)}</h2>')
+                previous = entry.category
+            main.append(_settings_panel(entry, shown, paths))
+        if tucked:
+            if entry.category != previous:
+                advanced.append(f'<h2 class="category">{_h(entry.category)}</h2>')
+                previous = entry.category
+            advanced.append(_settings_panel(entry, tucked, paths, advanced=True))
+
+    main_html = "".join(main)
+    advanced_html = "".join(advanced)
+    advanced_block = (
+        f"""
+<details class="advanced">
+  <summary>Advanced options <span class="dim">({len(advanced)} group(s))</span></summary>
+  <p class="hint">Tuning for how a break is assembled and how the picture is
+  drawn. The defaults are right for most channels; change these when something
+  specific is wrong.</p>
+  {advanced_html}
+</details>"""
+        if advanced_html
+        else ""
+    )
+
+    save_button = '<button type="submit">Save changes</button>'
+    body.append(
+        f"""
+<form method="post" action="/config" class="settings-form" novalidate>
+  <div class="save-bar">
+    <p class="label">Settings</p>
+    {save_button}
+  </div>
+  <p class="hint">Every option writes straight back to the YAML in
+  <code>config/</code>; comments and anything not shown here are left untouched,
+  so the files stay hand-editable. Saving prepares a new schedule without
+  touching the stream.</p>
+  {main_html}
+  {advanced_block}
+  <div class="save-bar bottom">{save_button}</div>
+</form>"""
+    )
     return _page("Config", "".join(body), active="/config", card=card)
 
 
 def _settings_panel(
     entry: SettingsFile,
+    sections: Sequence[Section],
     paths: Paths,
-    config: RootConfig,
     *,
-    open_panel: bool,
+    advanced: bool = False,
 ) -> str:
+    """One file's worth of settings, as a group inside the single form.
+
+    No save button and no ``<form>`` of its own: the page saves everything at
+    once, so a panel is only namespaced fields. The file each group came from is
+    named once at the bottom, because the page is grouped by *intent* and a reader
+    editing three files at once should still be able to find them by hand.
+    """
     values = read_values(entry, paths.config_dir)
     field_html = "".join(
-        _form_section(section, values, entry) for section in entry.sections
+        _form_section(section, values, entry) for section in sections
     )
     return f"""
-<div class="panel-block settings">
+<div class="panel-block settings{' tucked' if advanced else ''}">
   <p class="label">{_h(entry.title)}</p>
   <p class="hint">{_h(entry.purpose)}</p>
-  <form method="post" action="/config/{_h(entry.slug)}">
-    <input type="hidden" name="current" value="{_h(entry.slug)}">
-    {field_html}
-    <button type="submit">Save {_h(entry.title)}</button>
-  </form>
+  {field_html}
   <p class="hint filename"><code>config/{_h(entry.filename)}</code></p>
 </div>"""
 
@@ -1616,13 +1709,16 @@ def _form_section(section, values, entry: SettingsFile) -> str:
 def _form_field(spec, value, entry: SettingsFile) -> str:
     """One labelled control, drawn from its declared type.
 
-    Element ids are prefixed with the file slug: the same key can appear in more
-    than one file (``era_drift_years`` is configured separately for commercials
-    and for bumpers), and duplicate ids make the second label focus the first
-    input -- clicking "Bump era tolerance" would edit the commercial one.
+    Element ids are prefixed with the file slug as well: duplicate ids make the
+    second label focus the first input, so clicking "Bump era tolerance" would
+    edit the commercial one.
     """
-    name = _h(spec.key)
-    field_id = _h(f"{entry.slug}-{spec.key}")
+    # The whole page is one form, so every control carries its file's slug: the
+    # same key appears in more than one file (`era_drift_years` is set separately
+    # for commercials and for cards), and without the prefix the two would post
+    # the same name and one would silently win.
+    name = _h(f"{entry.slug}::{spec.key}")
+    field_id = _h(f"{entry.slug}--{spec.key}")
     help_html = f'<p class="field-help">{_h(spec.help)}</p>' if spec.help else ""
 
     if spec.kind == BOOL:
@@ -1650,13 +1746,15 @@ def _form_field(spec, value, entry: SettingsFile) -> str:
             f'value="{_h(shown)}" placeholder="{_h(spec.placeholder or "—")}">'
         )
     else:
+        # No `step`: it is a spinner hint, and a value off the step (12.75 against
+        # 0.5) makes the *whole form* refuse to submit with "an invalid form
+        # control ... is not focusable" -- which read as a dead save button. The
+        # server checks the real bounds below, in `Field.coerce`.
         bump = ""
         if spec.minimum is not None:
             bump += f' min="{spec.minimum:g}"'
         if spec.maximum is not None:
             bump += f' max="{spec.maximum:g}"'
-        if spec.step is not None:
-            bump += f' step="{spec.step:g}"'
         kind = "number" if spec.kind in (INT, FLOAT) else "text"
         placeholder = spec.placeholder or ("—" if spec.kind == DAY else "")
         control = (

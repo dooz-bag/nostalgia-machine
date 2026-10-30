@@ -58,6 +58,12 @@ class Field:
     step: float | None = None
     placeholder: str = ""
     default: Any = None
+    advanced: bool = False
+    """Shown with the main settings unless this is set.
+
+    A section can be advanced as a whole; this is for the one field in an
+    otherwise-main section that is a number you set once and forget.
+    """
 
     def coerce(self, raw: str | None) -> Any:
         """Turn one submitted string into the value to write to YAML.
@@ -99,9 +105,12 @@ class Field:
             return text
 
         if self.kind == LIST:
-            # Comma or whitespace separated: a show id list is small and typing
-            # brackets into a text box is worse than typing names.
-            return [item for item in text.replace(",", " ").split() if item]
+            # Comma or whitespace separated: a list is small and typing brackets
+            # into a text box is worse than typing names. Brackets and quotes are
+            # stripped rather than trusted, so a caller that posts ``repr(value)``
+            # gets the list it meant instead of a weekday called ``["sat",``.
+            cleaned = text.replace("[", " ").replace("]", " ").replace(",", " ").replace('"', " ")
+            return [item for item in cleaned.replace("'", " ").split() if item]
 
         return text
 
@@ -120,6 +129,14 @@ class Section:
     title: str
     note: str = ""
     fields: tuple[Field, ...] = ()
+    advanced: bool = False
+    """Tucked under "Advanced" rather than shown with the main settings.
+
+    These are the numbers that decide *how* a break is assembled -- pod
+    tolerance, match thresholds, type metrics -- where the default is right far
+    more often than not. Keeping them out of the main list is what lets the page
+    read as "here is what this channel is" rather than a wall of knobs.
+    """
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,8 +213,9 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Broadcast grid",
-                "Slot boundaries land on this grid, so it decides what \":30\" means.",
-                (
+                advanced=True,
+                note="Slot boundaries land on this grid, so it decides what \":30\" means.",
+                fields=(
                     Field("grid.anchor", "Day zero", DAY, help="The date that maps to the channel's start."),
                     Field(
                         "grid.quantum_minutes",
@@ -220,9 +238,9 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Era",
-                "The year being *recreated*. This must not follow today's date, or a "
+                note="The year being *recreated*. This must not follow today's date, or a "
                 "2003 channel airs this year's commercials.",
-                (
+                fields=(
                     Field(
                         "era_year",
                         "Era year",
@@ -246,14 +264,6 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         minimum=1,
                         maximum=14,
                         default=3,
-                    ),
-                    Field(
-                        "test_card",
-                        "Web test card",
-                        CHOICE,
-                        help="The pattern behind the web page. NTSC is correct for [adult swim].",
-                        choices=(("ntsc", "SMPTE NTSC (correct)"), ("pal", "EBU PAL")),
-                        default="ntsc",
                     ),
                 ),
             ),
@@ -295,9 +305,10 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Pod fitting",
-                "Real spots run 30.02s or 14.98s, so a pod is allowed to land slightly off-target "
+                advanced=True,
+                note="Real spots run 30.02s or 14.98s, so a pod is allowed to land slightly off-target "
                 "and the slot's tail absorbs the difference.",
-                (
+                fields=(
                     Field(
                         "pod_tolerance_ms",
                         "Pod tolerance (ms)",
@@ -320,11 +331,12 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Smooth breaks",
-                "Spots come from different networks and tapes, so cutting between them "
+                advanced=True,
+                note="Spots come from different networks and tapes, so cutting between them "
                 "exposes every difference. Run `nostalgia conform` once to give them one "
                 "picture shape, one loudness and a short dip between spots; this joins "
                 "each break into a single file so the player has far fewer seams to cross.",
-                (
+                fields=(
                     Field(
                         "merge_breaks",
                         "Join each break into one file",
@@ -358,10 +370,11 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Extras instead of commercials",
-                "Put music videos or DVD extras in media/extras/ and a break can occasionally air "
+                advanced=True,
+                note="Put music videos or DVD extras in media/extras/ and a break can occasionally air "
                 "one instead of spots. Bump slots are never replaced. A replaced break keeps its "
                 "own length, so the next programme still starts on time.",
-                (
+                fields=(
                     Field(
                         "extras_enabled",
                         "Air extras instead of some commercial breaks",
@@ -408,9 +421,10 @@ SETTINGS: tuple[SettingsFile, ...] = (
         sections=(
             Section(
                 "Matching",
-                "A card can never contradict the running order — \"next up: X\" when X is not "
+                advanced=True,
+                note="A card can never contradict the running order — \"next up: X\" when X is not "
                 "next is refused in code, not configurable. These decide everything else.",
-                (
+                fields=(
                     Field(
                         "strictness",
                         "Strictness",
@@ -484,21 +498,6 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         default=0.25,
                     ),
                     Field(
-                        "generated.era_year",
-                        "Card era",
-                        INT,
-                        help="The look to render. Set this to the era you are recreating, not to now.",
-                        minimum=1900,
-                        maximum=2999,
-                        default=2003,
-                    ),
-                    Field(
-                        "generated.style_pack",
-                        "Force style pack",
-                        TEXT,
-                        help="Blank picks by air date. A pack name (e.g. 2003) forces one look.",
-                    ),
-                    Field(
                         "generated.lines",
                         "Cards say a sentence",
                         BOOL,
@@ -515,6 +514,7 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         minimum=1,
                         maximum=10,
                         default=3,
+                        advanced=True,
                     ),
                     Field(
                         "generated.music",
@@ -525,12 +525,20 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         "there, cards are silent.",
                         default=True,
                     ),
+                ),
+            ),
+            Section(
+                "Writing new lines",
+                advanced=True,
+                note="Only the Lines page uses these: asking a local model for more sentences "
+                "to approve. Rendering a card never calls it, so a wrong address costs nothing "
+                "on air.",
+                fields=(
                     Field(
                         "generated.ollama_url",
                         "Local model address",
                         TEXT,
-                        help="Where Ollama runs, for proposing new lines. Only the Lines page "
-                        "uses it; rendering never does.",
+                        help="Where Ollama runs. Blank falls back to the default.",
                         default="http://host.docker.internal:11434",
                     ),
                     Field(
@@ -572,9 +580,10 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Type",
-                "The wordmark was Helvetica Neue Condensed Bold, which is not free to redistribute, "
+                advanced=True,
+                note="The wordmark was Helvetica Neue Condensed Bold, which is not free to redistribute, "
                 "so it falls back to a bold Helvetica-metric face squeezed to condensed width.",
-                (
+                fields=(
                     Field("font", "Font", help="Requested face, resolved through a fallback chain."),
                     Field(
                         "condense",
@@ -611,9 +620,10 @@ SETTINGS: tuple[SettingsFile, ...] = (
             ),
             Section(
                 "Placement",
-                "Fractions of the frame, so a 4:3 rip and a 16:9 episode each get a mark sized to "
+                advanced=True,
+                note="Fractions of the frame, so a 4:3 rip and a 16:9 episode each get a mark sized to "
                 "their own picture.",
-                (
+                fields=(
                     Field(
                         "margin_x_percent",
                         "Right margin (%)",
@@ -851,6 +861,11 @@ def save_values(
 
         if existing and current == value:
             continue
+        if not existing and _equals_default(spec, value):
+            # The key is absent and the form only echoes the default, so writing it
+            # would add a line that says nothing and turn "the page was saved" into
+            # "every default was pinned into the file".
+            continue
         _target_map(document, entry, spec.key)[leaf] = value
         changed.append(spec.label)
 
@@ -862,6 +877,62 @@ def save_values(
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(buffer.getvalue(), encoding="utf-8")
     return changed
+
+
+def save_all(
+    config_dir: Path,
+    submitted: dict[str, str | None],
+) -> list[tuple[str, list[str]]]:
+    """Write one submission into every file it touches.
+
+    The page has one save button, so the form is one namespace: each control is
+    named ``<slug>::<key>`` and this splits it back apart. Only the files that
+    actually changed are rewritten, so a save cannot damage a file whose fields
+    were left alone.
+
+    Validating the *whole* config happens in the route after this, because a
+    change in one file can only be judged against the others (a day file that
+    claims a weekday another file also claims is the classic case).
+    """
+    by_slug: dict[str, dict[str, str | None]] = {}
+    present = {name for name in submitted if "::" in name}
+    for name, value in submitted.items():
+        slug, _, key = name.partition("::")
+        if not key or slug not in BY_SLUG:
+            # A field the page does not own is ignored rather than written: a
+            # stray form key must never reach the YAML.
+            continue
+        by_slug.setdefault(slug, {})[key] = value
+
+    # An unticked checkbox submits nothing at all, so a boolean that is *absent*
+    # from the form means false. Only for files this submission covers, though:
+    # defaulting every file in the registry would rewrite settings the page never
+    # showed. A partial post is a legitimate case (the tests, and any future API).
+    for slug in by_slug:
+        for spec in BY_SLUG[slug].all_fields():
+            if spec.kind == BOOL and f"{slug}::{spec.key}" not in present:
+                by_slug[slug][spec.key] = ""
+
+    # A file with no field in this submission is not written at all.
+
+    written: list[tuple[str, list[str]]] = []
+    for slug, values in by_slug.items():
+        entry = BY_SLUG[slug]
+        changed = save_values(entry, config_dir, values)
+        if changed:
+            written.append((entry.title, changed))
+    return written
+
+
+def _equals_default(spec: Field, value: Any) -> bool:
+    """Whether *value* is exactly what the model already defaults to."""
+    if spec.default is None:
+        return value in (None, "", [])
+    if isinstance(spec.default, bool) or isinstance(value, bool):
+        return bool(spec.default) == bool(value)
+    if isinstance(spec.default, (int, float)) and isinstance(value, (int, float)):
+        return float(spec.default) == float(value)
+    return spec.default == value
 
 
 def _target_map(document: Any, entry: SettingsFile, dotted: str) -> Any:
@@ -922,5 +993,6 @@ __all__ = [
     "SettingsFile",
     "TEXT",
     "read_values",
+    "save_all",
     "save_values",
 ]

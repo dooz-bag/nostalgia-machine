@@ -158,27 +158,45 @@ def test_a_failed_save_leaves_the_file_untouched(config_dir: Path) -> None:
 def test_clearing_an_optional_key_removes_it(config_dir: Path) -> None:
     """Blank means "unset", not "the empty string".
 
-    Writing ``style_pack: ''`` uncomments a key the owner deliberately left out
-    and leaves a line that says nothing.
+    Writing ``ollama_model: ''`` leaves a line that says nothing and uncomments a
+    key the owner deliberately left out, so a blank optional text field deletes
+    the key instead and lets the model default apply.
     """
-    save_values(BY_SLUG["bumps"], config_dir, {"generated.style_pack": "2003"})
-    # A style pack is a name, so it must come back as a string -- quoting is
-    # ruamel's business, but the type is ours.
-    assert read_values(BY_SLUG["bumps"], config_dir)["generated.style_pack"] == "2003"
+    save_values(BY_SLUG["bumps"], config_dir, {"generated.ollama_model": "mistral"})
+    assert read_values(BY_SLUG["bumps"], config_dir)["generated.ollama_model"] == "mistral"
 
-    save_values(BY_SLUG["bumps"], config_dir, {"generated.style_pack": ""})
+    save_values(BY_SLUG["bumps"], config_dir, {"generated.ollama_model": ""})
     text = (config_dir / "bumps.yaml").read_text(encoding="utf-8")
-    live = [line for line in text.splitlines() if line.strip().startswith("style_pack:")]
+    live = [line for line in text.splitlines() if line.strip().startswith("ollama_model:")]
     assert live == [], f"clearing left a live key behind: {live}"
-    # The commented-out template line is documentation, not a setting, and survives.
-    assert '# style_pack: "2003"' in text
 
 
 def test_clearing_a_key_that_was_never_set_is_a_no_op(config_dir: Path) -> None:
     before = (config_dir / "bumps.yaml").read_text(encoding="utf-8")
-    changed = save_values(BY_SLUG["bumps"], config_dir, {"generated.style_pack": ""})
+    changed = save_values(BY_SLUG["bumps"], config_dir, {"generated.ollama_model": ""})
     assert changed == []
     assert (config_dir / "bumps.yaml").read_text(encoding="utf-8") == before
+
+
+def test_an_option_nothing_reads_is_not_offered() -> None:
+    """A control that changes nothing is worse than no control: it implies an effect.
+
+    ``channel.test_card`` was read by the page shell and ``generated.style_pack``
+    was read nowhere, so both were removed rather than left looking functional.
+    """
+    keys = {spec.key for entry in SETTINGS for spec in entry.all_fields()}
+    assert "test_card" not in keys
+    assert "generated.style_pack" not in keys
+
+
+def test_advanced_groups_are_separate_from_the_main_ones() -> None:
+    """The page is "what this channel is" first, tuning second."""
+    main = [s for e in SETTINGS for s in e.sections if not s.advanced]
+    advanced = [s for e in SETTINGS for s in e.sections if s.advanced]
+    assert main and advanced
+    titles = {s.title for s in main}
+    assert "Identity" in titles and "Era" in titles
+    assert {"Pod fitting", "Type", "Placement"} <= {s.title for s in advanced}
 
 
 def test_unknown_keys_are_never_written(config_dir: Path) -> None:

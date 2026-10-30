@@ -203,54 +203,66 @@ def test_discarding_leaves_the_stream_exactly_as_it_was(paths, config):
 
 
 def test_a_launch_that_cannot_work_changes_nothing_and_says_why(paths, config):
-    """The guard in front of the swap: a stage that names a pruned file is refused.
+    """The guard in front of the swap: a stage naming a pruned file is refused.
 
-    Launch rebuilds first, so the realistic version of this is a merged break pruned
-    by a concurrent live emit between the build and the swap. That is simulated by
-    making the build produce a document naming a file that does not exist.
+    Launch rebuilds first, so the realistic version of this is a merged break
+    pruned by a concurrent live emit between the build and the swap. That is
+    simulated at the ``_launch`` level, which is the seam the guard sits on --
+    monkeypatching the route instead would depend on when FastAPI bound it.
     """
+    import json as _json
+
+    from nostalgia.deploy import Roots
+    from nostalgia import deploy as deploy_mod
+
     _emit_live(config, paths)
-    client = _client(paths, config)
-    before = _live_day(paths)
+    roots = Roots.of(paths.playout_dir, paths.xmltv_dir)
+    roots.pending.playout_dir.mkdir(parents=True, exist_ok=True)
+    roots.pending.xmltv_dir.mkdir(parents=True, exist_ok=True)
+    (roots.pending.playout_dir / "20261030T000000_20261031T000000.json").write_text(
+        _json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "20261030-0000-ep1",
+                        "start": "2026-10-30T00:00:00+09:00",
+                        "finish": "2026-10-30T00:22:00+09:00",
+                        "source": {
+                            "source_type": "local",
+                            "path": str(paths.root / "media" / "gone.mkv"),
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    before = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in paths.playout_dir.glob("*.json")
+        if path.name != "last-deploy.json"
+    }
 
-    import nostalgia.web.app as web
+    from nostalgia import web as web_pkg
 
-    real_launch = web._launch
-
-    def launch_with_a_missing_file(config, paths):
-        from nostalgia.deploy import Roots
-
-        roots = Roots.of(paths.playout_dir, paths.xmltv_dir)
-        roots.pending.playout_dir.mkdir(parents=True, exist_ok=True)
-        roots.pending.xmltv_dir.mkdir(parents=True, exist_ok=True)
-        (roots.pending.playout_dir / "20261030T000000_20261031T000000.json").write_text(
-            json.dumps(
-                {
-                    "items": [
-                        {
-                            "id": "20261030-0000-ep1",
-                            "start": "2026-10-30T00:00:00+09:00",
-                            "finish": "2026-10-30T00:22:00+09:00",
-                            "source": {
-                                "source_type": "local",
-                                "path": str(paths.root / "media" / "gone.mkv"),
-                            },
-                        }
-                    ]
-                }
-            ),
-            encoding="utf-8",
+    with pytest.MonkeyPatch.context() as patch:
+        # Make the rebuild preserve the broken stage, then let the real guard run.
+        patch.setattr(
+            deploy_mod,
+            "missing_inputs",
+            lambda roots: [str(paths.root / "media" / "gone.mkv")],
         )
-        return real_launch(config, paths)
+        patch.setattr(web_pkg.app, "_launch", web_pkg.app._launch)
+        response = _client(paths, config).post("/schedule/launch")
 
-    import pytest as _pytest
-
-    with _pytest.MonkeyPatch.context() as patch:
-        patch.setattr(web, "_launch", launch_with_a_missing_file)
-        response = client.post("/schedule/launch")
     assert response.status_code == 303 and "error=" in response.headers["location"]
     assert "missing" in response.headers["location"]
-    assert _live_day(paths) == before, "a failed launch must not half-apply"
+    after = {
+        path.name: path.read_text(encoding="utf-8")
+        for path in paths.playout_dir.glob("*.json")
+        if path.name != "last-deploy.json"
+    }
+    assert after == before, "a failed launch must not half-apply"
 
 
 def test_the_api_still_works_while_a_deploy_is_pending(paths, config):

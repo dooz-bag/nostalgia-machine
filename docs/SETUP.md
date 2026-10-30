@@ -511,10 +511,23 @@ changed.
 
 | Category | Contains |
 |---|---|
-| The channel | name, guide ids, grid, timezone, era year, horizon, encode |
-| What airs between the shows | commercial pool and pod fitting, bump matching and generated cards |
-| The picture | the corner bug — mode, type, placement |
+| The channel | name, guide ids, era year, horizon |
+| What airs between the shows | commercial pool and era tolerance, generated cards |
+| The picture | the corner bug — on or off, and its text |
 | The schedule | which weekdays each day file applies to |
+
+**Main settings first, then Advanced.** Everything you are likely to change is on
+the page as soon as it loads; the numbers behind the scenes are in a collapsed
+**Advanced options** section: the broadcast grid, pod fitting and trim, smooth
+breaks, extras, bump matching, the corner bug's type and placement, the encode, and
+the local-model address used by the Lines page. Nothing is hidden — open the
+section and every one of those is there.
+
+There is **one save button** for the whole page (at the top of the scroll and
+again at the bottom), not one per file. It writes only the files whose fields you
+actually changed, so a save cannot disturb a file you did not touch. The page posts
+one namespace (`<file>::<key>`), which is how the two `era_drift_years` settings
+stay separate.
 
 Era tolerance appears **twice, separately**: `ads.era_drift_years` governs
 commercials, `bumps.era_drift_years` governs continuity cards. They are not one
@@ -523,18 +536,31 @@ predates the era wholesale, while commercials are filed by year — so a shared 
 forced a compromise on both. `0` means the era year only; untagged material is always
 eligible, because "unknown year" is not "wrong year".
 
-Each file has its own save button, so a mistake in one cannot block another, and
-saving replans the channel immediately.
+Saving stages a new schedule (see [Replan, then launch](#replan-then-launch)); the
+stream keeps playing what it was playing until you launch it.
 
 The page is a *form over the files*, never a second source of truth. Editing
 through it changes only the key you touched — comments, key order, quote style and
 anything the page does not display are preserved, so hand-editing and the page
 never fight. A blank optional field removes the key rather than writing `''`.
 
-Everything is validated before anything is written: a submission the config model
-would reject is refused with the file left untouched, because a saved file that
-cannot load would break the channel at the next plan with no clue which edit did
-it.
+Everything is validated before the save is claimed: a submission the config model
+would reject is rolled back with every file left exactly as it was, because a saved
+file that cannot load would break the channel at the next plan with no clue which
+edit did it. A change that is only wrong in combination — a day file naming a show
+that does not exist — is caught here too, since the whole config is re-validated
+after the write.
+
+Two smaller behaviours worth knowing, both of which used to bite:
+
+* **A blank optional field removes the key** rather than writing `''`, and a field
+  still at its default is not written at all, so saving the page does not pin every
+  default into the YAML.
+* **The browser never blocks a save.** The form is `novalidate` and the number
+  inputs carry no `step`: one value off a spinner step made the whole form refuse to
+  submit, with an error about a control the browser could not focus — inside a
+  collapsed Advanced section, so it looked like a dead button. Bounds are checked
+  on the server, where the reason can be shown.
 
 ### Finding the commercial that makes a break lurch
 

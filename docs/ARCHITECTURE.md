@@ -420,6 +420,26 @@ Two steps fix this without changing the plan:
 Because spots arrive pre-fitted, `trim_slop` is forced to zero when merging is on
 and the whole pool is conformed: a spot is never cut short to land on a pod length.
 
+## The settings page is one form over files grouped by intent
+
+`config_edit` is a schema first and a page second: each field declares its type,
+label, help, bounds and whether it belongs under Advanced, and that one declaration
+drives the render, the parsing of the submission and the validation. A setting
+cannot be shown but rejected on save, or accepted and then ignored.
+
+The page is **one** submission rather than one per file, because a setting's home
+file is an implementation detail the reader should not have to remember. Controls
+are named `<slug>::<key>`, which is what keeps `ads::era_drift_years` and
+`bumps::era_drift_years` apart, and `save_all` writes only the files whose fields
+were submitted. A file with no fields in the post is never opened, so a save cannot
+reset settings the page did not show — which is what happened when every file's
+missing checkboxes were filled in as "false".
+
+Validation runs *after* the write, because a rule like "a daypart references a real
+show" spans files and can only be judged on the whole document, so the route
+snapshots every editable file and restores it on rejection. That is what makes
+"nothing was saved" true rather than approximately true.
+
 ## A schedule change is staged, then launched
 
 Rewriting a playout file *is* changing the channel: the streamer re-reads it at
