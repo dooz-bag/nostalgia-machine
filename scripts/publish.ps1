@@ -156,8 +156,31 @@ try {
     # -- 3. authentication ---------------------------------------------------
 
     Write-Step "Authentication"
+    $signedIn = $false
     gh auth status 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
+    if ($LASTEXITCODE -eq 0) {
+        $signedIn = $true
+    }
+    else {
+        # Git Credential Manager usually already holds a GitHub token from an
+        # earlier `git push`. Reusing it means no browser round-trip at all. The
+        # token is read into this process only; nothing is written to disk.
+        $stored = $null
+        $filled = "protocol=https`nhost=github.com`n`n" | git credential fill 2>$null
+        $stored = ($filled | Select-String '^password=').Line -replace '^password=', ''
+        if ($stored) {
+            $env:GH_TOKEN = $stored
+            gh auth status 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) {
+                $signedIn = $true
+                Write-Note "using the GitHub token already stored by Git Credential Manager"
+            }
+            else {
+                Remove-Item Env:\GH_TOKEN -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    if (-not $signedIn) {
         Write-Note "not signed in to GitHub."
         Write-Host ""
         Write-Host "   Signing in now. Choose 'Login with a web browser' (a code is shown," -ForegroundColor Yellow
