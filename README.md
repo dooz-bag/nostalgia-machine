@@ -455,5 +455,9 @@ Two things to know if you fork it for a different channel:
 
 ### Licence
 
-MIT — see [LICENSE](LICENSE). The licence covers the code, not the media; none is
-distributed with it.
+MIT — see [LICENSE](LICENSE).
+
+The licence covers the code, not the media. None is distributed with this
+project: it ships no shows, bumps, commercials or network marks, only a
+scheduler that reads folders you supply. Use it with content you own or are
+otherwise entitled to use.
