@@ -1,9 +1,10 @@
 # Contributing
 
 Bug reports, accuracy fixes and "this didn't work on my machine" are genuinely
-welcome. This is a personal project built to run one channel well, so it is
-deliberately not multi-channel, not a Plex plugin, and it will not fetch media for
-you — see the scope note in the README before proposing a feature.
+welcome. This is a personal project built to run one channel well, so it isn't
+multi-channel, isn't a Plex plugin, and won't fetch media for you. Bug reports and
+accuracy fixes are very welcome; features that turn it into a general-purpose TV
+platform probably aren't.
 
 ## Before you send a change
 
