@@ -21,7 +21,11 @@ dependencies = [
 # edited by hand: PyYAML discards comments, and these files are mostly comments.
 web = ["fastapi>=0.110", "uvicorn>=0.29", "python-multipart>=0.0.9", "ruamel.yaml>=0.18"]
 tag = ["pytesseract>=0.3.10", "Pillow>=10.0"]
-dev = ["pytest>=8.0"]
+# The web tests drive the app through starlette's TestClient, which needs an
+# HTTP client of its own. Starlette 1.x wants `httpx2`; earlier versions want
+# `httpx`. Both are listed so the suite runs on whatever starlette resolves to,
+# rather than skipping the web tests and reporting a green run that tested less.
+dev = ["pytest>=8.0", "httpx>=0.27", "httpx2>=2.0"]
 
 [project.scripts]
 nostalgia = "nostalgia.cli:main"
