@@ -10,6 +10,9 @@ Python environment as the scheduler.
 
 from __future__ import annotations
 
+import json
+import mimetypes
+import sqlite3
 from collections import Counter
 from dataclasses import asdict
 from threading import Lock
@@ -22,6 +25,13 @@ from fastapi import Request
 
 from ..catalog import Catalog
 from ..config import ConfigError, RootConfig, load_config
+from ..media_review import (
+    MediaImportError,
+    analyze_source,
+    export_segments,
+    load_analysis,
+    resolve_source,
+)
 from ..paths import Paths
 from ..pipeline import build
 from ..rotation import EpisodeRef
@@ -50,6 +60,7 @@ from .continuity_edit import (
     template_for,
 )
 from . import lines as lines_web
+from . import imports as imports_web
 from .commercials import commercials_body, set_family_enabled, set_spot_enabled
 from .schedule import (
     ScheduleFormError,
@@ -785,7 +796,7 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
 {_test_card(card)}
 <header>
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
-  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/lines", "Lines")}{nav("/config", "Config")}</nav>
+  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/imports", "Import media")}{nav("/lines", "Lines")}{nav("/config", "Config")}</nav>
 </header>
 <main>
   <section id="work-progress" class="work-progress" role="status" aria-live="polite" hidden>
@@ -900,7 +911,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
     """Build the ASGI app. Imported lazily so the core has no FastAPI dependency."""
     try:
         from fastapi import FastAPI, Form, HTTPException
-        from fastapi.responses import HTMLResponse, RedirectResponse
+        from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
     except ImportError as exc:  # pragma: no cover - depends on extras
         raise RuntimeError(
             "the web UI needs extra packages: pip install 'nostalgia-machine[web]'"
@@ -1379,6 +1390,179 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 error=error,
             )
         return _render(_page("Commercials", body, active="/commercials", card=_card(current)))
+
+    @app.get("/imports", response_class=HTMLResponse)
+    def imports_page(
+        imported: str = "", source: str = "", built: str = "", error: str = ""
+    ) -> Any:
+        message = (
+            f"Imported {imported} clip(s) from {source}. The source video is unchanged."
+            if imported
+            else ""
+        )
+        current = _reload(config, paths)
+        body = imports_web.imports_body(paths, current, error=error, message=message)
+        if built:
+            body += (
+                f'<p class="hint">Schedule update: {_h(built)}. '
+                '<a href="/schedule">Open Schedule</a>.</p>'
+            )
+        return _render(_page("Media import", body, active="/imports", card=_card(current)))
+
+    @app.post("/imports/analyze")
+    def analyze_import(request: Request, filename: str = Form(...)) -> Any:
+        report_progress(request, "Analyzing video and detecting scene cuts")
+        try:
+            analysis = analyze_source(paths, filename)
+        except MediaImportError as exc:
+            fail_progress(request, "Video analysis failed")
+            current = _reload(config, paths)
+            return HTMLResponse(
+                _page(
+                    "Media import",
+                    imports_web.imports_body(paths, current, error=str(exc)),
+                    active="/imports",
+                    card=_card(current),
+                ),
+                status_code=400,
+            )
+        return RedirectResponse(f"/imports/review/{analysis.token}", status_code=303)
+
+    @app.get("/imports/source/{filename:path}")
+    def import_source(filename: str) -> Any:
+        try:
+            source = resolve_source(paths, filename)
+        except MediaImportError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        media_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+        return FileResponse(source, media_type=media_type)
+
+    @app.get("/imports/review/{token}", response_class=HTMLResponse)
+    def review_import(token: str, error: str = "") -> Any:
+        try:
+            analysis, _ = load_analysis(paths, token)
+        except MediaImportError as exc:
+            current = _reload(config, paths)
+            return HTMLResponse(
+                _page(
+                    "Media import",
+                    imports_web.imports_body(paths, current, error=str(exc)),
+                    active="/imports",
+                    card=_card(current),
+                ),
+                status_code=404,
+            )
+        current = _reload(config, paths)
+        return _render(
+            _page(
+                "Review video",
+                imports_web.imports_body(paths, current, analysis=analysis, error=error),
+                active="/imports",
+                card=_card(current),
+            )
+        )
+
+    @app.post("/imports/export")
+    async def export_import(request: Request) -> Any:
+        form = await request.form()
+        token = str(form.get("token") or "")
+        ad_year = str(form.get("ad_year") or "")
+        bump_subject = str(form.get("bump_subject") or "neutral")
+        bump_era = str(form.get("bump_era") or "")
+        segment_text = str(form.get("segments") or "")
+        current = _reload(config, paths)
+        analysis = None
+        try:
+            analysis, _ = load_analysis(paths, token)
+            try:
+                segments = json.loads(segment_text)
+            except json.JSONDecodeError as exc:
+                raise MediaImportError(
+                    "The segment review could not be read; please review it again."
+                ) from exc
+            report_progress(request, "Validating the approved segments")
+            report_progress(request, "Encoding approved clips")
+            exported = export_segments(
+                paths,
+                token,
+                segments,
+                ad_year=ad_year,
+                bump_subject=bump_subject,
+                bump_era=bump_era,
+                known_subjects=set(current.shows),
+            )
+        except MediaImportError as exc:
+            fail_progress(request, "Clip export failed")
+            if analysis is None:
+                return HTMLResponse(
+                    _page(
+                        "Media import",
+                        imports_web.imports_body(paths, current, error=str(exc)),
+                        active="/imports",
+                        card=_card(current),
+                    ),
+                    status_code=400,
+                )
+            try:
+                previous = json.loads(segment_text)
+            except json.JSONDecodeError:
+                previous = []
+            if not isinstance(previous, list):
+                previous = []
+            return HTMLResponse(
+                _page(
+                    "Review video",
+                    imports_web.imports_body(
+                        paths,
+                        current,
+                        analysis=analysis,
+                        error=str(exc),
+                        prior_segments=previous,
+                        ad_year=ad_year,
+                        bump_subject=bump_subject,
+                        bump_era=bump_era,
+                    ),
+                    active="/imports",
+                    card=_card(current),
+                ),
+                status_code=400,
+            )
+
+        report_progress(request, "Refreshing the media catalog")
+        from ..pipeline import scan
+
+        try:
+            with Catalog(paths.catalog) as catalog:
+                scan(current, catalog, paths)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            fail_progress(request, "Catalog refresh failed")
+            return HTMLResponse(
+                _page(
+                    "Media import",
+                    imports_web.imports_body(
+                        paths,
+                        current,
+                        error=(
+                            f"Exported {len(exported)} clip(s), but the catalog could "
+                            f"not refresh: {exc}. Run nostalgia scan."
+                        ),
+                    ),
+                    active="/imports",
+                    card=_card(current),
+                ),
+                status_code=500,
+            )
+        built = queue_deploy(
+            current,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        )
+        return RedirectResponse(
+            f"/imports?imported={len(exported)}"
+            f"&source={quote_plus(analysis.source_name)}&built={quote_plus(built)}",
+            status_code=303,
+        )
 
     @app.get("/lines", response_class=HTMLResponse)
     def lines_page(saved: str = "", error: str = "") -> Any:

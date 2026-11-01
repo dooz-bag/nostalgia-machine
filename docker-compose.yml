@@ -82,6 +82,8 @@ services:
       # writes programming.yaml and rebuilds the plan when you save a schedule.
       - ./config:/app/config
       - ${MEDIA_DIR:-./media}:/app/media:ro
+      # User-managed video input for the website's mixed-media review workflow.
+      - ./media/imports:/app/media/imports
       - ./data:/app/data
       - ./playout:/app/playout
       - ./xmltv:/app/xmltv

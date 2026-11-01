@@ -99,6 +99,31 @@ the script do the part a downloader cannot:
 `October 2003 break.mp4` lands in `2003/`. Files are skipped if their output already
 exists, so re-running after adding more is cheap.
 
+#### Separate bumpers and commercials from one recording
+
+For a mixed compilation, copy an authorized local video into `media/imports/` and
+open **Import media** in the website. The video is analyzed for scene-cut
+candidates; those are seek suggestions, not assumed clip boundaries. Use the
+player to review the recording, mark each bumper/commercial's start and end, and
+approve its suggested class or choose **Skip**. The duration-based class suggestion
+is only a starting point.
+
+Enter a commercial year when exporting ads. For bumpers, choose a configured show
+or **Neutral / unknown show**; a bumper era is optional. Approved ads land in
+`media/commercials/<year>/`; bumpers land in the selected `media/bumps/` folder
+with import-provenance tags. Those metadata choices apply to all clips of that
+class from the source; choose neutral if its bumpers cover multiple shows.
+Existing files are not overwritten, the source video
+stays untouched in `media/imports/`, and the catalog is refreshed after export. A
+new schedule is staged too; review it under **Schedule** and launch it when ready.
+The current live schedule is not replaced automatically. If catalog refresh reports
+an error, run `nostalgia scan`.
+
+The website does not download the supplied URL. Obtain the authorized video file
+through a method available to you, then stage that local file in `media/imports/`.
+In Docker Compose, only this staging folder is writable for source videos; the
+other media remains read-only except for the existing generated/derived mounts.
+
 #### Two things that will otherwise fool you
 
 **The year comes from the title, not the upload date.** An item called
@@ -472,6 +497,7 @@ Docker runs the page as its own service, so it is up whenever the stack is:
 | Schedule | `http://<host>:8099/schedule` |
 | Bump review | `http://<host>:8099/bumps` |
 | Commercials | `http://<host>:8099/commercials` |
+| Import media | `http://<host>:8099/imports` |
 | Lines | `http://<host>:8099/lines` |
 | Config | `http://<host>:8099/config` |
 

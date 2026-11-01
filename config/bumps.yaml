@@ -48,7 +48,7 @@ bumps:
     enabled: true
 
     # Never let more than this fraction of the day's bump slots be synthetic.
-    max_share: 0.25
+    max_share: 0.15
 
     cache_dir: "bumps/generated"
 

@@ -38,6 +38,7 @@ channel:
 
 # Default encode. 720p/2.5 Mbps keeps a 24/7 transcode affordable; raise it if
 # you have a GPU and want 1080p.
+  logo: https://upload.wikimedia.org/wikipedia/commons/f/f7/Old_Adult_Swim_Logo.png
 encoding:
   width: 1280
   height: 720
