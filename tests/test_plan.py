@@ -15,7 +15,7 @@ import pytest
 from dataclasses import replace
 
 from nostalgia.catalog import Catalog
-from nostalgia.config import load_config
+from nostalgia.config import ProgrammingConfig, load_config
 from nostalgia.emit import (
     EmitPaths,
     playout_filename,
@@ -216,6 +216,93 @@ def test_build_is_deterministic(config, catalog, paths: Paths) -> None:
     first = build(config, catalog, paths, start=DAY, days=1, emit=False, ignore_cooldowns=True)
     second = build(config, catalog, paths, start=DAY, days=1, emit=False, ignore_cooldowns=True)
     assert to_playout_json(first.plans[0]) == to_playout_json(second.plans[0])
+
+
+def test_sequential_start_continues_across_built_days(config, catalog, paths: Paths) -> None:
+    programmed = config.model_copy(
+        update={
+            "programming": ProgrammingConfig(
+                mode="lineup",
+                lineup=[
+                    {
+                        "show_id": "futurama",
+                        "order": "sequential",
+                        "start_season": 1,
+                        "start_episode": 3,
+                        "start_date": DAY,
+                    }
+                ],
+            )
+        }
+    )
+    result = build(
+        programmed,
+        catalog,
+        paths,
+        start=DAY,
+        days=2,
+        emit=False,
+        ignore_cooldowns=True,
+    )
+    first_day = [item.asset_key for item in result.plans[0].episode_items()]
+    second_day = [item.asset_key for item in result.plans[1].episode_items()]
+    ring = [
+        episode.key
+        for episode in catalog.episodes()
+        if episode.show_id == "futurama"
+    ]
+
+    assert first_day[0] == "futurama:s01e003"
+    assert second_day[0] == ring[(ring.index(first_day[-1]) + 1) % len(ring)]
+
+
+def test_sequential_progress_uses_recorded_airings_on_next_build(
+    config, catalog, paths: Paths
+) -> None:
+    programmed = config.model_copy(
+        update={
+            "programming": ProgrammingConfig(
+                mode="lineup",
+                lineup=[
+                    {
+                        "show_id": "futurama",
+                        "order": "sequential",
+                        "start_season": 1,
+                        "start_episode": 3,
+                        "start_date": DAY,
+                    }
+                ],
+            )
+        }
+    )
+    first = build(
+        programmed,
+        catalog,
+        paths,
+        start=DAY,
+        days=1,
+        emit=False,
+        ignore_cooldowns=True,
+    )
+    next_day = build(
+        programmed,
+        catalog,
+        paths,
+        start=date(2003, 6, 17),
+        days=1,
+        emit=False,
+        ignore_cooldowns=True,
+    )
+    aired = [item.asset_key for item in first.plans[0].episode_items()]
+    ring = [
+        episode.key
+        for episode in catalog.episodes()
+        if episode.show_id == "futurama"
+    ]
+
+    assert next_day.plans[0].episode_items()[0].asset_key == ring[
+        (ring.index(aired[-1]) + 1) % len(ring)
+    ]
 
 
 def test_emitted_json_matches_on_a_rebuild(config, catalog, paths: Paths) -> None:

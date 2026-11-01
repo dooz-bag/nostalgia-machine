@@ -36,7 +36,7 @@ from .emit import (
     write_guide,
     write_playout,
 )
-from .grid import GridError, build_day, is_dst_transition_day
+from .grid import GridError, build_day, day_bounds_ms, is_dst_transition_day
 from .mergebreaks import MergedRun, merge_plan, prune_merged
 from .plan import Plan, PlanContext, PlanError, build_plan
 from .paths import Paths
@@ -575,9 +575,34 @@ def build(
     # clicks, and the file is only rewritten after the whole run succeeds.
     overrides = load_overrides(paths.skips) if use_skips else OverrideFile()
     applied: dict = {}
+    last_episodes: dict[str, str] = {}
 
     for offset in range(horizon):
         day = start_day + timedelta(days=offset)
+        if offset == 0:
+            day_start, _ = day_bounds_ms(day, config.channel.grid)
+            aired = catalog.last_episode_airings(before_ms=day_start)
+            starts = {
+                entry.show_id: entry.start_date
+                for entry in config.programming.lineup
+                if entry.start_date is not None and entry.start_date <= day
+            }
+            last_episodes = {
+                show_id: key
+                for show_id, (key, started_ms) in aired.items()
+                if (
+                    show_id not in starts
+                    or started_ms >= day_bounds_ms(
+                        starts[show_id], config.channel.grid
+                    )[0]
+                )
+            }
+        for entry in config.programming.lineup:
+            if entry.start_date == day:
+                # A newly chosen start point takes effect on its configured day,
+                # irrespective of older episodes in the airing history.
+                last_episodes.pop(entry.show_id, None)
+
         if progress is not None:
             progress(f"Planning day {offset + 1} of {horizon}: {day.isoformat()}")
         day_config = day_config_for(config, day)
@@ -590,6 +615,7 @@ def build(
                 ignore_cooldowns=ignore_cooldowns,
                 allow_generated=allow_generated,
                 skips=pending,
+                last_episodes=last_episodes,
             )
         except (PlanError, GridError) as exc:
             raise BuildError(f"{day}: {exc}") from exc
@@ -599,6 +625,11 @@ def build(
             )
 
         result.plans.append(plan)
+        for item in sorted(plan.items, key=lambda scheduled: scheduled.start_ms):
+            if item.kind == "episode":
+                show_id, separator, _ = item.asset_key.partition(":")
+                if separator:
+                    last_episodes[show_id] = item.asset_key
         result.warnings.extend(plan.warnings)
         result.fallbacks += len(plan.bump_fallbacks)
         result.fallback_reasons.extend(plan.bump_fallback_reasons)

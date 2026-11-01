@@ -273,13 +273,19 @@ way the result is data in a file, so the schedule diffs, survives a wiped catalo
 can be committed.
 
 **Lineup.** Shows take turns, one slot each, cycling. Per show, `order` decides how
-episodes are chosen:
+episodes are chosen. The website lets you add or remove multiple show rows in one
+save. A sequential row can start at a season, or at a specific episode within that
+season:
 
 ```yaml
 programming:
   mode: lineup
   lineup:
-    - {show_id: futurama, order: sequential}    # in order, wrapping
+    - show_id: futurama
+      order: sequential
+      start_season: 2
+      start_episode: 3
+      start_date: "2026-11-01" # the website sets this when the start point changes
     - {show_id: king-of-the-hill, order: by_season}
     - {show_id: aqua-teen-hunger-force, order: random}
   pinned:
@@ -290,11 +296,20 @@ programming:
 season can't hog its own airtime. Picking uniformly over episodes is what lets that
 happen, and it's the first thing viewers notice.
 
+`start_season` without `start_episode` begins at the first available episode of that
+season. These start fields affect only `sequential`; Random ignores them. Sequential
+continues after the latest recorded episode airing from the previous broadcast day,
+then wraps at the end of the show's catalog. If the selected start episode is missing,
+the next available episode is used. The website records `start_date` when a start
+point changes so older airings don't override the new starting point; when editing
+YAML directly, set it to the date the start should take effect.
+
 **Shuffle.** Each show takes one turn per pass, in id order. Turn order is
 deliberately *not* weighted by episode count: a ten-season show would otherwise
 swallow a stream that's meant to feel varied. `shuffle_shows: []` means the whole
 roster, and keeps meaning that as you add shows. `shuffle_order` picks how each
-show's episodes come out.
+show's episodes come out. Sequential shuffle also continues from the latest
+recorded episode airing across broadcast days.
 
 ```yaml
 programming:
@@ -306,8 +321,9 @@ programming:
 **Slots follow the content.** A lineup can't inherit day-file slot sizes: a 22-minute
 episode in a 15-minute slot overruns, and the planner refuses to emit. So in
 `lineup`/`shuffle` modes the grid is generated from each show's own `slot` family and
-filled to the millisecond. Episodes are a pure function of
-`(day, position, config)`, so previewing tomorrow can't consume tomorrow.
+filled to the millisecond. Random episode choices are deterministic for the same
+date/configuration; sequential order follows the recorded episode history and does
+not advance merely because a future schedule was previewed.
 
 ## Generated bumps (Phase 2)
 

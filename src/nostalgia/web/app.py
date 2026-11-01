@@ -15,6 +15,7 @@ import mimetypes
 import sqlite3
 from collections import Counter
 from dataclasses import asdict
+from datetime import date
 from threading import Lock
 from time import monotonic
 from typing import Any, Callable, Sequence
@@ -411,6 +412,8 @@ button {
   font-size: 11px;
 }
 button:hover { background: #1a1a5e; border-color: var(--accent); }
+button.secondary { background: transparent; color: var(--dim); }
+button.secondary:hover { color: var(--fg); }
 
 .empty { color: var(--dim); font-style: italic; }
 
@@ -517,6 +520,10 @@ body:has(.modes input[value="dayparts"]:checked) .panel[data-mode="dayparts"] {
 .row select, .row input { flex: 1; min-width: 0; }
 .row .num { flex: 0 0 78px; }
 .row button { flex: 0 0 auto; }
+.lineup-row { flex-wrap: wrap; }
+.lineup-row select:first-child { flex: 2 1 190px; }
+.lineup-row select:nth-child(2) { flex: 1 1 120px; }
+.lineup-row input[type="number"] { flex: 0 1 82px; }
 
 .hint { color: var(--dim); font-size: 12px; margin: 0 0 12px; max-width: 62ch; }
 .hint code { color: var(--accent); }
@@ -751,6 +758,7 @@ details.advanced > summary .dim { letter-spacing: .08em; text-transform: none; }
   main, header, footer { padding-left: 16px; padding-right: 16px; }
   .now-title { font-size: 22px; }
   header nav { margin-left: 0; }
+  .lineup-row select, .lineup-row input[type="number"] { flex: 1 1 42%; }
 }
 """
 
@@ -837,6 +845,21 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
       return item;
     }}));
   }}
+
+  document.addEventListener("click", (event) => {{
+    const add = event.target.closest("[data-lineup-add]");
+    if (add) {{
+      const template = document.getElementById("lineup-row-template");
+      const rows = document.getElementById("lineup-rows");
+      if (!template || !rows) return;
+      const row = template.content.firstElementChild.cloneNode(true);
+      rows.append(row);
+      row.querySelector("select[name='lineup_show']").focus();
+      return;
+    }}
+    const remove = event.target.closest("[data-lineup-remove]");
+    if (remove) remove.closest("[data-lineup-row]").remove();
+  }});
 
   document.addEventListener("submit", async (event) => {{
     const form = event.target.closest("form[data-progress]");
@@ -1189,6 +1212,9 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         mode: str = Form("dayparts"),
         lineup_show: list[str] = Form(default=[]),
         lineup_order: list[str] = Form(default=[]),
+        lineup_start_season: list[str] = Form(default=[]),
+        lineup_start_episode: list[str] = Form(default=[]),
+        lineup_start_date: list[str] = Form(default=[]),
         pinned_show: list[str] = Form(default=[]),
         pinned_season: list[str] = Form(default=[]),
         pinned_episode: list[str] = Form(default=[]),
@@ -1206,12 +1232,40 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 mode=mode,
                 lineup_show=lineup_show,
                 lineup_order=lineup_order,
+                lineup_start_season=lineup_start_season,
+                lineup_start_episode=lineup_start_episode,
+                lineup_start_date=lineup_start_date,
                 pinned_show=pinned_show,
                 pinned_season=pinned_season,
                 pinned_episode=pinned_episode,
                 shuffle_shows=shuffle_shows,
                 shuffle_order=shuffle_order,
             )
+            previous = {
+                entry.show_id: entry for entry in current.programming.lineup
+            }
+            form.lineup = [
+                entry.model_copy(
+                    update={
+                        "start_date": (
+                            None
+                            if entry.start_season is None
+                            else (
+                                previous[entry.show_id].start_date
+                                if entry.show_id in previous
+                                and previous[entry.show_id].order == entry.order
+                                and previous[entry.show_id].start_season
+                                == entry.start_season
+                                and previous[entry.show_id].start_episode
+                                == entry.start_episode
+                                and previous[entry.show_id].start_date is not None
+                                else date.today()
+                            )
+                        )
+                    }
+                )
+                for entry in form.lineup
+            ]
             # Validate the whole config before writing: a saved file that cannot
             # be loaded would break the channel at the next plan, and the user
             # would have no idea which of their edits did it.
@@ -2052,22 +2106,46 @@ def _schedule_page(
             for show in shows
         )
 
-    def lineup_rows() -> str:
-        rows = [
-            '<div class="row">'
-            f'<select name="lineup_show">{pick(entry.show_id)}</select>'
-            f'<select name="lineup_order">{_order_options(entry.order)}</select>'
-            "</div>"
-            for entry in form.lineup
-        ]
-        # One blank row, so a new entry can be added without any script.
-        rows.append(
-            '<div class="row">'
-            f'<select name="lineup_show">{pick("", "— add a show —")}</select>'
-            f'<select name="lineup_order">{_order_options("random")}</select>'
+    def lineup_row(
+        show_id: str = "",
+        order: str = "random",
+        start_season: int | None = None,
+        start_episode: int | None = None,
+        start_date: str = "",
+    ) -> str:
+        return (
+            '<div class="row lineup-row" data-lineup-row>'
+            '<select name="lineup_show" aria-label="Show">'
+            f'{pick(show_id, "— choose a show —")}</select>'
+            '<select name="lineup_order" aria-label="Episode order">'
+            f'{_order_options(order)}</select>'
+            f'<input class="num" type="number" min="0" name="lineup_start_season" '
+            f'value="{_h("" if start_season is None else start_season)}" '
+            'placeholder="Season" aria-label="Start season">'
+            f'<input class="num" type="number" min="0" name="lineup_start_episode" '
+            f'value="{_h("" if start_episode is None else start_episode)}" '
+            'placeholder="Episode" aria-label="Start episode">'
+            f'<input type="hidden" name="lineup_start_date" value="{_h(start_date)}">'
+            '<button type="button" class="secondary" data-lineup-remove>Remove</button>'
             "</div>"
         )
+
+    def lineup_rows() -> str:
+        rows = [
+            lineup_row(
+                entry.show_id,
+                entry.order,
+                entry.start_season,
+                entry.start_episode,
+                entry.start_date.isoformat() if entry.start_date else "",
+            )
+            for entry in form.lineup
+        ]
+        if not rows:
+            rows.append(lineup_row())
         return "".join(rows)
+
+    lineup_template = lineup_row()
 
     def pinned_rows() -> str:
         rows = []
@@ -2154,13 +2232,18 @@ def _schedule_page(
     </div>
 
     <div class="panel {"show" if form.mode == "lineup" else ""}" data-mode="lineup">
-      <p class="hint">Shows take turns, one slot each, cycling. Slots are sized
+      <p class="hint">Add one row per show; each show takes one turn per pass.
+      Add or remove rows before saving. Slots are sized
       from each show's own <code>slot</code> family, so a 22-minute show gets a
       30-minute slot and an 11-minute show gets 15. <code>by season</code>
-      weighs seasons equally, so one long season cannot dominate a show's own
-      airtime.</p>
+      weighs seasons equally. For <code>sequential</code>, set a start season and
+      optionally an episode; it continues from there across days. Leave both blank
+      to continue from aired history (or start at the first episode). Random ignores
+      the start fields.</p>
       <p class="label">Lineup</p>
-      {lineup_rows()}
+      <div id="lineup-rows">{lineup_rows()}</div>
+      <template id="lineup-row-template">{lineup_template}</template>
+      <button type="button" class="secondary" data-lineup-add>Add another show</button>
       <p class="label" style="margin-top:16px">Pinned episodes</p>
       <p class="hint">Played verbatim, in this order, then the cycle repeats.</p>
       {pinned_rows()}

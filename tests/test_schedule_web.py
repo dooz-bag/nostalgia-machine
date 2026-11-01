@@ -7,6 +7,8 @@ the page does not own, and that a rejected form does not damage the file.
 
 from __future__ import annotations
 
+from datetime import date
+
 import pytest
 
 from nostalgia.config import ProgrammingConfig, load_config
@@ -42,6 +44,29 @@ def test_parse_form_pairs_lineup_rows():
     ]
 
 
+def test_parse_form_keeps_start_points_for_multiple_shows():
+    form = parse_form(
+        mode="lineup",
+        lineup_show=["futurama", "sealab-2021"],
+        lineup_order=["sequential", "random"],
+        lineup_start_season=["2", "1"],
+        lineup_start_episode=["3", ""],
+        lineup_start_date=["2026-11-01", ""],
+    )
+    assert [
+        (
+            entry.show_id,
+            entry.start_season,
+            entry.start_episode,
+            entry.start_date,
+        )
+        for entry in form.lineup
+    ] == [
+        ("futurama", 2, 3, date(2026, 11, 1)),
+        ("sealab-2021", 1, None, None),
+    ]
+
+
 def test_parse_form_skips_blank_lineup_rows():
     """The page always renders one empty row for adding; it must not become an entry."""
     form = parse_form(
@@ -55,6 +80,16 @@ def test_parse_form_skips_blank_lineup_rows():
 def test_parse_form_rejects_mismatched_lineup_columns():
     with pytest.raises(ScheduleFormError, match="mismatched"):
         parse_form(mode="lineup", lineup_show=["a", "b"], lineup_order=["random"])
+
+
+def test_parse_form_rejects_episode_start_without_season():
+    with pytest.raises(ScheduleFormError, match="needs a starting season"):
+        parse_form(
+            mode="lineup",
+            lineup_show=["futurama"],
+            lineup_order=["sequential"],
+            lineup_start_episode=["2"],
+        )
 
 
 def test_parse_form_renders_pinned_keys():
@@ -99,7 +134,15 @@ def test_parse_form_drops_empty_shuffle_shows():
 def test_write_then_load_round_trips(programming_yaml, library):
     form = ScheduleForm(
         mode="lineup",
-        lineup=[{"show_id": "futurama", "order": "sequential"}],
+        lineup=[
+            {
+                "show_id": "futurama",
+                "order": "sequential",
+                "start_season": 2,
+                "start_episode": 3,
+                "start_date": date(2026, 11, 1),
+            }
+        ],
         pinned=["futurama:s01e002"],
         shuffle_shows=["futurama"],
         shuffle_order="by_season",
@@ -110,6 +153,9 @@ def test_write_then_load_round_trips(programming_yaml, library):
     assert config.programming.mode == "lineup"
     assert config.programming.lineup[0].show_id == "futurama"
     assert config.programming.lineup[0].order == "sequential"
+    assert config.programming.lineup[0].start_season == 2
+    assert config.programming.lineup[0].start_episode == 3
+    assert config.programming.lineup[0].start_date == date(2026, 11, 1)
     assert config.programming.pinned == ["futurama:s01e002"]
     assert config.programming.shuffle_shows == ["futurama"]
     assert config.programming.shuffle_order == "by_season"
@@ -203,6 +249,14 @@ def test_schedule_page_lists_the_roster_with_episode_counts(paths, config):
     assert "(6)" in body
 
 
+def test_schedule_page_exposes_multiple_lineup_rows_and_start_fields(paths, config):
+    body = _client(paths, config).get("/schedule").text
+    assert 'data-lineup-add' in body
+    assert 'data-lineup-remove' in body
+    assert 'name="lineup_start_season"' in body
+    assert 'name="lineup_start_episode"' in body
+
+
 def test_schedule_page_warns_about_a_show_with_no_media(paths, library):
     """A rostered show with nothing downloaded would otherwise fail silently."""
     (library.config / "shows.yaml").write_text(
@@ -223,8 +277,11 @@ def test_saving_a_lineup_persists_and_replans(paths, config):
         "/schedule",
         data={
             "mode": "lineup",
-            "lineup_show": ["futurama", ""],
+            "lineup_show": ["futurama", "sealab-2021"],
             "lineup_order": ["sequential", "random"],
+            "lineup_start_season": ["2", ""],
+            "lineup_start_episode": ["3", ""],
+            "lineup_start_date": ["", ""],
             "shuffle_order": "random",
         },
         follow_redirects=False,
@@ -235,6 +292,12 @@ def test_saving_a_lineup_persists_and_replans(paths, config):
     saved = load_config(paths.config_dir)
     assert saved.programming.mode == "lineup"
     assert saved.programming.lineup[0].show_id == "futurama"
+    assert saved.programming.lineup[0].start_season == 2
+    assert saved.programming.lineup[0].start_episode == 3
+    assert saved.programming.lineup[0].start_date is not None
+    assert saved.programming.lineup[0].start_date == date.today()
+    assert len(saved.programming.lineup) == 2
+    assert saved.programming.lineup[1].show_id == "sealab-2021"
 
 
 def test_a_rejected_form_leaves_the_file_untouched(paths, config, programming_yaml):

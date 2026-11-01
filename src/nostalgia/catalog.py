@@ -1336,6 +1336,23 @@ class Catalog:
         )
         return {row["asset_key"]: row["last"] for row in rows}
 
+    def last_episode_airings(
+        self, *, before_ms: int
+    ) -> dict[str, tuple[str, int]]:
+        """Latest aired episode key per show before a broadcast-day boundary."""
+        query = (
+            "SELECT asset_key, start_ms FROM airings "
+            "WHERE kind = 'episode' AND start_ms < ? ORDER BY start_ms DESC"
+        )
+
+        latest: dict[str, tuple[str, int]] = {}
+        for row in self.connect().execute(query, (before_ms,)):
+            key = row["asset_key"]
+            show_id, separator, episode_code = key.partition(":")
+            if separator and episode_code.startswith("s"):
+                latest.setdefault(show_id, (key, int(row["start_ms"])))
+        return latest
+
     def clear_day(self, day: str) -> None:
         with self.transaction() as connection:
             connection.execute("DELETE FROM airings WHERE day = ?", (day,))

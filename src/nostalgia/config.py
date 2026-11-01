@@ -366,11 +366,15 @@ ProgrammingMode = Literal["dayparts", "lineup", "shuffle"]
 
 
 class ProgrammingEntry(_Model):
-    """One show in a hand-built lineup, with how its episodes are chosen."""
+    """One show in a hand-built lineup, with episode order and optional start."""
 
     show_id: str
     order: OrderMode = "random"
     weight: float = Field(default=1.0, gt=0)
+    start_season: int | None = Field(default=None, ge=0)
+    start_episode: int | None = Field(default=None, ge=0)
+    start_date: date | None = None
+    """When this sequential start point became active; managed by the web editor."""
 
     @property
     def is_show(self) -> bool:
@@ -388,7 +392,11 @@ class ProgrammingConfig(_Model):
     mode: ProgrammingMode = "dayparts"
 
     lineup: list[ProgrammingEntry] = Field(default_factory=list)
-    """For ``lineup``: the shows (and pinned episodes) to cycle."""
+    """For ``lineup``: the shows (and pinned episodes) to cycle.
+
+    Sequential starts continue from recorded episode airings across broadcast
+    days. Optional start fields select the first episode on ``start_date``.
+    """
 
     pinned: list[str] = Field(default_factory=list)
     """Episode keys played verbatim, cycling after the lineup entries.
@@ -423,6 +431,14 @@ class ProgrammingConfig(_Model):
         for entry in self.lineup:
             if entry.order not in ("random", "by_season", "sequential"):
                 raise ValueError(f"unknown order {entry.order!r} for {entry.show_id}")
+            if entry.start_episode is not None and entry.start_season is None:
+                raise ValueError(
+                    f"{entry.show_id}: a starting episode needs a starting season"
+                )
+            if entry.start_date is not None and entry.start_season is None:
+                raise ValueError(
+                    f"{entry.show_id}: a start date needs a starting season"
+                )
         return self
 
 

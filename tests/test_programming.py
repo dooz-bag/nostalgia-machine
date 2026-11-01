@@ -150,6 +150,109 @@ def test_lineup_sequential_advances_one_episode_per_appearance(config, catalog):
     assert [slot.episode.episode for slot in report.slots] == [1, 2, 3]
 
 
+def test_lineup_sequential_starts_at_configured_episode(config, catalog):
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[
+            {
+                "show_id": "futurama",
+                "order": "sequential",
+                "start_season": 1,
+                "start_episode": 3,
+            }
+        ],
+    )
+    report = programming.build_lineup(
+        root, catalog.episodes(), slots_per_day=3, day=DAY
+    )
+    assert [
+        (slot.episode.season, slot.episode.episode) for slot in report.slots
+    ] == [(1, 3), (2, 1), (2, 2)]
+
+
+def test_lineup_sequential_can_start_at_first_episode_of_season(config, catalog):
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[
+            {
+                "show_id": "futurama",
+                "order": "sequential",
+                "start_season": 2,
+            }
+        ],
+    )
+    report = programming.build_lineup(
+        root, catalog.episodes(), slots_per_day=2, day=DAY
+    )
+    assert [(slot.episode.season, slot.episode.episode) for slot in report.slots] == [
+        (2, 1),
+        (2, 2),
+    ]
+
+
+def test_lineup_random_ignores_configured_start(config, catalog):
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[
+            {
+                "show_id": "futurama",
+                "order": "random",
+                "start_season": 1,
+                "start_episode": 3,
+            }
+        ],
+    )
+    report = programming.build_lineup(
+        root, catalog.episodes(), slots_per_day=6, day=DAY
+    )
+    rings = programming.rings_for(root, catalog.episodes())
+    expected = [
+        programming.pick_episode(rings["futurama"], "random", i, seed_parts=(DAY.isoformat(),))
+        for i in range(6)
+    ]
+    assert [slot.episode for slot in report.slots] == expected
+
+
+def test_sequential_continues_after_last_aired_episode(config, catalog):
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[{"show_id": "futurama", "order": "sequential"}],
+    )
+    report = programming.build_lineup(
+        root,
+        catalog.episodes(),
+        slots_per_day=2,
+        day=NEXT_DAY,
+        last_episodes={"futurama": "futurama:s01e003"},
+    )
+    assert [
+        (slot.episode.season, slot.episode.episode) for slot in report.slots
+    ] == [(2, 1), (2, 2)]
+
+
+def test_sequential_shuffle_continues_after_last_aired_episode(config, catalog):
+    root = _config(
+        config,
+        mode="shuffle",
+        shuffle_shows=["futurama"],
+        shuffle_order="sequential",
+    )
+    report = programming.build_shuffle(
+        root,
+        catalog.episodes(),
+        slots_per_day=2,
+        day=NEXT_DAY,
+        last_episodes={"futurama": "futurama:s01e003"},
+    )
+    assert [
+        (slot.episode.season, slot.episode.episode) for slot in report.slots
+    ] == [(2, 1), (2, 2)]
+
+
 def test_lineup_does_not_reshuffle_at_midnight(config, catalog):
     """Lineup order is a property of the config, not of the day."""
     root, _ = _lineup(

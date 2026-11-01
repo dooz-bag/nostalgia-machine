@@ -266,6 +266,7 @@ def build_plan(
     ignore_cooldowns: bool = False,
     allow_generated: bool | None = None,
     skips: Mapping[int, "Skip"] | None = None,
+    last_episodes: Mapping[str, str] | None = None,
 ) -> Plan:
     """Build one day's timeline.
 
@@ -292,7 +293,10 @@ def build_plan(
     if root.programming.active():
         try:
             slots, placed = programming.build_programmed_day(
-                root, context.catalog.episodes(), day=day
+                root,
+                context.catalog.episodes(),
+                day=day,
+                last_episodes=last_episodes,
             )
         except programming.ProgrammingError as exc:
             raise PlanError(f"{day}: {exc}") from exc

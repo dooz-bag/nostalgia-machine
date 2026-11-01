@@ -14,6 +14,7 @@ becomes a well-formed document on disk.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
@@ -70,6 +71,9 @@ def parse_form(
     mode: str,
     lineup_show: Sequence[str] = (),
     lineup_order: Sequence[str] = (),
+    lineup_start_season: Sequence[str] = (),
+    lineup_start_episode: Sequence[str] = (),
+    lineup_start_date: Sequence[str] = (),
     pinned_show: Sequence[str] = (),
     pinned_season: Sequence[str] = (),
     pinned_episode: Sequence[str] = (),
@@ -87,16 +91,57 @@ def parse_form(
         raise ScheduleFormError(
             "lineup rows arrived with mismatched lengths; reload the page"
         )
+    lineup_start_season = _lineup_column(
+        lineup_start_season, len(lineup_show), "start-season"
+    )
+    lineup_start_episode = _lineup_column(
+        lineup_start_episode, len(lineup_show), "start-episode"
+    )
+    lineup_start_date = _lineup_column(
+        lineup_start_date, len(lineup_show), "start-date"
+    )
     if not (len(pinned_show) == len(pinned_season) == len(pinned_episode)):
         raise ScheduleFormError(
             "pinned-episode rows arrived with mismatched lengths; reload the page"
         )
 
-    entries = [
-        ProgrammingEntry(show_id=show_id.strip(), order=order or "random")
-        for show_id, order in zip(lineup_show, lineup_order)
-        if show_id and show_id.strip()
-    ]
+    entries = []
+    for show_id, order, season, episode, start_date in zip(
+        lineup_show,
+        lineup_order,
+        lineup_start_season,
+        lineup_start_episode,
+        lineup_start_date,
+    ):
+        show_id = show_id.strip()
+        if not show_id:
+            continue
+        season = (season or "").strip()
+        episode = (episode or "").strip()
+        start_date = (start_date or "").strip()
+        if episode and not season:
+            raise ScheduleFormError(
+                f"starting episode for {show_id} needs a starting season"
+            )
+        if season and not season.isdigit():
+            raise ScheduleFormError(f"starting season for {show_id} must be numeric")
+        if episode and not episode.isdigit():
+            raise ScheduleFormError(f"starting episode for {show_id} must be numeric")
+        try:
+            parsed_date = date.fromisoformat(start_date) if season and start_date else None
+        except ValueError as exc:
+            raise ScheduleFormError(
+                f"starting date for {show_id} must be YYYY-MM-DD"
+            ) from exc
+        entries.append(
+            ProgrammingEntry(
+                show_id=show_id,
+                order=order or "random",
+                start_season=int(season) if season else None,
+                start_episode=int(episode) if episode else None,
+                start_date=parsed_date,
+            )
+        )
 
     pinned: list[str] = []
     for show_id, season, episode in zip(pinned_show, pinned_season, pinned_episode):
@@ -121,6 +166,17 @@ def parse_form(
     )
 
 
+def _lineup_column(values: Sequence[str], row_count: int, name: str) -> list[str]:
+    """Pad omitted optional columns for older form callers, reject partial rows."""
+    if not values:
+        return [""] * row_count
+    if len(values) != row_count:
+        raise ScheduleFormError(
+            f"lineup {name} rows arrived with mismatched lengths; reload the page"
+        )
+    return list(values)
+
+
 def write_schedule(path: Path, form: ScheduleForm) -> None:
     """Persist *form* to ``programming.yaml``, preserving everything else."""
     document = _read_document(path)
@@ -131,7 +187,26 @@ def write_schedule(path: Path, form: ScheduleForm) -> None:
 
     section["mode"] = form.mode
     section["lineup"] = [
-        {"show_id": entry.show_id, "order": entry.order} for entry in form.lineup
+        {
+            "show_id": entry.show_id,
+            "order": entry.order,
+            **(
+                {"start_season": entry.start_season}
+                if entry.start_season is not None
+                else {}
+            ),
+            **(
+                {"start_episode": entry.start_episode}
+                if entry.start_episode is not None
+                else {}
+            ),
+            **(
+                {"start_date": entry.start_date.isoformat()}
+                if entry.start_date is not None
+                else {}
+            ),
+        }
+        for entry in form.lineup
     ]
     section["pinned"] = list(form.pinned)
     section["shuffle_shows"] = list(form.shuffle_shows)

@@ -11,9 +11,10 @@ so this module provides three simpler ones:
 Two properties are non-negotiable, because the rest of the project depends on
 them and because a channel that drifts is unwatchable:
 
-* **Deterministic.** The episode for a slot is a function of
-  ``(day, slot ordinal, config)``. Previewing tomorrow cannot consume tomorrow,
-  and rebuilding yesterday reproduces it exactly. There is no cursor.
+* **Deterministic.** Random picks are a function of
+  ``(day, slot ordinal, config)``. Sequential picks use the recorded last episode
+  before the broadcast day, plus the prior planned day inside a horizon. Previewing
+  future days cannot consume their episodes.
 * **Never empty.** A lineup naming a show with no catalogued episodes is a
   configuration mistake, so it is dropped with a warning rather than producing a
   slot that cannot be filled.
@@ -27,9 +28,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import date
-from typing import Sequence
+from typing import Mapping, Sequence
 
-from .config import ProgrammingConfig, RootConfig
+from .config import ProgrammingConfig, ProgrammingEntry, RootConfig
 from .grid import Slot
 from .rng import rng_for
 from .rotation import EpisodeRef, RotationRing, build_rings
@@ -128,6 +129,42 @@ def pick_episode(
     return episodes[rng.randrange(len(episodes))]
 
 
+def _start_index(
+    ring: RotationRing, entry: ProgrammingEntry, report: LineupReport
+) -> int:
+    """Resolve a configured season/episode to its position in a show's ring."""
+    assert entry.start_season is not None
+    requested = (entry.start_season, entry.start_episode or 0)
+    for index, episode in enumerate(ring.episodes):
+        if episode.season == requested[0] and (
+            entry.start_episode is None or episode.episode == requested[1]
+        ):
+            return index
+
+    next_episode = next(
+        (
+            index
+            for index, episode in enumerate(ring.episodes)
+            if (episode.season, episode.episode) >= requested
+        ),
+        None,
+    )
+    if next_episode is not None:
+        selected = ring.episodes[next_episode]
+        report.warnings.append(
+            f"lineup: {entry.show_id} has no S{requested[0]:02d}"
+            f"E{requested[1]:03d}; starting at S{selected.season:02d}"
+            f"E{selected.episode:03d} instead"
+        )
+        return next_episode
+
+    report.warnings.append(
+        f"lineup: {entry.show_id} has no episode at or after "
+        f"S{requested[0]:02d}E{requested[1]:03d}; starting at the beginning"
+    )
+    return 0
+
+
 def rings_for(
     root: RootConfig, episodes: Sequence[EpisodeRef]
 ) -> dict[str, RotationRing]:
@@ -142,6 +179,7 @@ def build_lineup(
     slots_per_day: int,
     day: date | None = None,
     config: ProgrammingConfig | None = None,
+    last_episodes: Mapping[str, str] | None = None,
 ) -> LineupReport:
     """Fill a day from the hand-built lineup, cycling deterministically.
 
@@ -156,6 +194,35 @@ def build_lineup(
     config = config or root.programming
     report = LineupReport()
     rings = rings_for(root, episodes)
+    configured_starts: dict[str, int] = {}
+    for entry in config.lineup:
+        ring = rings.get(entry.show_id)
+        if (
+            ring is not None
+            and ring.episodes
+            and entry.order == "sequential"
+            and entry.start_season is not None
+        ):
+            configured_starts.setdefault(
+                entry.show_id, _start_index(ring, entry, report)
+            )
+
+    history_starts: dict[str, int] = {}
+    for show_id, key in (last_episodes or {}).items():
+        ring = rings.get(show_id)
+        if ring is None:
+            continue
+        index = next(
+            (i for i, episode in enumerate(ring.episodes) if episode.key == key),
+            None,
+        )
+        if index is None:
+            report.warnings.append(
+                f"lineup: prior episode {key} for {show_id} is not in the library; "
+                "starting at the beginning"
+            )
+        else:
+            history_starts[show_id] = (index + 1) % len(ring.episodes)
 
     entries: list[tuple[str, str | None]] = []
     for entry in config.lineup:
@@ -208,8 +275,14 @@ def build_lineup(
                 "random",
             )
             position = placed.get(show_id, 0)
+            start_index = history_starts.get(
+                show_id, configured_starts.get(show_id, 0)
+            )
             episode = pick_episode(
-                ring, order, position, seed_parts=(day.isoformat() if day else "",)
+                ring,
+                order,
+                position + (start_index if order == "sequential" else 0),
+                seed_parts=(day.isoformat() if day else "",),
             )
             placed[show_id] = position + 1
         report.slots.append(
@@ -225,6 +298,7 @@ def build_shuffle(
     slots_per_day: int,
     day: date | None = None,
     config: ProgrammingConfig | None = None,
+    last_episodes: Mapping[str, str] | None = None,
 ) -> LineupReport:
     """A continuous stream from the whole collection.
 
@@ -257,13 +331,34 @@ def build_shuffle(
         report.warnings.append(f"shuffle: {show_id} has no catalogued episodes; skipped")
 
     placed: dict[str, int] = {}
+    start_positions: dict[str, int] = {}
+    for show_id, key in (last_episodes or {}).items():
+        ring = rings.get(show_id)
+        if ring is None:
+            continue
+        index = next(
+            (i for i, episode in enumerate(ring.episodes) if episode.key == key),
+            None,
+        )
+        if index is None:
+            report.warnings.append(
+                f"shuffle: prior episode {key} for {show_id} is not in the library; "
+                "starting at the beginning"
+            )
+        else:
+            start_positions[show_id] = (index + 1) % len(ring.episodes)
     for index in range(max(0, slots_per_day)):
         show_id = active[index % len(active)]
         position = placed.get(show_id, 0)
         episode = pick_episode(
             rings[show_id],
             config.shuffle_order,
-            position,
+            position
+            + (
+                start_positions.get(show_id, 0)
+                if config.shuffle_order == "sequential"
+                else 0
+            ),
             seed_parts=(day.isoformat() if day else "",),
         )
         placed[show_id] = position + 1
@@ -279,16 +374,25 @@ def build_programming(
     *,
     slots_per_day: int,
     day: date | None = None,
+    last_episodes: Mapping[str, str] | None = None,
 ) -> LineupReport | None:
     """Dispatch on ``programming.mode``. ``None`` means "use the day files"."""
     mode = root.programming.mode
     if mode == "lineup":
         return build_lineup(
-            root, episodes, slots_per_day=slots_per_day, day=day
+            root,
+            episodes,
+            slots_per_day=slots_per_day,
+            day=day,
+            last_episodes=last_episodes,
         )
     if mode == "shuffle":
         return build_shuffle(
-            root, episodes, slots_per_day=slots_per_day, day=day
+            root,
+            episodes,
+            slots_per_day=slots_per_day,
+            day=day,
+            last_episodes=last_episodes,
         )
     return None
 
@@ -298,6 +402,7 @@ def build_programmed_day(
     episodes: Sequence[EpisodeRef],
     *,
     day: date,
+    last_episodes: Mapping[str, str] | None = None,
 ) -> tuple[list[Slot], list[PlacedSlot]]:
     """Generate the day's slots *and* what airs in them, for a hand-built lineup.
 
@@ -313,7 +418,11 @@ def build_programmed_day(
     from .grid import day_bounds_ms, quantum_ms
 
     report = build_programming(
-        root, episodes, slots_per_day=_GENERATE_ENTRIES, day=day
+        root,
+        episodes,
+        slots_per_day=_GENERATE_ENTRIES,
+        day=day,
+        last_episodes=last_episodes,
     )
     if report is None:
         raise ProgrammingError("build_programmed_day called without a programming mode")
