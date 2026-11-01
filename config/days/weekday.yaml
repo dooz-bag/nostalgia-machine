@@ -11,7 +11,7 @@
 # show belongs in exactly one family:
 #   short (15 min)   median episode 11 min -- ATHF, Sealab, Brak, Birdman,
 #                    Squidbillies, Perfect Hair Forever, Space Ghost
-#   half  (30 min)   median episode 22 min -- Futurama, Home Movies,
+#   half  (30 min)   median episode 22 min -- Family Guy, Futurama, Home Movies,
 #                    Cartoon Planet, King of the Hill, The Venture Bros.
 # A show whose episode exceeds its slot gets a substitute episode and a warning,
 # so a stray double-length episode never takes the day down.
@@ -52,7 +52,7 @@ days:
         end: "21:00"
         title: "Evening"
         family: half
-        shows: [futurama, king-of-the-hill, the-venture-bros]
+        shows: [family-guy, futurama, king-of-the-hill, the-venture-bros]
 
       # Late night: short-form shows, the classic [as] signature.
       - start: "21:00"

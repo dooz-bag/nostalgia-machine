@@ -36,7 +36,7 @@ days:
         end: "22:00"
         title: "Prime Time"
         family: half
-        shows: [futurama, the-venture-bros]
+        shows: [family-guy, futurama, the-venture-bros]
 
       - start: "22:00"
         end: "00:00"

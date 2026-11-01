@@ -133,6 +133,16 @@ shows:
     order: episode
     weight: 1.2
 
+  family-guy:
+    title: "Family Guy"
+    folder: shows/family-guy
+    family: sitcom
+    slot: half
+    airing_from: "2003-01-01"   # [as] acquired the series in January 2003
+    aliases: ["Family Guy"]
+    order: episode
+    weight: 1.0
+
   king-of-the-hill:
     title: "King of the Hill"
     folder: shows/king-of-the-hill
