@@ -11,6 +11,7 @@ import subprocess
 import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from threading import Lock
 from typing import Any, Sequence
 
 from .paths import Paths
@@ -24,6 +25,7 @@ MIN_SEGMENT_SECONDS = 2.0
 MIN_YEAR = 1950
 MAX_YEAR = 2099
 _TIME_PATTERN = re.compile(r"pts_time:([0-9]+(?:\.[0-9]+)?)")
+_REVIEW_LOCK = Lock()
 
 
 class MediaImportError(ValueError):
@@ -64,6 +66,19 @@ class Analysis:
         ):
             raise MediaImportError("The saved video analysis contains invalid times.")
         return analysis
+
+
+@dataclass(frozen=True, slots=True)
+class PendingImportClip:
+    clip_id: str
+    path: Path
+    source_name: str
+    start: float
+    end: float
+
+    @property
+    def duration(self) -> float:
+        return self.end - self.start
 
 
 def imports_dir(paths: Paths) -> Path:
@@ -270,11 +285,24 @@ def _valid_year(value: str | None, field: str) -> int | None:
 def _validated_segments(
     raw_segments: Any, duration: float
 ) -> list[tuple[float, float, str]]:
+    ranges = _validated_ranges(raw_segments, duration)
+    segments: list[tuple[float, float, str]] = []
+    for index, (raw, (start, end)) in enumerate(zip(raw_segments, ranges), start=1):
+        label = str(raw.get("label", ""))
+        if label not in {"bumper", "commercial", "skip"}:
+            raise MediaImportError(f"Segment {index} has an unknown classification.")
+        segments.append((start, end, label))
+    if not any(label != "skip" for _, _, label in segments):
+        raise MediaImportError("Choose at least one bumper or commercial to export.")
+    return segments
+
+
+def _validated_ranges(raw_segments: Any, duration: float) -> list[tuple[float, float]]:
     if not isinstance(raw_segments, list) or not raw_segments:
-        raise MediaImportError("Mark at least one segment before exporting.")
+        raise MediaImportError("Mark at least one clip before cutting.")
     if len(raw_segments) > 500:
         raise MediaImportError("Review at most 500 segments in one import.")
-    segments: list[tuple[float, float, str]] = []
+    ranges: list[tuple[float, float]] = []
     previous_end = 0.0
     for index, raw in enumerate(raw_segments, start=1):
         if not isinstance(raw, dict):
@@ -282,7 +310,6 @@ def _validated_segments(
         try:
             start = float(raw["start"])
             end = float(raw["end"])
-            label = str(raw["label"])
         except (KeyError, TypeError, ValueError) as exc:
             raise MediaImportError(f"Segment {index} needs valid start and end times.") from exc
         if not math.isfinite(start) or not math.isfinite(end):
@@ -294,13 +321,9 @@ def _validated_segments(
             )
         if start < previous_end:
             raise MediaImportError("Segments must be ordered and cannot overlap.")
-        if label not in {"bumper", "commercial", "skip"}:
-            raise MediaImportError(f"Segment {index} has an unknown classification.")
-        segments.append((start, end, label))
+        ranges.append((start, end))
         previous_end = end
-    if not any(label != "skip" for _, _, label in segments):
-        raise MediaImportError("Choose at least one bumper or commercial to export.")
-    return segments
+    return ranges
 
 
 def _slug(value: str) -> str:
@@ -348,6 +371,476 @@ def _encode_segment(
     )
     if not target.is_file() or target.stat().st_size == 0:
         raise MediaImportError(f"ffmpeg did not create the expected clip {target.name}.")
+
+
+def _pending_clip_path(paths: Paths, clip_id: str) -> Path:
+    try:
+        clip_id = str(uuid.UUID(clip_id))
+    except ValueError as exc:
+        raise MediaImportError("That imported clip is invalid or has already been handled.") from exc
+    return paths.media("derived", "import-review", f"{clip_id}.mp4")
+
+
+def _pending_manifest_path(paths: Paths, clip_id: str) -> Path:
+    return paths.data_dir / "media-imports" / "review" / f"{clip_id}.json"
+
+
+def _review_processing_dir(paths: Paths) -> Path:
+    return paths.data_dir / "media-imports" / "review" / ".processing"
+
+
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
+    temporary = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        temporary.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        os.replace(temporary, path)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def _recover_review_operations(paths: Paths) -> list[str]:
+    processing = _review_processing_dir(paths)
+    if not processing.exists():
+        return []
+    if not processing.is_dir():
+        raise MediaImportError(f"The import review journal path is not a folder: {processing}")
+    try:
+        journals = sorted(processing.glob("*.json"))
+    except OSError as exc:
+        raise MediaImportError(f"Could not inspect import review operations: {exc}") from exc
+    issues: list[str] = []
+    for journal in journals:
+        try:
+            clip_id = str(uuid.UUID(journal.stem))
+            payload = json.loads(journal.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict) or payload.get("clip_id") != clip_id:
+                raise ValueError("record does not match clip id")
+            source_name = str(payload["source_name"])
+            start = float(payload["start"])
+            end = float(payload["end"])
+            action = payload["action"]
+            if (
+                Path(source_name).name != source_name
+                or not math.isfinite(start)
+                or not math.isfinite(end)
+                or start < 0
+                or end - start < MIN_SEGMENT_SECONDS
+            ):
+                raise ValueError("invalid source name or clip range")
+            if action not in {"trash", "classify"}:
+                raise ValueError(f"unknown review action {action!r}")
+            target = None
+            if action == "classify":
+                relative_target = Path(str(payload["target"]))
+                if (
+                    relative_target.is_absolute()
+                    or len(relative_target.parts) < 3
+                    or relative_target.parts[0] != "media"
+                    or relative_target.parts[1] not in {"bumps", "commercials"}
+                ):
+                    raise ValueError("target must be inside the bumper or commercial library")
+                target = (paths.root / relative_target).resolve()
+                target.relative_to(paths.root.resolve())
+                tag_payload = payload.get("tag")
+                if tag_payload is not None:
+                    BumpTag.from_json(tag_payload)
+        except OSError as exc:
+            raise MediaImportError(
+                f"Could not read import review journal {journal.name}: {exc}"
+            ) from exc
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            broken = processing / ".broken" / journal.name
+            try:
+                broken.parent.mkdir(parents=True, exist_ok=True)
+                if broken.exists():
+                    broken = broken.with_name(f"{journal.stem}-{uuid.uuid4().hex}.json")
+                os.replace(journal, broken)
+            except OSError as quarantine_exc:
+                raise MediaImportError(
+                    f"Invalid review journal {journal.name}: {exc}. Could not "
+                    f"quarantine it: {quarantine_exc}"
+                ) from quarantine_exc
+            issues.append(
+                f"Review journal {journal.name} was quarantined: {exc}. See {broken}."
+            )
+            continue
+
+        manifest = _pending_manifest_path(paths, clip_id)
+        if manifest.exists():
+            try:
+                journal.unlink()
+            except OSError as exc:
+                raise MediaImportError(
+                    f"Could not clear duplicate review journal {journal.name}: {exc}"
+                ) from exc
+            continue
+
+        source = _pending_clip_path(paths, clip_id)
+        if action == "trash":
+            if source.is_file():
+                _write_json_atomic(
+                    manifest,
+                    {
+                        "clip_id": clip_id,
+                        "source_name": source_name,
+                        "start": start,
+                        "end": end,
+                    },
+                )
+            try:
+                journal.unlink()
+            except OSError as exc:
+                raise MediaImportError(
+                    f"Could not finish recovering trashed clip {clip_id}: {exc}"
+                ) from exc
+            continue
+
+        if source.exists() and target is not None and target.exists():
+            broken = processing / ".broken" / journal.name
+            try:
+                broken.parent.mkdir(parents=True, exist_ok=True)
+                if broken.exists():
+                    broken = broken.with_name(f"{journal.stem}-{uuid.uuid4().hex}.json")
+                os.replace(journal, broken)
+            except OSError as exc:
+                raise MediaImportError(
+                    f"Both copies of review clip {clip_id} exist. Could not "
+                    f"quarantine its journal: {exc}"
+                ) from exc
+            issues.append(
+                f"Both pending and classified copies of {clip_id} exist; "
+                f"the journal was quarantined at {broken}."
+            )
+            continue
+        if source.exists():
+            _write_json_atomic(
+                manifest,
+                {
+                    "clip_id": clip_id,
+                    "source_name": source_name,
+                    "start": start,
+                    "end": end,
+                },
+            )
+        elif target is not None and target.is_file():
+            tag_payload = payload.get("tag")
+            if tag_payload is not None:
+                sidecar = target.with_name(target.name + ".tags.json")
+                if not sidecar.exists():
+                    write_tag(target, BumpTag.from_json(tag_payload))
+            journal.unlink()
+            continue
+        else:
+            broken = processing / ".broken" / journal.name
+            try:
+                broken.parent.mkdir(parents=True, exist_ok=True)
+                if broken.exists():
+                    broken = broken.with_name(f"{journal.stem}-{uuid.uuid4().hex}.json")
+                os.replace(journal, broken)
+            except OSError as exc:
+                raise MediaImportError(
+                    f"Neither copy of review clip {clip_id} exists. Could not "
+                    f"quarantine its journal: {exc}"
+                ) from exc
+            issues.append(
+                f"Neither pending nor classified copy of {clip_id} exists; "
+                f"the journal was quarantined at {broken}."
+            )
+            continue
+        try:
+            journal.unlink()
+        except OSError as exc:
+            raise MediaImportError(
+                f"Could not clear recovered review journal {journal.name}: {exc}"
+            ) from exc
+    return issues
+
+
+def _read_pending_clip(paths: Paths, clip_id: str) -> PendingImportClip:
+    try:
+        clip_id = str(uuid.UUID(clip_id))
+    except ValueError as exc:
+        raise MediaImportError("That imported clip is invalid or has already been handled.") from exc
+    manifest = _pending_manifest_path(paths, clip_id)
+    try:
+        payload = json.loads(manifest.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise MediaImportError("That imported clip is invalid or has already been handled.") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise MediaImportError(f"Could not read the imported clip review record: {exc}") from exc
+    try:
+        if not isinstance(payload, dict) or payload.get("clip_id") != clip_id:
+            raise ValueError("record does not match clip")
+        source_name = str(payload["source_name"])
+        if Path(source_name).name != source_name:
+            raise ValueError("invalid source name")
+        start = float(payload["start"])
+        end = float(payload["end"])
+        if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end - start < MIN_SEGMENT_SECONDS:
+            raise ValueError("invalid clip range")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise MediaImportError(f"The imported clip review record is invalid: {exc}") from exc
+    clip_path = _pending_clip_path(paths, clip_id)
+    if not clip_path.is_file():
+        raise MediaImportError(f"The cut clip {clip_id} is missing from the review folder.")
+    return PendingImportClip(clip_id, clip_path, source_name, start, end)
+
+
+def pending_import_clips(paths: Paths) -> list[PendingImportClip]:
+    return pending_import_clips_with_issues(paths)[0]
+
+
+def pending_import_clips_with_issues(
+    paths: Paths,
+) -> tuple[list[PendingImportClip], list[str]]:
+    with _REVIEW_LOCK:
+        issues = _recover_review_operations(paths)
+        folder = paths.data_dir / "media-imports" / "review"
+        if not folder.exists():
+            return [], issues
+        if not folder.is_dir():
+            raise MediaImportError(f"The import review path is not a folder: {folder}")
+        clips: list[PendingImportClip] = []
+        try:
+            manifests = sorted(folder.glob("*.json"))
+        except OSError as exc:
+            raise MediaImportError(f"Could not list imported clips awaiting review: {exc}") from exc
+        for manifest in manifests:
+            try:
+                clip_id = str(uuid.UUID(manifest.stem))
+                clips.append(_read_pending_clip(paths, clip_id))
+            except (MediaImportError, ValueError) as exc:
+                quarantine = folder / ".broken" / manifest.name
+                try:
+                    quarantine.parent.mkdir(parents=True, exist_ok=True)
+                    os.replace(manifest, quarantine)
+                except OSError as quarantine_exc:
+                    raise MediaImportError(
+                        f"Invalid review record {manifest.name}: {exc}. Could not "
+                        f"quarantine it: {quarantine_exc}"
+                    ) from quarantine_exc
+                issues.append(
+                    f"Review record {manifest.name} was quarantined: {exc}. "
+                    f"See {quarantine}."
+                )
+        return clips, issues
+
+
+def resolve_pending_clip(paths: Paths, clip_id: str) -> Path:
+    with _REVIEW_LOCK:
+        _recover_review_operations(paths)
+        return _read_pending_clip(paths, clip_id).path
+
+
+def stage_segments(
+    paths: Paths, token: str, raw_segments: Any
+) -> list[PendingImportClip]:
+    """Cut reviewed ranges into an import-only queue before they enter the library."""
+    analysis, source = load_analysis(paths, token)
+    ranges = _validated_ranges(raw_segments, analysis.duration)
+    ffmpeg = shutil.which("ffmpeg")
+    if ffmpeg is None:
+        raise MediaImportError("ffmpeg was not found. Install FFmpeg.")
+
+    pending_dir = paths.media("derived", "import-review")
+    manifest_dir = paths.data_dir / "media-imports" / "review"
+    pending_dir.mkdir(parents=True, exist_ok=True)
+    manifest_dir.mkdir(parents=True, exist_ok=True)
+    staged: list[Path] = []
+    manifests: list[Path] = []
+    temporary: list[Path] = []
+    temporary_manifests: list[Path] = []
+    result: list[PendingImportClip] = []
+    try:
+        for start, end in ranges:
+            clip_id = str(uuid.uuid4())
+            target = _pending_clip_path(paths, clip_id)
+            manifest = _pending_manifest_path(paths, clip_id)
+            partial = target.with_name(f".{clip_id}.partial.mp4")
+            temporary.append(partial)
+            _encode_segment(ffmpeg, source, start, end, partial)
+            stat = source.stat()
+            if stat.st_size != analysis.source_size or stat.st_mtime_ns != analysis.source_mtime_ns:
+                raise MediaImportError(
+                    "The source video changed while its clips were being cut."
+                )
+            os.replace(partial, target)
+            staged.append(target)
+            payload = {
+                "clip_id": clip_id,
+                "source_name": analysis.source_name,
+                "start": round(start, 3),
+                "end": round(end, 3),
+            }
+            manifest_tmp = manifest.with_suffix(".tmp")
+            temporary_manifests.append(manifest_tmp)
+            manifest_tmp.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+            os.replace(manifest_tmp, manifest)
+            temporary_manifests.remove(manifest_tmp)
+            manifests.append(manifest)
+            result.append(PendingImportClip(clip_id, target, analysis.source_name, start, end))
+        return result
+    except (MediaImportError, OSError) as exc:
+        cleanup_errors: list[str] = []
+        for path in manifests + staged + temporary + temporary_manifests:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError as cleanup_exc:
+                cleanup_errors.append(f"{path}: {cleanup_exc}")
+        if cleanup_errors:
+            raise MediaImportError(
+                f"Could not stage imported clips: {exc}. Cleanup also failed: "
+                f"{'; '.join(cleanup_errors)}"
+            ) from exc
+        if isinstance(exc, MediaImportError):
+            raise
+        raise MediaImportError(f"Could not stage imported clips: {exc}") from exc
+
+
+def classify_pending_clip(
+    paths: Paths,
+    clip_id: str,
+    *,
+    classification: str,
+    ad_year: str | None,
+    bump_subject: str | None,
+    bump_era: str | None,
+    position: str | None,
+    known_subjects: set[str],
+) -> Path:
+    """Move a reviewed cut into its library or delete only that cut if trashed."""
+    with _REVIEW_LOCK:
+        _recover_review_operations(paths)
+        return _classify_pending_clip_locked(
+            paths,
+            clip_id,
+            classification=classification,
+            ad_year=ad_year,
+            bump_subject=bump_subject,
+            bump_era=bump_era,
+            position=position,
+            known_subjects=known_subjects,
+        )
+
+
+def _classify_pending_clip_locked(
+    paths: Paths,
+    clip_id: str,
+    *,
+    classification: str,
+    ad_year: str | None,
+    bump_subject: str | None,
+    bump_era: str | None,
+    position: str | None,
+    known_subjects: set[str],
+) -> Path:
+    clip = _read_pending_clip(paths, clip_id)
+    manifest = _pending_manifest_path(paths, clip.clip_id)
+    journal_dir = _review_processing_dir(paths)
+    journal = journal_dir / f"{clip.clip_id}.json"
+    if classification == "trash":
+        journal_dir.mkdir(parents=True, exist_ok=True)
+        _write_json_atomic(
+            journal,
+            {
+                "clip_id": clip.clip_id,
+                "source_name": clip.source_name,
+                "start": clip.start,
+                "end": clip.end,
+                "action": "trash",
+            },
+        )
+        try:
+            manifest.unlink()
+            clip.path.unlink()
+            journal.unlink()
+        except OSError as exc:
+            try:
+                _recover_review_operations(paths)
+            except MediaImportError as recovery_exc:
+                raise MediaImportError(
+                    f"Could not trash the cut clip: {exc}. Recovery failed: {recovery_exc}"
+                ) from exc
+            if not clip.path.exists():
+                return clip.path
+            raise MediaImportError(f"Could not trash the cut clip: {exc}") from exc
+        return clip.path
+    if classification not in {"commercial", "bumper"}:
+        raise MediaImportError("Choose commercial, bumper, or trash.")
+
+    if classification == "commercial":
+        year = _valid_year(ad_year, "Commercial year")
+        if year is None:
+            raise MediaImportError("Commercial year is required.")
+        folder = paths.media("commercials", str(year))
+        tag = None
+    else:
+        subject = (bump_subject or "").strip()
+        if subject != "neutral" and subject not in known_subjects:
+            raise MediaImportError("Choose a configured show or neutral for the bumper.")
+        era = _valid_year(bump_era, "Bumper era")
+        normalized_position = (position or "").strip().upper() or None
+        if normalized_position is not None and normalized_position not in {"INTO", "OUT", "AFTER"}:
+            raise MediaImportError("Choose before, after, middle, or unspecified placement.")
+        folder = paths.media("bumps", "neutral" if subject == "neutral" else subject)
+        tag = BumpTag(
+            subject=subject,
+            position=normalized_position,
+            era=era,
+            source="import",
+            confidence=1.0,
+            confirmed=True,
+        )
+
+    target = folder / f"{_slug(Path(clip.source_name).stem)}-import-{clip.clip_id[:8]}.mp4"
+    if target.exists() or (tag is not None and target.with_name(target.name + ".tags.json").exists()):
+        raise MediaImportError(f"Refusing to overwrite an existing import: {target.name}.")
+    folder.mkdir(parents=True, exist_ok=True)
+    journal_dir.mkdir(parents=True, exist_ok=True)
+    _write_json_atomic(
+        journal,
+        {
+            "clip_id": clip.clip_id,
+            "source_name": clip.source_name,
+            "start": clip.start,
+            "end": clip.end,
+            "action": "classify",
+            "target": target.relative_to(paths.root).as_posix(),
+            "tag": tag.to_json() if tag is not None else None,
+        },
+    )
+    try:
+        manifest.unlink()
+        os.replace(clip.path, target)
+        if tag is not None:
+            write_tag(target, tag)
+        journal.unlink()
+    except OSError as exc:
+        try:
+            _recover_review_operations(paths)
+        except MediaImportError as recovery_exc:
+            raise MediaImportError(
+                f"Could not finish classifying the cut clip: {exc}. "
+                f"Recovery failed: {recovery_exc}"
+            ) from exc
+        if target.is_file() and not clip.path.exists():
+            return target
+        raise MediaImportError(f"Could not finish classifying the cut clip: {exc}") from exc
+    return target
+
+
+def trash_pending_clip(paths: Paths, clip_id: str) -> None:
+    classify_pending_clip(
+        paths,
+        clip_id,
+        classification="trash",
+        ad_year=None,
+        bump_subject=None,
+        bump_era=None,
+        position=None,
+        known_subjects=set(),
+    )
 
 
 def export_segments(
@@ -464,11 +957,18 @@ def export_segments(
 __all__ = [
     "Analysis",
     "MediaImportError",
+    "PendingImportClip",
     "analyze_source",
+    "classify_pending_clip",
     "export_segments",
     "imports_dir",
     "list_sources",
     "load_analysis",
+    "pending_import_clips",
+    "pending_import_clips_with_issues",
+    "resolve_pending_clip",
     "resolve_source",
+    "stage_segments",
     "suggested_label",
+    "trash_pending_clip",
 ]

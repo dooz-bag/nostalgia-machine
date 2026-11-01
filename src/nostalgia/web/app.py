@@ -29,9 +29,13 @@ from ..config import ConfigError, RootConfig, load_config
 from ..media_review import (
     MediaImportError,
     analyze_source,
+    classify_pending_clip,
     export_segments,
     load_analysis,
+    pending_import_clips_with_issues,
+    resolve_pending_clip,
     resolve_source,
+    stage_segments,
 )
 from ..paths import Paths
 from ..pipeline import build
@@ -1455,7 +1459,18 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             else ""
         )
         current = _reload(config, paths)
-        body = imports_web.imports_body(paths, current, error=error, message=message)
+        pending_count = 0
+        if not error:
+            try:
+                clips, issues = pending_import_clips_with_issues(paths)
+                pending_count = len(clips)
+                if issues:
+                    error = " ".join(issues)
+            except MediaImportError as exc:
+                error = str(exc)
+        body = imports_web.imports_body(
+            paths, current, error=error, message=message, pending_count=pending_count
+        )
         if built:
             body += (
                 f'<p class="hint">Schedule update: {_h(built)}. '
@@ -1490,6 +1505,143 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
         media_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
         return FileResponse(source, media_type=media_type)
+
+    @app.get("/imports/review-clip/{clip_id}")
+    def import_review_clip(clip_id: str) -> Any:
+        try:
+            clip = resolve_pending_clip(paths, clip_id)
+        except MediaImportError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return FileResponse(clip, media_type="video/mp4")
+
+    @app.get("/imports/review-queue", response_class=HTMLResponse)
+    def import_review_queue(
+        error: str = "", message: str = "", built: str = ""
+    ) -> Any:
+        current = _reload(config, paths)
+        try:
+            clips, issues = pending_import_clips_with_issues(paths)
+            if issues:
+                error = " ".join(issues)
+        except MediaImportError as exc:
+            clips = []
+            error = error or str(exc)
+        body = imports_web.review_queue_body(
+            clips, current, error=error, message=message
+        )
+        if built:
+            body += (
+                f'<p class="hint">Schedule update: {_h(built)}. '
+                '<a href="/schedule">Open Schedule</a>.</p>'
+            )
+        return _render(
+            _page("Review cut clips", body, active="/imports", card=_card(current))
+        )
+
+    @app.post("/imports/cut")
+    async def cut_import_segments(request: Request) -> Any:
+        form = await request.form()
+        token = str(form.get("token") or "")
+        segment_text = str(form.get("segments") or "")
+        current = _reload(config, paths)
+        analysis = None
+        try:
+            analysis, _ = load_analysis(paths, token)
+            try:
+                segments = json.loads(segment_text)
+            except json.JSONDecodeError as exc:
+                raise MediaImportError(
+                    "The clip ranges could not be read; mark them again and retry."
+                ) from exc
+            report_progress(request, "Validating clip ranges")
+            report_progress(request, "Cutting clips for the review queue")
+            staged = stage_segments(paths, token, segments)
+        except MediaImportError as exc:
+            fail_progress(request, "Cutting clips failed")
+            if analysis is None:
+                return HTMLResponse(
+                    _page(
+                        "Media import",
+                        imports_web.imports_body(paths, current, error=str(exc)),
+                        active="/imports",
+                        card=_card(current),
+                    ),
+                    status_code=400,
+                )
+            try:
+                previous = json.loads(segment_text)
+            except json.JSONDecodeError:
+                previous = []
+            if not isinstance(previous, list):
+                previous = []
+            return HTMLResponse(
+                _page(
+                    "Review video",
+                    imports_web.imports_body(
+                        paths, current, analysis=analysis, error=str(exc),
+                        prior_segments=previous,
+                    ),
+                    active="/imports",
+                    card=_card(current),
+                ),
+                status_code=400,
+            )
+        return RedirectResponse(
+            f"/imports/review-queue?message={quote_plus(f'{len(staged)} clip(s) cut and ready for review')}",
+            status_code=303,
+        )
+
+    @app.post("/imports/review-clip/{clip_id}")
+    async def classify_import_clip(clip_id: str, request: Request) -> Any:
+        form = await request.form()
+        classification = str(form.get("classification") or "")
+        current = _reload(config, paths)
+        try:
+            classified_path = classify_pending_clip(
+                paths,
+                clip_id,
+                classification=classification,
+                ad_year=str(form.get("ad_year") or ""),
+                bump_subject=str(form.get("bump_subject") or ""),
+                bump_era=str(form.get("bump_era") or ""),
+                position=str(form.get("position") or ""),
+                known_subjects=set(current.shows),
+            )
+        except MediaImportError as exc:
+            try:
+                clips, issues = pending_import_clips_with_issues(paths)
+                if issues:
+                    exc = MediaImportError(f"{exc} {' '.join(issues)}")
+            except MediaImportError as listing_exc:
+                clips = []
+                exc = MediaImportError(f"{exc} {listing_exc}")
+            body = imports_web.review_queue_body(clips, current, error=str(exc))
+            return HTMLResponse(
+                _page("Review cut clips", body, active="/imports", card=_card(current)),
+                status_code=400,
+            )
+        if classification == "trash":
+            return RedirectResponse(
+                "/imports/review-queue?message=Cut+clip+trashed+%28source+unchanged%29",
+                status_code=303,
+            )
+
+        from ..pipeline import scan
+
+        try:
+            with Catalog(paths.catalog) as catalog:
+                scan(current, catalog, paths)
+        except (OSError, sqlite3.Error, ValueError) as exc:
+            return RedirectResponse(
+                f"/imports/review-queue?error={quote_plus(f'Clip saved to {classified_path}, but the catalog could not refresh: {exc}. Run nostalgia scan.')}",
+                status_code=303,
+            )
+        built = queue_deploy(current, paths)
+        return RedirectResponse(
+            f"/imports/review-queue?message={quote_plus(f'Saved as {classification}')}"
+            f"&built={quote_plus(built)}",
+            status_code=303,
+        )
 
     @app.get("/imports/review/{token}", response_class=HTMLResponse)
     def review_import(token: str, error: str = "") -> Any:

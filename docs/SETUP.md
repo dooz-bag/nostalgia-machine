@@ -104,20 +104,21 @@ exists, so re-running after adding more is cheap.
 For a mixed compilation, copy an authorized local video into `media/imports/` and
 open **Import media** in the website. The video is analyzed for scene-cut
 candidates; those are seek suggestions, not assumed clip boundaries. Use the
-player to review the recording, mark each bumper/commercial's start and end, and
-approve its suggested class or choose **Skip**. The duration-based class suggestion
-is only a starting point.
+player to review the recording and mark each clip's start and end, then choose
+**Cut clips for review**. The cuts are staged separately and appear in the
+import-only review queue; no existing library media is included. Duration hints
+are advisory, and every cut needs a human classification.
 
-Enter a commercial year when exporting ads. For bumpers, choose a configured show
-or **Neutral / unknown show**; a bumper era is optional. Approved ads land in
-`media/commercials/<year>/`; bumpers land in the selected `media/bumps/` folder
-with import-provenance tags. Those metadata choices apply to all clips of that
-class from the source; choose neutral if its bumpers cover multiple shows.
-Existing files are not overwritten, the source video
-stays untouched in `media/imports/`, and the catalog is refreshed after export. A
-new schedule is staged too; review it under **Schedule** and launch it when ready.
-The current live schedule is not replaced automatically. If catalog refresh reports
-an error, run `nostalgia scan`.
+In the queue, choose **Commercial**, **Bumper**, or **Trash**. Commercials require a
+year. For bumpers, choose a configured show or **Neutral / unknown show**, with an
+optional era and placement (before, after, or in the middle of the show). A saved
+commercial lands in `media/commercials/<year>/`; a saved bumper lands in the
+selected `media/bumps/` folder with import-provenance tags. Trash permanently
+deletes only that cut clip; the original video remains untouched in
+`media/imports/`. Classified clips are added to the catalog and a new schedule is
+staged; review it under **Schedule** and launch it when ready. The current live
+schedule is not replaced automatically. If catalog refresh reports an error, run
+`nostalgia scan`.
 
 The website does not download the supplied URL. Obtain the authorized video file
 through a method available to you, then stage that local file in `media/imports/`.

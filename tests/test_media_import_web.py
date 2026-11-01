@@ -73,7 +73,8 @@ def test_analysis_redirects_to_review_page_and_shows_cut_candidates(
     assert 'src="/imports/source/mixed%20tape.mp4"' in page.text
     assert 'data-time="12.500"' in page.text
     assert "Mark clip start at playhead" in page.text
-    assert "Export approved segments" in page.text
+    assert 'action="/imports/cut"' in page.text
+    assert "Cut clips for review" in page.text
 
 
 def test_video_stream_only_serves_files_from_import_folder(paths, config):
@@ -87,6 +88,87 @@ def test_video_stream_only_serves_files_from_import_folder(paths, config):
     assert response.status_code == 200
     assert response.content == b"video bytes"
     assert response.headers["content-type"] == "video/mp4"
+
+
+def test_cut_route_stages_only_marked_ranges_for_review(
+    paths, config, monkeypatch
+):
+    import nostalgia.web.app as web_app
+    from nostalgia.media_review import PendingImportClip
+
+    source = paths.media_root / "imports" / "mixed.mp4"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"video")
+    analysis = Analysis(
+        token="12345678-1234-5678-1234-567812345678",
+        source_name=source.name,
+        duration=70,
+        cut_points=(0, 10, 70),
+        source_size=5,
+        source_mtime_ns=source.stat().st_mtime_ns,
+    )
+    seen = {}
+
+    def fake_stage(*args):
+        seen["stage"] = args
+        return [
+            PendingImportClip(
+                "12345678-1234-5678-1234-567812345678",
+                paths.media("derived", "import-review", "clip.mp4"),
+                source.name,
+                10,
+                40,
+            )
+        ]
+
+    monkeypatch.setattr(web_app, "load_analysis", lambda *_: (analysis, source))
+    monkeypatch.setattr(web_app, "stage_segments", fake_stage)
+    response = _client(paths, config).post(
+        "/imports/cut",
+        data={
+            "token": analysis.token,
+            "segments": json.dumps([{"start": 10, "end": 40}]),
+        },
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"].startswith("/imports/review-queue?message=")
+    assert seen["stage"] == (
+        paths,
+        analysis.token,
+        [{"start": 10, "end": 40}],
+    )
+
+
+def test_import_review_queue_only_shows_cut_clips_and_metadata_choices(
+    paths, config, monkeypatch
+):
+    import nostalgia.web.app as web_app
+    from nostalgia.media_review import PendingImportClip
+
+    clip = PendingImportClip(
+        "12345678-1234-5678-1234-567812345678",
+        paths.media("derived", "import-review", "clip.mp4"),
+        "mixed source.mp4",
+        10,
+        40,
+    )
+    monkeypatch.setattr(
+        web_app, "pending_import_clips_with_issues", lambda *_: ([clip], [])
+    )
+
+    response = _client(paths, config).get("/imports/review-queue")
+
+    assert response.status_code == 200
+    assert "1 cut clip(s) awaiting review" in response.text
+    assert "Commercial" in response.text
+    assert "Bumper" in response.text
+    assert "Trash" in response.text
+    assert "Before the show" in response.text
+    assert "After the show" in response.text
+    assert "In the middle of the show" in response.text
+    assert 'src="/imports/review-clip/12345678-1234-5678-1234-567812345678"' in response.text
 
 
 def test_export_passes_approved_segments_to_importer_and_rescans_catalog(

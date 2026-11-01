@@ -71,6 +71,225 @@ def test_analyze_and_export_approved_bumper_and_commercials(paths, monkeypatch):
     assert source.read_bytes() == source_bytes
 
 
+def test_cut_segments_wait_in_import_review_without_touching_source(paths, monkeypatch):
+    analysis, source = _analyze(paths, monkeypatch, duration=80)
+    source_bytes = source.read_bytes()
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+
+    clips = media_review.stage_segments(
+        paths,
+        analysis.token,
+        [{"start": 1, "end": 9}, {"start": 10, "end": 40}],
+    )
+
+    assert len(clips) == 2
+    assert all(clip.path.is_file() for clip in clips)
+    assert [clip.duration for clip in clips] == [8, 30]
+    assert source.read_bytes() == source_bytes
+    assert {
+        clip.clip_id for clip in media_review.pending_import_clips(paths)
+    } == {clip.clip_id for clip in clips}
+
+
+def test_classifying_pending_bumper_sets_show_position_and_year(paths, monkeypatch):
+    analysis, _source = _analyze(paths, monkeypatch, duration=80)
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+    (clip,) = media_review.stage_segments(
+        paths, analysis.token, [{"start": 1, "end": 9}]
+    )
+
+    target = media_review.classify_pending_clip(
+        paths,
+        clip.clip_id,
+        classification="bumper",
+        ad_year="",
+        bump_subject="futurama",
+        bump_era="2003",
+        position="OUT",
+        known_subjects={"futurama"},
+    )
+
+    assert target.parent == paths.media("bumps", "futurama")
+    assert target.is_file()
+    assert not media_review.pending_import_clips(paths)
+    assert json.loads(tag_path(target).read_text(encoding="utf-8")) == {
+        "confirmed": True,
+        "confidence": 1.0,
+        "era": 2003,
+        "position": "OUT",
+        "source": "import",
+        "subject": "futurama",
+    }
+
+
+def test_trashing_pending_clip_removes_only_cut_copy(paths, monkeypatch):
+    analysis, source = _analyze(paths, monkeypatch, duration=80)
+    source_bytes = source.read_bytes()
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+    (clip,) = media_review.stage_segments(
+        paths, analysis.token, [{"start": 1, "end": 9}]
+    )
+
+    media_review.trash_pending_clip(paths, clip.clip_id)
+
+    assert not clip.path.exists()
+    assert source.read_bytes() == source_bytes
+    assert not media_review.pending_import_clips(paths)
+
+
+def test_review_queue_recovers_classification_after_process_restart(paths, monkeypatch):
+    analysis, _source = _analyze(paths, monkeypatch, duration=80)
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+    (clip,) = media_review.stage_segments(
+        paths, analysis.token, [{"start": 1, "end": 9}]
+    )
+    manifest = media_review._pending_manifest_path(paths, clip.clip_id)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    target = paths.media("bumps", "futurama", "recovered.mp4")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(clip.path.read_bytes())
+    clip.path.unlink()
+    manifest.unlink()
+    journal = media_review._review_processing_dir(paths) / f"{clip.clip_id}.json"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        json.dumps(
+            {
+                **payload,
+                "action": "classify",
+                "target": target.relative_to(paths.root).as_posix(),
+                "tag": {
+                    "subject": "futurama",
+                    "position": "OUT",
+                    "era": 2003,
+                    "source": "import",
+                    "confidence": 1.0,
+                    "confirmed": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert media_review.pending_import_clips(paths) == []
+    assert target.with_name(target.name + ".tags.json").is_file()
+    assert not journal.exists()
+
+
+def test_review_queue_rolls_back_interrupted_classification(paths, monkeypatch):
+    analysis, _source = _analyze(paths, monkeypatch, duration=80)
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+    (clip,) = media_review.stage_segments(
+        paths, analysis.token, [{"start": 1, "end": 9}]
+    )
+    manifest = media_review._pending_manifest_path(paths, clip.clip_id)
+    payload = json.loads(manifest.read_text(encoding="utf-8"))
+    manifest.unlink()
+    journal = media_review._review_processing_dir(paths) / f"{clip.clip_id}.json"
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text(
+        json.dumps(
+            {
+                **payload,
+                "action": "classify",
+                "target": "media/bumps/futurama/recovered.mp4",
+                "tag": None,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert media_review.pending_import_clips(paths) == [clip]
+    assert manifest.is_file()
+    assert not journal.exists()
+
+
+def test_bad_import_review_record_is_quarantined_without_blocking_valid_clips(
+    paths, monkeypatch
+):
+    analysis, _source = _analyze(paths, monkeypatch, duration=80)
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+    (clip,) = media_review.stage_segments(
+        paths, analysis.token, [{"start": 1, "end": 9}]
+    )
+    broken = paths.data_dir / "media-imports" / "review" / (
+        "00000000-0000-0000-0000-000000000000.json"
+    )
+    broken.write_text("{}", encoding="utf-8")
+
+    valid, issues = media_review.pending_import_clips_with_issues(paths)
+
+    assert valid == [clip]
+    assert len(issues) == 1
+    assert "quarantined" in issues[0]
+    assert (broken.parent / ".broken" / broken.name).is_file()
+
+
+def test_bad_recovery_journal_is_quarantined_without_blocking_valid_clips(
+    paths, monkeypatch
+):
+    analysis, _source = _analyze(paths, monkeypatch, duration=80)
+    monkeypatch.setattr(
+        media_review,
+        "_encode_segment",
+        lambda _ffmpeg, _source, start, end, target: target.write_bytes(
+            f"{start:.3f}:{end:.3f}".encode()
+        ),
+    )
+    (clip,) = media_review.stage_segments(
+        paths, analysis.token, [{"start": 1, "end": 9}]
+    )
+    journal = (
+        media_review._review_processing_dir(paths)
+        / "00000000-0000-0000-0000-000000000000.json"
+    )
+    journal.parent.mkdir(parents=True, exist_ok=True)
+    journal.write_text("{", encoding="utf-8")
+
+    valid, issues = media_review.pending_import_clips_with_issues(paths)
+
+    assert valid == [clip]
+    assert len(issues) == 1
+    assert "journal" in issues[0]
+    assert (journal.parent / ".broken" / journal.name).is_file()
+
+
 def test_export_requires_year_for_commercial_segments(paths, monkeypatch):
     analysis, _ = _analyze(paths, monkeypatch)
     encoded = []
