@@ -74,6 +74,73 @@ def test_replan_stages_a_schedule_and_leaves_the_live_playout_alone(paths, confi
     assert _live_day(paths) == before, "the stream is untouched until a launch"
 
 
+def test_replan_reports_completed_backend_progress_steps(paths, config):
+    _emit_live(config, paths)
+    task_id = "d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
+    client = _client(paths, config)
+
+    response = client.post(
+        "/schedule/replan",
+        headers={"X-Progress-ID": task_id},
+    )
+    assert response.status_code == 303
+
+    status = client.get(f"/api/progress/{task_id}")
+    assert status.status_code == 200
+    progress = status.json()
+    assert progress["state"] == "complete"
+    assert all(step["state"] == "complete" for step in progress["steps"])
+    labels = [step["label"] for step in progress["steps"]]
+    assert any(label.startswith("Planning day 1 of 1:") for label in labels)
+    assert any(label.startswith("Writing day 1 of 1:") for label in labels)
+    assert labels[-1] == "Schedule staged and ready to launch"
+
+
+def test_progress_status_does_not_expose_unknown_tasks(paths, config):
+    response = _client(paths, config).get(
+        "/api/progress/d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
+    )
+    assert response.status_code == 404
+
+
+def test_failed_progress_request_marks_its_last_step_failed(paths, config):
+    task_id = "d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
+    client = _client(paths, config)
+    response = client.post(
+        "/commercials/explode",
+        headers={"X-Progress-ID": task_id},
+    )
+    assert response.status_code == 404
+
+    progress = client.get(f"/api/progress/{task_id}").json()
+    assert progress["state"] == "failed"
+    assert progress["steps"][-1]["state"] == "failed"
+
+
+def test_staging_error_is_reported_as_failed_progress(paths, config, monkeypatch):
+    _emit_live(config, paths)
+
+    def fail_build(*args, **kwargs):
+        raise RuntimeError("planning failed")
+
+    monkeypatch.setattr("nostalgia.web.app.build", fail_build)
+    task_id = "d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
+    client = _client(paths, config)
+    response = client.post(
+        "/schedule/replan",
+        headers={"X-Progress-ID": task_id},
+    )
+    assert response.status_code == 303
+    assert "staging+the+new+schedule+failed" in response.headers["location"]
+
+    progress = client.get(f"/api/progress/{task_id}").json()
+    assert progress["state"] == "failed"
+    assert progress["steps"][-1] == {
+        "label": "Staging the new schedule failed",
+        "state": "failed",
+    }
+
+
 def test_every_save_stages_instead_of_going_live(paths, config):
     """A save that silently rewrote the live files is what this whole change removes."""
     _emit_live(config, paths)
@@ -123,6 +190,9 @@ def test_the_notice_appears_on_every_page_that_can_change_the_schedule(paths, co
     assert "Schedule changes pending" not in client.get("/schedule").text
 
     client.post("/schedule/replan")
+    schedule = client.get("/schedule").text
+    assert 'data-progress="Rebuilding and launching the schedule"' in schedule
+    assert 'data-progress="Discarding the staged schedule"' in schedule
     for page in ("/", "/schedule", "/config"):
         body = client.get(page).text
         assert "Schedule changes pending" in body, page
@@ -137,6 +207,8 @@ def test_the_notice_names_the_seam(paths, config):
     assert "ready to go on air at" in body
     assert "the end of the programme on air now" in body
     assert "day(s)</b> staged" in body, "how much is waiting is stated, not implied"
+    assert "Preview staged changes" in body
+    assert "Compared" in body and "replaced" in body
 
 
 def test_the_notice_says_when_the_settings_have_moved_on_since_the_stage(paths, config):
@@ -163,7 +235,11 @@ def test_launching_swaps_the_files_in_and_clears_the_notice(paths, config):
     staged = D.staged_playouts(_roots(paths))
     assert staged
 
-    response = client.post("/schedule/launch")
+    task_id = "d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
+    response = client.post(
+        "/schedule/launch",
+        headers={"X-Progress-ID": task_id},
+    )
     assert response.status_code == 303
     location = response.headers["location"]
     assert "launched" in location and "day%28s%29" in location
@@ -172,6 +248,9 @@ def test_launching_swaps_the_files_in_and_clears_the_notice(paths, config):
     assert D.last(_roots(paths)) is not None
     assert D.staged_playouts(_roots(paths)) == []
     assert "Schedule changes pending" not in client.get("/schedule").text
+    progress = client.get(f"/api/progress/{task_id}").json()
+    assert progress["state"] == "complete"
+    assert any("Switching the live schedule" in step["label"] for step in progress["steps"])
     assert "launched" in client.get(location).text
 
 

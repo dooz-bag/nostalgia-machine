@@ -143,6 +143,15 @@ class LaunchReport:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class SchedulePreview:
+    compared_days: int
+    added: int
+    removed: int
+    changed: int
+    details: tuple[str, ...]
+
+
 def fingerprint(config) -> str:
     """A short stable hash of the settings a stage was built from.
 
@@ -210,9 +219,12 @@ def live_day_for(roots: Roots, moment_ms: int) -> Path | None:
     """
     for path in _live_days(roots):
         try:
-            spans = intervals(json.loads(path.read_text(encoding="utf-8")))
+            document = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        if not isinstance(document, dict):
+            continue
+        spans = intervals(document)
         if spans and spans[0].start_ms <= moment_ms < spans[-1].finish_ms:
             return path
     return None
@@ -235,6 +247,73 @@ def staged_playouts(roots: Roots) -> list[Path]:
     if not folder.is_dir():
         return []
     return sorted(path for path in folder.glob("*.json") if path.name != REQUEST_NAME)
+
+
+def preview_schedule(roots: Roots, *, detail_limit: int = 6) -> SchedulePreview:
+    """Compare staged day documents with their live counterparts by item start."""
+    live = {path.name: path for path in _live_days(roots)}
+    compared_days = added = removed = changed = 0
+    details: list[str] = []
+
+    def note(day: str, action: str, item: dict) -> None:
+        if len(details) >= detail_limit:
+            return
+        stamp = str(item.get("start") or "unknown time")
+        label = str(item.get("id") or item.get("title") or "item")
+        details.append(f"{day} {stamp}: {action} {label}")
+
+    for staged_path in staged_playouts(roots):
+        staged = _read(staged_path)
+        staged_items = staged.get("items", [])
+        if not isinstance(staged_items, list):
+            staged_items = []
+        live_path = live.get(staged_path.name)
+        if live_path is None:
+            for item in staged_items:
+                added += 1
+                if isinstance(item, dict):
+                    note(staged_path.name, "new", item)
+            continue
+
+        compared_days += 1
+        live_doc = _read(live_path)
+        live_items = live_doc.get("items", [])
+        if not isinstance(live_items, list):
+            live_items = []
+        old_by_start = {
+            str(item.get("start") or ""): item
+            for item in live_items
+            if isinstance(item, dict)
+        }
+        new_by_start = {
+            str(item.get("start") or ""): item
+            for item in staged_items
+            if isinstance(item, dict)
+        }
+        for start in sorted(old_by_start.keys() | new_by_start.keys()):
+            old = old_by_start.get(start)
+            new = new_by_start.get(start)
+            if old is None:
+                added += 1
+                note(staged_path.name, "new", new)
+            elif new is None:
+                removed += 1
+                note(staged_path.name, "removed", old)
+            elif _item_signature(old) != _item_signature(new):
+                changed += 1
+                note(staged_path.name, "replaced", new)
+
+    return SchedulePreview(
+        compared_days=compared_days,
+        added=added,
+        removed=removed,
+        changed=changed,
+        details=tuple(details),
+    )
+
+
+def _item_signature(item: dict) -> str:
+    return json.dumps(item, sort_keys=True, separators=(",", ":"))
 
 
 def save_request(roots: Roots, deploy: Deploy) -> None:
@@ -285,7 +364,12 @@ def intervals(document: dict) -> list[Interval]:
     failure than a switch ten seconds early.
     """
     spans: list[Interval] = []
-    for entry in document.get("items", ()):
+    items = document.get("items", ())
+    if not isinstance(items, list):
+        return spans
+    for entry in items:
+        if not isinstance(entry, dict):
+            continue
         try:
             start = _parse_ms(entry["start"])
             finish = _parse_ms(entry["finish"])
@@ -504,9 +588,12 @@ def launch(roots: Roots, *, now_ms: int | None = None) -> LaunchReport:
 
 def _read(path: Path) -> dict:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        document = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise LookupError(f"{path.name} is not readable: {exc}") from exc
+    if not isinstance(document, dict):
+        raise LookupError(f"{path.name} is not a JSON object")
+    return document
 
 
 def clock(epoch_ms: int, zone: tzinfo) -> str:
@@ -521,6 +608,7 @@ __all__ = [
     "LAST_NAME",
     "REQUEST_NAME",
     "Roots",
+    "SchedulePreview",
     "cancel",
     "clear",
     "fingerprint",
@@ -535,6 +623,7 @@ __all__ = [
     "merge_playout",
     "missing_inputs",
     "plan_switch",
+    "preview_schedule",
     "request_path",
     "save_request",
     "staged_playouts",

@@ -58,7 +58,7 @@ services:
           sleep "$${PLAN_INTERVAL_SECONDS:-21600}"
         done
     healthcheck:
-      test: ["CMD", "python", "-c", "import pathlib,sys; sys.exit(0 if list(pathlib.Path('/app/playout').glob('*.json')) else 1)"]
+      test: ["CMD", "python", "-m", "nostalgia.cli", "--root", "/app", "health"]
       interval: 5m
       timeout: 10s
       retries: 3

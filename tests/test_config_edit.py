@@ -65,6 +65,18 @@ def test_a_quoted_string_stays_a_string(config_dir: Path) -> None:
     assert 'number: "1"' in text
 
 
+def test_saving_preserves_windows_line_endings(config_dir: Path) -> None:
+    path = config_dir / "channel.yaml"
+    original = path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+    path.write_bytes(original)
+
+    save_values(BY_SLUG["channel"], config_dir, {"name": "Windows"})
+
+    saved = path.read_bytes()
+    assert b"\r\n" in saved
+    assert b"\n" not in saved.replace(b"\r\n", b"")
+
+
 def test_the_day_files_keep_their_dayparts(config_dir: Path) -> None:
     """Editing the day list must not lose the programming below it."""
     save_values(BY_SLUG["days/weekday"], config_dir, {"days": "mon tue wed"})
@@ -153,6 +165,23 @@ def test_a_failed_save_leaves_the_file_untouched(config_dir: Path) -> None:
     with pytest.raises(ConfigEditError):
         save_values(BY_SLUG["channel"], config_dir, {"name": "Changed", "horizon_days": "99"})
     assert (config_dir / "channel.yaml").read_text(encoding="utf-8") == before
+
+
+def test_failed_atomic_replace_keeps_original_and_cleans_temp(config_dir, monkeypatch) -> None:
+    import nostalgia.web.config_edit as config_edit
+
+    path = config_dir / "channel.yaml"
+    before = path.read_bytes()
+
+    def fail_replace(_temporary, _target):
+        raise OSError("simulated replace failure")
+
+    monkeypatch.setattr(config_edit.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated replace failure"):
+        save_values(BY_SLUG["channel"], config_dir, {"name": "Changed"})
+
+    assert path.read_bytes() == before
+    assert list(config_dir.glob(".channel.yaml.*.tmp")) == []
 
 
 def test_clearing_an_optional_key_removes_it(config_dir: Path) -> None:

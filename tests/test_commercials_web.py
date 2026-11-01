@@ -69,6 +69,7 @@ def test_commercials_page_renders(paths, config, catalog):
     body = response.text
     assert "Recently aired" in body
     assert "Commercial library" in body
+    assert 'data-progress="Updating commercials and replanning"' in body
 
 
 def test_commercials_page_lists_an_airing_with_name_time_and_duration(

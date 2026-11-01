@@ -12,8 +12,14 @@
 #   by_season   pick a season first, then an episode inside it
 #   sequential  in order, wrapping -- watch the show progress
 programming:
-  mode: dayparts
+  mode: shuffle
   lineup: []
   pinned: []
-  shuffle_shows: []
-  shuffle_order: random
+  shuffle_shows:
+  - aqua-teen-hunger-force
+  - futurama
+  - king-of-the-hill
+  - sealab-2021
+  - space-ghost-coast-to-coast
+  - the-venture-bros
+  shuffle_order: by_season

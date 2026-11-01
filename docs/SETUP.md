@@ -197,7 +197,8 @@ fixtures), a `<file>.json` sidecar with `{"duration_ms": 660000}` works:
 
 Probing runs in parallel (ffprobe is one process per file). `NOSTALGIA_SCAN_WORKERS`
 overrides the count; the default is CPU count, clamped to 4–16. A 1,482-file
-library scans in ~4 s.
+library scans in ~4 s. Unchanged files reuse their ffprobe result, keyed by path,
+size and modification time; `nostalgia scan --force` deliberately re-probes them.
 
 ### Importing a bumper archive
 
@@ -484,6 +485,13 @@ Running natively instead:
 nostalgia serve --host 0.0.0.0 --port 8099
 ```
 
+While a schedule-changing action runs, the page shows a checklist of backend
+steps. It marks completed work and the current operation, including each day
+being planned; it does not guess at a percentage or an end time. Config and
+schedule saves, schedule launch/discard, episode skips, continuity changes, and
+commercial toggles all use this feedback. A completed step list does not mean a
+staged schedule is live: launching remains a separate, explicit action.
+
 Go to **Schedule** (`/schedule`). This is the one place you can change *what the
 channel is* without editing YAML.
 
@@ -550,6 +558,12 @@ file that cannot load would break the channel at the next plan with no clue whic
 edit did it. A change that is only wrong in combination — a day file naming a show
 that does not exist — is caught here too, since the whole config is re-validated
 after the write.
+
+Each changed YAML file is written to a sibling temporary file and atomically
+replaced, so a reader never sees a half-written individual file. A submission that
+touches several YAML files is still committed one file at a time; validation errors
+are rolled back, but an abrupt process or machine failure during that brief commit
+could leave only part of the multi-file edit in place.
 
 Two smaller behaviours worth knowing, both of which used to bite:
 
@@ -731,6 +745,10 @@ over. It carries the two buttons that matter:
 |---|---|
 | **Launch new schedule** | rebuilds the staged days from the settings as they are now, then swaps them in |
 | **Discard** | deletes the staging folder; the stream keeps playing what it was playing |
+
+Expand **Preview staged changes** on the notice to see added, removed and replaced
+items compared with the live day files, plus a short list of examples. It is a
+read-only preview; launch still rebuilds from the current settings.
 
 **The switch lands on a boundary.** The boundary is the end of the programme that is
 on air when the launch happens — never a break, because half a break followed by a

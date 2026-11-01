@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
+from typing import Callable
 
 from .catalog import Catalog, ScanReport
 from .deploy import (
@@ -461,6 +462,7 @@ def scan(
     paths: Paths,
     *,
     ffprobe_path: str | None = None,
+    force: bool = False,
     write_sidecars: bool = False,
     detect_burned_in: bool | None = None,
     detect_spots: bool = False,
@@ -490,6 +492,7 @@ def scan(
         ident_root=paths.media("idents"),
         extra_root=paths.media("extras"),
         ffprobe_path=ffprobe_path or config.channel.ffmpeg_path,
+        force=force,
         write_sidecars=write_sidecars,
         # Composited watermark copies, when burn mode has produced any.
         derived_root=paths.media("derived", "watermark"),
@@ -517,6 +520,7 @@ def build(
     allow_generated: bool | None = None,
     use_skips: bool = True,
     deploy: bool = False,
+    progress: Callable[[str], None] | None = None,
 ) -> BuildResult:
     """Build and (optionally) write playout + XMLTV for a run of days.
 
@@ -574,6 +578,8 @@ def build(
 
     for offset in range(horizon):
         day = start_day + timedelta(days=offset)
+        if progress is not None:
+            progress(f"Planning day {offset + 1} of {horizon}: {day.isoformat()}")
         day_config = day_config_for(config, day)
         pending = pending_for(overrides, day)
         try:
@@ -608,6 +614,8 @@ def build(
         )
 
         if emit:
+            if progress is not None:
+                progress(f"Writing day {offset + 1} of {horizon}: {day.isoformat()}")
             runs: list[MergedRun] = []
             if config.ads.merge_breaks:
                 runs, merge_warnings = merge_plan(
@@ -627,6 +635,8 @@ def build(
             )
 
     if emit:
+        if progress is not None:
+            progress("Writing the guide and finalizing the schedule")
         # Every playout was just rewritten, so `kept_merged` is the complete set of
         # joined files anything still refers to; the rest are stale. A staged build
         # leaves the live playout in place, and that file may still name some of
@@ -796,6 +806,33 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
 
     findings.append(("ok", "config", f"{len(config.shows)} shows, {len(config.days)} day files"))
     findings.extend(_programming_findings(config, catalog))
+    scheduler = catalog.get_json_state("scheduler_emit")
+    if scheduler is None:
+        findings.append(("warn", "scheduler", "no live emit status recorded yet"))
+    else:
+        error = scheduler.get("last_error")
+        last_success = scheduler.get("last_success_ms")
+        if error:
+            detail = f"last emit failed: {error}"
+            if last_success:
+                detail += f"; last successful emit {_status_time(last_success)}"
+            findings.append(("warn", "scheduler", detail))
+        elif last_success:
+            findings.append(
+                ("ok", "scheduler", f"last live emit {_status_time(last_success)}")
+            )
+        else:
+            findings.append(("warn", "scheduler", "no successful live emit recorded"))
+
+    active_playout = live_day_for(
+        Roots.of(paths.playout_dir, paths.xmltv_dir), int(time.time() * 1000)
+    )
+    if active_playout is None:
+        findings.append(("warn", "scheduler", "no readable live playout covers now"))
+    else:
+        findings.append(
+            ("ok", "scheduler", f"live playout covers now ({active_playout.name})")
+        )
 
     from .probe import find_ffprobe
 
@@ -1006,6 +1043,10 @@ def doctor(config: RootConfig, catalog: Catalog, paths: Paths) -> list[tuple[str
                     )
 
     return findings
+
+
+def _status_time(value: int) -> str:
+    return time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(value / 1000))
 
 
 __all__ = [

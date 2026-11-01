@@ -70,6 +70,31 @@ def _bug_from_row(row) -> bool | None:
     return None if value is None else bool(value)
 
 
+def _cache_matches(row, path: Path, stat: os.stat_result, force: bool) -> bool:
+    """Whether a previous ffprobe result still describes this exact file."""
+    return bool(
+        not force
+        and row is not None
+        and row["probed_by"] == "ffprobe"
+        and row["path"] == str(path)
+        and row["size_bytes"] == stat.st_size
+        and row["mtime_ns"] == stat.st_mtime_ns
+    )
+
+
+def _cached_info(row) -> MediaInfo:
+    return MediaInfo(
+        duration_ms=row["duration_ms"],
+        format_name=row["format_name"],
+        video_codec=row["video_codec"],
+        width=row["width"],
+        height=row["height"],
+        audio_codec=row["audio_codec"],
+        audio_channels=row["audio_channels"],
+        source=row["probed_by"],
+    )
+
+
 def _migrate(connection: sqlite3.Connection) -> None:
     """Bring an existing catalog up to the current schema, in place.
 
@@ -349,8 +374,17 @@ class Catalog:
         """
         report = ScanReport()
         ffprobe = find_ffprobe(ffprobe_path)
+        existing = {
+            row["key"]: row
+            for row in self.connect().execute(
+                "SELECT key, path, size_bytes, mtime_ns, probed_by, duration_ms, "
+                "format_name, video_codec, width, height, audio_codec, audio_channels, "
+                "burned_in_mark FROM media"
+            )
+        }
 
         rows: list[tuple] = []
+        scanned_roots: set[str] = set()
         # Probe in parallel. ffprobe is a process per file and a library of a few
         # thousand bumps made a scan take 37s, essentially all of it spawn cost.
         # Threads are the right tool: each call blocks on a subprocess, so there is
@@ -360,6 +394,7 @@ class Catalog:
                 if not Path(folder).is_dir():
                     report.note(Path(folder), f"show folder for {show_id!r} is missing")
                     continue
+                scanned_roots.add(str(Path(folder)))
                 rows.extend(
                     self._scan_show(
                         show_id,
@@ -368,6 +403,8 @@ class Catalog:
                         report,
                         write_sidecars,
                         pool,
+                        existing=existing,
+                        force=force,
                         derived_root=derived_root,
                         detect_burned_in=detect_burned_in,
                         ffmpeg_path=ffmpeg_path,
@@ -384,12 +421,16 @@ class Catalog:
                 (extra_root, "extra"),
             ):
                 if root and Path(root).is_dir():
+                    scanned_roots.add(str(Path(root)))
                     rows.extend(
-                        self._scan_flat(Path(root), kind, ffprobe, report, write_sidecars, pool)
+                        self._scan_flat(
+                            Path(root), kind, ffprobe, report, write_sidecars, pool,
+                            existing=existing, force=force,
+                        )
                     )
 
-        if rows:
-            with self.transaction() as connection:
+        with self.transaction() as connection:
+            if rows:
                 connection.executemany(
                     """
                     INSERT INTO media (key, kind, path, folder, show_id, season, episode,
@@ -407,17 +448,25 @@ class Catalog:
                         height=excluded.height, audio_codec=excluded.audio_codec,
                         audio_channels=excluded.audio_channels,
                         size_bytes=excluded.size_bytes, mtime_ns=excluded.mtime_ns,
-                        probed_by=excluded.probed_by
+                        probed_by=excluded.probed_by,
+                        burned_in_mark=COALESCE(
+                            excluded.burned_in_mark, media.burned_in_mark
+                        )
                     """,
                     rows,
                 )
-                self._delete_stale(connection, {row[0] for row in rows})
-                self._sync_sidecar_tags(connection)
-                connection.execute("DELETE FROM scan_issues")
-                connection.executemany(
-                    "INSERT OR REPLACE INTO scan_issues(path, reason) VALUES (?,?)",
-                    report.issues,
-                )
+            self._delete_stale(
+                connection,
+                {row[0] for row in rows},
+                scanned_roots,
+                {path for path, _reason in report.issues},
+            )
+            self._sync_sidecar_tags(connection)
+            connection.execute("DELETE FROM scan_issues")
+            connection.executemany(
+                "INSERT OR REPLACE INTO scan_issues(path, reason) VALUES (?,?)",
+                report.issues,
+            )
         for row in rows:
             report.per_kind[row[1]] = report.per_kind.get(row[1], 0) + 1
             report.scanned += 1
@@ -529,47 +578,69 @@ class Catalog:
         derived_root: Path | None = None,
         detect_burned_in: bool = False,
         ffmpeg_path: str | None = None,
+        *,
+        existing: dict | None = None,
+        force: bool = False,
     ) -> list[tuple]:
         rows: list[tuple] = []
         candidates = list(_walk_media(folder))
 
         # A composited copy replaces the original for that episode. Resolved
         # before probing so only the file that will actually air is measured.
-        chosen: list[tuple[Path, Path]] = []
+        chosen: list[tuple[Path, Path, str, bool, os.stat_result]] = []
         for path in candidates:
             parsed = parse_episode(path.name, season_dir=path.parent.name)
             key = f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}" if parsed else None
             derived = _derived_for(derived_root, key) if key else None
-            chosen.append((derived or path, path))
+            media_path = derived or path
+            chosen.append(
+                (media_path, path, key or "", derived is not None, media_path.stat())
+            )
 
         futures = {}
         if pool is not None and ffprobe:
-            for media_path, _original in chosen:
-                if not sidecar_duration_ms(media_path):
+            for media_path, _original, key, _is_derived, stat in chosen:
+                cached = (existing or {}).get(key)
+                if (
+                    not _cache_matches(cached, media_path, stat, force)
+                    and not sidecar_duration_ms(media_path)
+                ):
                     futures[media_path] = pool.submit(probe, media_path, ffprobe)
 
-        for path, original in chosen:
+        for path, original, key, is_derived, stat in chosen:
             # Identity always comes from the *original* name, so a derived file's
             # own naming can never change which episode it is.
-            stat = path.stat()
             parsed = parse_episode(original.name, season_dir=original.parent.name)
             if parsed is None:
                 report.note(original, "cannot determine season/episode from the filename")
                 continue
-            info, probed_by = self._info(
-                path, stat.st_mtime_ns, ffprobe, report, write_sidecars, futures.get(path)
-            )
+            cached = (existing or {}).get(key)
+            if _cache_matches(cached, path, stat, force):
+                info, probed_by = _cached_info(cached), cached["probed_by"]
+                report.skipped_existing += 1
+            else:
+                info, probed_by = self._info(
+                    path, stat.st_mtime_ns, ffprobe, report, write_sidecars,
+                    futures.get(path),
+                )
             if info is None:
                 continue
-            key = f"{show_id}:s{parsed.season:02d}e{parsed.episode:03d}"
             marked = None
             # Only an *original* is worth examining: a composited copy carries the
             # mark this channel drew, so detecting it there would report our own
             # work as the show's.
-            if detect_burned_in and derived is None:
-                marked = self._detect_mark(path, ffmpeg_path)
-                if marked:
-                    report.marked += 1
+            if detect_burned_in and not is_derived:
+                old_mark = _bug_from_row(cached) if cached is not None else None
+                if old_mark is not None and not force:
+                    marked = old_mark
+                    if marked:
+                        report.marked += 1
+                else:
+                    marked = self._detect_mark(path, ffmpeg_path)
+                    if marked:
+                        report.marked += 1
+                if marked is None:
+                    report.mark_pending += 1
             rows.append(
                 (
                     key,
@@ -618,6 +689,9 @@ class Catalog:
         report: ScanReport,
         write_sidecars: bool,
         pool: "ThreadPoolExecutor | None" = None,
+        *,
+        existing: dict | None = None,
+        force: bool = False,
     ) -> list[tuple]:
         rows: list[tuple] = []
         # Submit every probe first, then collect. Calling .result() straight after
@@ -629,21 +703,33 @@ class Catalog:
         if pool is not None and ffprobe:
             for path in paths:
                 # Sidecar-only files need no subprocess at all.
-                if not sidecar_duration_ms(path):
+                key = f"{kind}:{path.relative_to(root).as_posix()}"
+                cached = (existing or {}).get(key)
+                if (
+                    not _cache_matches(cached, path, stats[path], force)
+                    and not sidecar_duration_ms(path)
+                ):
                     futures[path] = pool.submit(probe, path, ffprobe)
 
         for path in paths:
             stat = stats[path]
-            info, probed_by = self._info(
-                path, stat.st_mtime_ns, ffprobe, report, write_sidecars, futures.get(path)
-            )
+            relative = path.relative_to(root)
+            key = f"{kind}:{relative.as_posix()}"
+            cached = (existing or {}).get(key)
+            if _cache_matches(cached, path, stat, force):
+                info, probed_by = _cached_info(cached), cached["probed_by"]
+                report.skipped_existing += 1
+            else:
+                info, probed_by = self._info(
+                    path, stat.st_mtime_ns, ffprobe, report, write_sidecars,
+                    futures.get(path),
+                )
             if info is None:
                 continue
-            relative = path.relative_to(root)
             subject_folder = relative.parts[0] if len(relative.parts) > 1 else None
             rows.append(
                 (
-                    f"{kind}:{relative.as_posix()}",
+                    key,
                     kind,
                     str(path),
                     str(root),
@@ -709,38 +795,74 @@ class Catalog:
         them here. Idempotent, and a no-op when the folder is empty or missing.
         """
         folder = Path(folder)
-        if not folder.is_dir():
-            return 0
-
         report = ScanReport()
         ffprobe = find_ffprobe(ffprobe_path)
-        rows = self._scan_flat(folder, "bump", ffprobe, report, False)
-        if not rows:
-            return 0
+        existing = {
+            row["key"]: row
+            for row in self.connect().execute(
+                "SELECT key, path, size_bytes, mtime_ns, probed_by, duration_ms, "
+                "format_name, video_codec, width, height, audio_codec, audio_channels, "
+                "burned_in_mark FROM media"
+            )
+        }
+        rows = (
+            self._scan_flat(
+                folder, "bump", ffprobe, report, False, existing=existing
+            )
+            if folder.is_dir()
+            else []
+        )
 
         with self.transaction() as connection:
-            connection.executemany(
-                """
-                INSERT INTO media (key, kind, path, folder, show_id, season, episode,
-                                   title, duration_ms, format_name, video_codec, width,
-                                   height, audio_codec, audio_channels, size_bytes,
-                                   mtime_ns, probed_by, burned_in_mark)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(key) DO UPDATE SET
-                    duration_ms=excluded.duration_ms, mtime_ns=excluded.mtime_ns,
-                    size_bytes=excluded.size_bytes, probed_by=excluded.probed_by,
-                    -- Refreshed only when this scan actually looked; a NULL means
-                    -- "not examined", and overwriting a known verdict with NULL
-                    -- would silently un-mark an episode.
-                    burned_in_mark=COALESCE(excluded.burned_in_mark, media.burned_in_mark)
-                """,
-                rows,
+            if rows:
+                connection.executemany(
+                    """
+                    INSERT INTO media (key, kind, path, folder, show_id, season, episode,
+                                       title, duration_ms, format_name, video_codec, width,
+                                       height, audio_codec, audio_channels, size_bytes,
+                                       mtime_ns, probed_by, burned_in_mark)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(key) DO UPDATE SET
+                        duration_ms=excluded.duration_ms, mtime_ns=excluded.mtime_ns,
+                        size_bytes=excluded.size_bytes, probed_by=excluded.probed_by,
+                        -- Refreshed only when this scan actually looked; a NULL means
+                        -- "not examined", and overwriting a known verdict with NULL
+                        -- would silently un-mark an episode.
+                        burned_in_mark=COALESCE(excluded.burned_in_mark, media.burned_in_mark)
+                    """,
+                    rows,
+                )
+            self._delete_stale(
+                connection,
+                {row[0] for row in rows},
+                {str(folder)},
+                {path for path, _reason in report.issues},
             )
         return len(rows)
 
-    def _delete_stale(self, connection: sqlite3.Connection, keep: set[str]) -> None:
-        existing = {row["key"] for row in connection.execute("SELECT key FROM media")}
-        stale = existing - keep
+    def _delete_stale(
+        self,
+        connection: sqlite3.Connection,
+        keep: set[str],
+        folders: set[str],
+        preserve_paths: set[str] | None = None,
+    ) -> None:
+        if not folders:
+            return
+        placeholders = ",".join("?" for _ in folders)
+        preserve_paths = preserve_paths or set()
+        existing = {
+            row["key"]: row["path"]
+            for row in connection.execute(
+                f"SELECT key, path FROM media WHERE folder IN ({placeholders})",
+                tuple(folders),
+            )
+        }
+        stale = {
+            key
+            for key, path in existing.items()
+            if key not in keep and path not in preserve_paths
+        }
         if stale:
             connection.executemany("DELETE FROM media WHERE key = ?", [(key,) for key in stale])
 

@@ -113,7 +113,7 @@ def _rows(
   <td>{_h(entry['name'])}{flag}{hint}</td>
   <td class="mono">{_h(_seconds(entry['duration_ms']))}{trimmed}</td>
   <td>
-    <form method="post" action="/commercials/{action}" class="inline">
+    <form method="post" action="/commercials/{action}" class="inline" data-progress="Updating commercials and replanning">
       <input type="hidden" name="key" value="{_h(entry['key'])}">
       <button type="submit">{label}</button>
     </form>
@@ -162,7 +162,7 @@ def _library_rows(assets, *, limit: int = 40) -> tuple[str, int, int]:
   <td class="mono">{_h(_seconds(asset.duration_ms))}</td>
   <td>{tier}</td>
   <td>
-    <form method="post" action="/commercials/{action}" class="inline">
+    <form method="post" action="/commercials/{action}" class="inline" data-progress="Updating commercials and replanning">
       <input type="hidden" name="key" value="{_h(asset.key)}">
       <button type="submit">{label}</button>
     </form>
@@ -192,7 +192,7 @@ def _disabled_rows(assets) -> str:
   <td>{_h(asset.path.replace(chr(92), "/").rsplit("/", 1)[-1])}</td>
   <td class="mono">{_h(_seconds(asset.duration_ms))}</td>
   <td>
-    <form method="post" action="/commercials/enable" class="inline">
+    <form method="post" action="/commercials/enable" class="inline" data-progress="Updating commercials and replanning">
       <input type="hidden" name="key" value="{_h(asset.key)}">
       <button type="submit">Enable</button>
     </form>
@@ -396,7 +396,7 @@ def _compilations_section(assets) -> str:
   <td class="mono">{len(members)}</td>
   <td>{status}</td>
   <td>
-    <form method="post" action="/commercials/family/{action}" class="inline">
+    <form method="post" action="/commercials/family/{action}" class="inline" data-progress="Updating commercials and replanning">
       <input type="hidden" name="family" value="{_h(name)}">
       <button type="submit">{label}</button>
     </form>
@@ -496,7 +496,7 @@ def _extras_section(config: RootConfig, catalog: Catalog) -> str:
   <td>{_h(asset.path.replace(chr(92), "/").rsplit("/", 1)[-1])}{flag}</td>
   <td class="mono">{_h(_seconds(asset.duration_ms))}</td>
   <td>
-    <form method="post" action="/commercials/{action}" class="inline">
+    <form method="post" action="/commercials/{action}" class="inline" data-progress="Updating commercials and replanning">
       <input type="hidden" name="key" value="{_h(asset.key)}">
       <button type="submit">{label}</button>
     </form>

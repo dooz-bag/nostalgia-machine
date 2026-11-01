@@ -80,6 +80,9 @@ def _text(paths, name: str) -> str:
 def test_the_page_has_one_save_button_and_no_per_file_forms(paths, config):
     body = _client(paths, config).get("/config").text
     assert body.count('action="/config"') == 1, "the whole page is one form"
+    assert 'data-progress="Saving and validating settings"' in body
+    assert 'id="work-progress" class="work-progress" role="status"' in body
+    assert '"/api/progress/"' in body
     assert 'action="/config/' not in body, "no per-file form survives"
     assert body.count("<button") == 2, "one save at the top, one at the bottom"
     assert body.count("Save changes") == 2

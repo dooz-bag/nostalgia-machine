@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import subprocess
 import sys
+import time
 from datetime import date
 from pathlib import Path
 
@@ -35,6 +36,8 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     paths = Paths.discover(args.root)
+    if args.command == "health":
+        return _cmd_health(args, None, paths)
     try:
         config = load_config(paths.config_dir)
     except ConfigError as exc:
@@ -111,6 +114,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_common_plan_args(emit_cmd)
 
     sub.add_parser("doctor", help="check config, media and catalog")
+    sub.add_parser("health", help="check whether live playout covers the current time")
 
     conform_cmd = sub.add_parser(
         "conform",
@@ -309,11 +313,15 @@ def _cmd_scan(args, config, paths: Paths) -> int:
             catalog,
             paths,
             ffprobe_path=args.ffprobe,
+            force=args.force,
             write_sidecars=args.sidecars,
             detect_burned_in=args.detect_marks,
             detect_spots=args.detect_spots,
         )
-    print(f"scanned {report.total} files ({report.probed} probed, {report.from_sidecar} from sidecars)")
+    print(
+        f"scanned {report.total} files ({report.probed} probed, "
+        f"{report.skipped_existing} cached, {report.from_sidecar} from sidecars)"
+    )
     if args.detect_marks:
         print(f"  {report.marked} episode(s) already carry a corner bug of their own")
     if args.detect_spots:
@@ -568,6 +576,19 @@ def _cmd_emit(args, config, paths: Paths) -> int:
     return _run_build(args, config, paths, emit=True, show=False, quiet=False)
 
 
+def _cmd_health(args, config, paths: Paths) -> int:
+    from .deploy import Roots, live_day_for
+
+    current = live_day_for(
+        Roots.of(paths.playout_dir, paths.xmltv_dir), int(time.time() * 1000)
+    )
+    if current is None:
+        print("no readable live playout covers the current time", file=sys.stderr)
+        return 1
+    print(f"live playout is available: {current.name}")
+    return 0
+
+
 def _must_emit_in_container() -> bool:
     """Whether emitting here would write paths only this machine can read.
 
@@ -616,16 +637,33 @@ def _streamer_port() -> int:
 def _run_build(args, config, paths: Paths, *, emit: bool, show: bool, quiet: bool) -> int:
     start = date.fromisoformat(args.date) if args.date else None
     with Catalog(paths.catalog) as catalog:
-        result = build(
-            config,
-            catalog,
-            paths,
-            start=start,
-            days=args.days,
-            emit=emit,
-            ignore_cooldowns=args.no_cooldowns,
-            allow_generated=False if args.no_generated else None,
-        )
+        status = catalog.get_json_state("scheduler_emit") or {}
+        if emit:
+            status.update(
+                last_attempt_ms=int(time.time() * 1000),
+                last_success_ms=status.get("last_success_ms"),
+                last_error="emit did not complete",
+            )
+            catalog.set_json_state("scheduler_emit", status)
+        try:
+            result = build(
+                config,
+                catalog,
+                paths,
+                start=start,
+                days=args.days,
+                emit=emit,
+                ignore_cooldowns=args.no_cooldowns,
+                allow_generated=False if args.no_generated else None,
+            )
+        except Exception as exc:
+            if emit:
+                status["last_error"] = f"{type(exc).__name__}: {exc}"[:1000]
+                catalog.set_json_state("scheduler_emit", status)
+            raise
+        if emit:
+            status.update(last_success_ms=int(time.time() * 1000), last_error=None)
+            catalog.set_json_state("scheduler_emit", status)
         context = (
             PlanContext.load(
                 config, catalog, config_dir=paths.config_dir, media_root=paths.media_root

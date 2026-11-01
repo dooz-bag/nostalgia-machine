@@ -192,6 +192,7 @@ def test_schedule_page_renders_every_mode(paths, config):
     for mode in ("dayparts", "lineup", "shuffle"):
         assert f'value="{mode}"' in body
     assert 'action="/schedule"' in body
+    assert 'data-progress="Saving and staging the schedule"' in body
 
 
 def test_schedule_page_lists_the_roster_with_episode_counts(paths, config):

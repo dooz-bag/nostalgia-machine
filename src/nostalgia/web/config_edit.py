@@ -22,6 +22,9 @@ Two rules keep this honest:
 from __future__ import annotations
 
 import io
+import os
+import stat
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
@@ -836,7 +839,12 @@ def save_values(
     path = config_dir / entry.path
 
     reader = _yaml()
-    document = reader.load(path.read_text(encoding="utf-8")) if path.is_file() else CommentedMap()
+    original = path.read_bytes() if path.is_file() else b""
+    document = (
+        reader.load(original.decode("utf-8"))
+        if original
+        else CommentedMap()
+    )
     if document is None:
         document = CommentedMap()
 
@@ -874,9 +882,37 @@ def save_values(
 
     buffer = io.StringIO()
     reader.dump(document, buffer)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(buffer.getvalue(), encoding="utf-8")
+    output = buffer.getvalue()
+    if b"\r\n" in original:
+        output = output.replace("\r\n", "\n").replace("\n", "\r\n")
+    _write_atomic(path, output)
     return changed
+
+
+def _write_atomic(path: Path, content: str | bytes) -> None:
+    """Replace a YAML file atomically so concurrent readers never see half a write."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except FileNotFoundError:
+        mode = None
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb", prefix=f".{path.name}.", suffix=".tmp",
+            dir=path.parent, delete=False,
+        ) as handle:
+            temporary = Path(handle.name)
+            data = content.encode("utf-8") if isinstance(content, str) else content
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if mode is not None:
+            os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def save_all(

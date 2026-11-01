@@ -12,8 +12,11 @@ from __future__ import annotations
 
 from collections import Counter
 from dataclasses import asdict
-from typing import Any, Sequence
+from threading import Lock
+from time import monotonic
+from typing import Any, Callable, Sequence
 from urllib.parse import quote_plus
+from uuid import UUID
 
 from fastapi import Request
 
@@ -55,6 +58,91 @@ from .schedule import (
     write_schedule,
 )
 from .view import apply_tag, now_playing, pending_tags, plan_for_day
+
+
+class _ProgressTracker:
+    """Short-lived progress snapshots for browser-submitted schedule operations."""
+
+    _MAX_TASKS = 128
+    _MAX_AGE_SECONDS = 600
+
+    def __init__(self) -> None:
+        self._lock = Lock()
+        self._tasks: dict[str, dict[str, Any]] = {}
+
+    def _prune(self, now: float) -> None:
+        expired = [
+            task_id
+            for task_id, task in self._tasks.items()
+            if task["state"] != "running"
+            and now - task["updated"] > self._MAX_AGE_SECONDS
+        ]
+        for task_id in expired:
+            del self._tasks[task_id]
+        while len(self._tasks) > self._MAX_TASKS:
+            oldest = min(self._tasks, key=lambda key: self._tasks[key]["updated"])
+            del self._tasks[oldest]
+
+    def start(self, task_id: str) -> None:
+        now = monotonic()
+        with self._lock:
+            self._prune(now)
+            self._tasks[task_id] = {
+                "state": "running",
+                "steps": [{"label": "Starting your change", "state": "active"}],
+                "updated": now,
+            }
+
+    def advance(self, task_id: str | None, label: str) -> None:
+        if task_id is None:
+            return
+        now = monotonic()
+        with self._lock:
+            self._prune(now)
+            task = self._tasks.get(task_id)
+            if task is None or task["state"] != "running":
+                return
+            task["steps"][-1]["state"] = "complete"
+            task["steps"].append({"label": label, "state": "active"})
+            task["updated"] = now
+
+    def fail(self, task_id: str | None, label: str) -> None:
+        if task_id is None:
+            return
+        now = monotonic()
+        with self._lock:
+            self._prune(now)
+            task = self._tasks.get(task_id)
+            if task is None or task["state"] != "running":
+                return
+            task["steps"][-1] = {"label": label, "state": "failed"}
+            task["state"] = "failed"
+            task["updated"] = now
+
+    def finish(self, task_id: str, *, success: bool) -> None:
+        now = monotonic()
+        with self._lock:
+            self._prune(now)
+            task = self._tasks.get(task_id)
+            if task is None or task["state"] != "running":
+                return
+            task["state"] = "complete" if success else "failed"
+            if task["steps"]:
+                task["steps"][-1]["state"] = "complete" if success else "failed"
+            task["updated"] = now
+
+    def get(self, task_id: str) -> dict[str, Any] | None:
+        now = monotonic()
+        with self._lock:
+            self._prune(now)
+            task = self._tasks.get(task_id)
+            if task is None:
+                return None
+            return {
+                "state": task["state"],
+                "steps": [dict(step) for step in task["steps"]],
+            }
+
 
 _CSS = """
 /* SMPTE ECR 1-1978 NTSC colour bars. The official levels are 75% amplitude,
@@ -596,6 +684,58 @@ details.advanced > summary .dim { letter-spacing: .08em; text-transform: none; }
 .pending { border-left: 3px solid var(--yellow); }
 .pending .label { color: var(--yellow); }
 
+.work-progress {
+  position: sticky;
+  top: 8px;
+  z-index: 5;
+  border: 1px solid var(--cyan);
+  border-left: 4px solid var(--cyan);
+  background: var(--panel);
+  padding: 12px 16px;
+  margin-bottom: 16px;
+  box-shadow: 0 4px 18px rgba(0,0,0,.45);
+}
+.work-progress[hidden] { display: none; }
+.work-progress p { margin: 0 0 8px; }
+.work-progress ol { list-style: none; margin: 0; padding: 0; }
+.work-progress li {
+  position: relative;
+  min-height: 22px;
+  padding: 2px 0 4px 28px;
+  color: var(--dim);
+}
+.work-progress li::before {
+  position: absolute;
+  left: 2px;
+  top: 3px;
+  width: 14px;
+  height: 14px;
+  border: 2px solid var(--dim);
+  border-radius: 50%;
+  content: "";
+}
+.work-progress li.complete { color: var(--fg); }
+.work-progress li.complete::before {
+  content: "✓";
+  border-color: var(--green);
+  color: var(--green);
+  font-size: 11px;
+  line-height: 14px;
+  text-align: center;
+}
+.work-progress li.active { color: var(--fg); }
+.work-progress li.active::before {
+  border-color: var(--cyan);
+  border-right-color: transparent;
+  animation: progress-spin .8s linear infinite;
+}
+.work-progress li.failed { color: var(--red); }
+.work-progress li.failed::before { border-color: var(--red); }
+@keyframes progress-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .work-progress li.active::before { animation: none; }
+}
+
 @media (max-width: 620px) {
   main, header, footer { padding-left: 16px; padding-right: 16px; }
   .now-title { font-size: 22px; }
@@ -647,9 +787,112 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
   <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/lines", "Lines")}{nav("/config", "Config")}</nav>
 </header>
-<main>{body}</main>
+<main>
+  <section id="work-progress" class="work-progress" role="status" aria-live="polite" hidden>
+    <p id="work-progress-title">Working on your change</p>
+    <ol id="work-progress-steps"></ol>
+  </section>
+  {body}
+</main>
 <footer>Nostalgia Machine &middot; {standard}</footer>
 </div>
+<script>
+(() => {{
+  const panel = document.getElementById("work-progress");
+  const title = document.getElementById("work-progress-title");
+  const list = document.getElementById("work-progress-steps");
+  const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const taskId = () => {{
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    if (!window.crypto || !window.crypto.getRandomValues) return null;
+    const bytes = window.crypto.getRandomValues(new Uint8Array(16));
+    bytes[6] = (bytes[6] & 15) | 64;
+    bytes[8] = (bytes[8] & 63) | 128;
+    const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+    return hex.slice(0, 8) + "-" + hex.slice(8, 12) + "-" +
+      hex.slice(12, 16) + "-" + hex.slice(16, 20) + "-" + hex.slice(20);
+  }};
+
+  function showProgress(status) {{
+    panel.hidden = false;
+    const active = status.steps.find((step) => step.state === "active");
+    title.textContent = active ? active.label : (
+      status.state === "failed" ? "The request failed" : "Change complete"
+    );
+    list.replaceChildren(...status.steps.map((step) => {{
+      const item = document.createElement("li");
+      item.className = step.state;
+      item.textContent = step.label;
+      return item;
+    }}));
+  }}
+
+  document.addEventListener("submit", async (event) => {{
+    const form = event.target.closest("form[data-progress]");
+    if (!form) return;
+    const id = taskId();
+    if (!id) return;
+    if (form.getAttribute("aria-busy") === "true") {{
+      event.preventDefault();
+      return;
+    }}
+    event.preventDefault();
+
+    const formData = event.submitter
+      ? new FormData(form, event.submitter)
+      : new FormData(form);
+    const controls = [...form.elements].filter((control) => "disabled" in control);
+    const disabledBefore = controls.map((control) => control.disabled);
+    controls.forEach((control) => {{ control.disabled = true; }});
+    form.setAttribute("aria-busy", "true");
+    showProgress({{
+      state: "running",
+      steps: [{{label: form.dataset.progress, state: "active"}}]
+    }});
+
+    let keepPolling = true;
+    const poll = async () => {{
+      while (keepPolling) {{
+        try {{
+          const response = await fetch(
+            "/api/progress/" + encodeURIComponent(id),
+            {{cache: "no-store"}}
+          );
+          if (response.ok) {{
+            const status = await response.json();
+            showProgress(status);
+            if (status.state !== "running") return;
+          }}
+        }} catch (_) {{
+          title.textContent = "Progress updates unavailable; waiting for the save to finish.";
+        }}
+        await pause(300);
+      }}
+    }};
+    const polling = poll();
+
+    try {{
+      const response = await fetch(form.action || window.location.href, {{
+        method: (form.method || "POST").toUpperCase(),
+        body: formData,
+        headers: {{"X-Progress-ID": id}},
+        redirect: "follow"
+      }});
+      keepPolling = false;
+      await polling;
+      window.location.assign(response.url || form.action);
+    }} catch (_) {{
+      keepPolling = false;
+      await polling;
+      title.textContent = "Could not confirm the result. Refresh before trying again.";
+      controls.forEach((control, index) => {{
+        control.disabled = disabledBefore[index];
+      }});
+      form.removeAttribute("aria-busy");
+    }}
+  }});
+}})();
+</script>
 </body></html>"""
 
 
@@ -664,6 +907,44 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         ) from exc
 
     app = FastAPI(title="Nostalgia Machine", docs_url=None, redoc_url=None)
+    progress_tracker = _ProgressTracker()
+
+    @app.middleware("http")
+    async def track_progress(request: Request, call_next: Callable) -> Any:
+        raw_task_id = request.headers.get("x-progress-id")
+        try:
+            task_id = str(UUID(raw_task_id)) if raw_task_id else None
+        except ValueError:
+            task_id = None
+        if request.method != "POST" or task_id is None:
+            return await call_next(request)
+
+        progress_tracker.start(task_id)
+        request.state.progress_id = task_id
+        try:
+            response = await call_next(request)
+        except Exception:
+            progress_tracker.finish(task_id, success=False)
+            raise
+        progress_tracker.finish(task_id, success=response.status_code < 400)
+        return response
+
+    def report_progress(request: Request, label: str) -> None:
+        progress_tracker.advance(getattr(request.state, "progress_id", None), label)
+
+    def fail_progress(request: Request, label: str) -> None:
+        progress_tracker.fail(getattr(request.state, "progress_id", None), label)
+
+    @app.get("/api/progress/{task_id}")
+    def progress_status(task_id: str) -> dict:
+        try:
+            normalized = str(UUID(task_id))
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail="progress task not found") from exc
+        status = progress_tracker.get(normalized)
+        if status is None:
+            raise HTTPException(status_code=404, detail="progress task not found")
+        return status
 
     def _render(html: str) -> Any:
         return HTMLResponse(html)
@@ -692,7 +973,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             # left on the clock, and "skip to the next ad" is not a feature.
             skip_button = (
                 f"""
-  <form method="post" action="/skip" class="skip-form">
+  <form method="post" action="/skip" class="skip-form" data-progress="Replanning after the skip">
     <input type="hidden" name="slot" value="{item.slot_index}">
     <button type="submit">Skip this episode &rsaquo;</button>
   </form>
@@ -762,7 +1043,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         return _render(_page("On now", body, active="/", card=_card(config)))
 
     @app.post("/skip")
-    def skip(slot: str = Form(...)) -> Any:
+    def skip(request: Request, slot: str = Form(...)) -> Any:
         """Skip one episode, then replan so the stream actually changes.
 
         Deliberately *not* "skip whatever is on now": during a break that is a
@@ -774,9 +1055,11 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         from ..skip import load_overrides as _load
         from ..skip import request_skip as _request
 
+        report_progress(request, "Finding the episode to skip")
         try:
             target = int(slot)
         except ValueError:
+            fail_progress(request, "The slot number was not valid")
             return RedirectResponse(
                 "/?skipped=" + quote_plus("That is not a slot number"), status_code=303
             )
@@ -786,6 +1069,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 state = now_playing(config, catalog, paths)
                 plan = plan_for_day(config, catalog, paths, state.day)
             except LookupError as exc:
+                fail_progress(request, "Could not load the current schedule")
                 return RedirectResponse(
                     "/?skipped=" + quote_plus(str(exc)), status_code=303
                 )
@@ -795,6 +1079,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 None,
             )
             if playing is None:
+                fail_progress(request, "That slot has no episode to skip")
                 return RedirectResponse(
                     "/?skipped=" + quote_plus("That slot has no episode to skip"),
                     status_code=303,
@@ -809,28 +1094,43 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
 
         # Staged rather than written live: a skip is a change to the schedule, and
         # it waits for a launch like every other change.
-        message = queue_deploy(config, paths).replace("saved, but", "skip saved, but")
+        message = queue_deploy(
+            config,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        ).replace("saved, but", "skip saved, but")
         return RedirectResponse(
             f"/?skipped={quote_plus(label)}&built={quote_plus(message)}",
             status_code=303,
         )
 
     @app.post("/schedule/replan")
-    def replan_schedule() -> Any:
+    def replan_schedule(request: Request) -> Any:
         """Build the settings into a staged schedule. The stream does not change."""
         current = _reload(config, paths)
-        message = queue_deploy(current, paths)
+        message = queue_deploy(
+            current,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        )
         return RedirectResponse(
             f"/schedule?built={quote_plus(message)}", status_code=303
         )
 
     @app.post("/schedule/launch")
-    def launch_schedule() -> Any:
+    def launch_schedule(request: Request) -> Any:
         """Swap the staged schedule in, at the end of what is on air."""
         current = _reload(config, paths)
         try:
-            message = _launch(current, paths)
+            message = _launch(
+                current,
+                paths,
+                progress=lambda label: report_progress(request, label),
+            )
         except (LookupError, ValueError) as exc:
+            fail_progress(request, "Schedule launch could not complete")
             return RedirectResponse(
                 f"/schedule?error={quote_plus(str(exc))}", status_code=303
             )
@@ -839,10 +1139,11 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         )
 
     @app.post("/schedule/cancel")
-    def cancel_schedule() -> Any:
+    def cancel_schedule(request: Request) -> Any:
         """Throw the staged schedule away and keep serving what is on air."""
         from ..deploy import cancel as discard
 
+        report_progress(request, "Discarding the staged schedule")
         removed = discard(_request_deploy_paths(paths))
         noun = "file" if removed == 1 else "files"
         return RedirectResponse(
@@ -873,6 +1174,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
 
     @app.post("/schedule")
     def save_schedule(
+        request: Request,
         mode: str = Form("dayparts"),
         lineup_show: list[str] = Form(default=[]),
         lineup_order: list[str] = Form(default=[]),
@@ -882,6 +1184,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         shuffle_shows: list[str] = Form(default=[]),
         shuffle_order: str = Form("random"),
     ) -> Any:
+        report_progress(request, "Validating schedule settings")
         current = _reload(config, paths)
         # "Every show ticked" is the same instruction as "no restriction", and the
         # second survives a show being added later. Collapse it before saving.
@@ -903,6 +1206,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             # would have no idea which of their edits did it.
             new_config = current.model_copy(update={"programming": form.to_config()})
         except (ScheduleFormError, ValueError) as exc:
+            fail_progress(request, "Schedule settings were rejected")
             return _render(
                 _schedule_page(
                     current,
@@ -912,10 +1216,16 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 )
             )
 
+        report_progress(request, "Saving the schedule settings")
         write_schedule(paths.config_dir / "programming.yaml", form)
         # Staged, not live: the schedule you can see changing is the one being
         # prepared, and it goes on air when you launch it.
-        message = queue_deploy(new_config, paths)
+        message = queue_deploy(
+            new_config,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        )
         return RedirectResponse(
             f"/schedule?saved=1&built={quote_plus(message)}", status_code=303
         )
@@ -924,6 +1234,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
     async def save_placement(family: str, request: Request) -> Any:
         if family not in SLOT_FAMILIES:
             raise HTTPException(status_code=404, detail=f"no slot family {family!r}")
+        report_progress(request, "Validating continuity settings")
         form_data = await request.form()
         submitted = {
             str(key): ("" if value is None else str(value))
@@ -951,17 +1262,24 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
 
             buffer = io.StringIO()
             reader.dump(document, buffer)
+            report_progress(request, "Saving continuity settings")
             path.write_text(buffer.getvalue(), encoding="utf-8")
 
             # Re-validate the whole config before claiming success: a break
             # template that cannot load would break the channel at the next plan.
             updated = load_config(paths.config_dir)
         except (ContinuityEditError, ConfigError) as exc:
+            fail_progress(request, "Continuity settings were rejected")
             return _render(
                 _bumps_body(_reload(config, paths), paths, error=str(exc))
             )
 
-        message = queue_deploy(updated, paths)
+        message = queue_deploy(
+            updated,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        )
         query = f"saved={quote_plus(FAMILY_LABELS.get(family, family))}"
         if message:
             query += f"&built={quote_plus(message)}"
@@ -1111,9 +1429,11 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         """
         if action not in ("disable", "enable"):
             raise HTTPException(status_code=404, detail=f"no action {action!r}")
+        report_progress(request, "Updating commercial availability")
         form_data = await request.form()
         family = str(form_data.get("family") or "")
         if not family:
+            fail_progress(request, "No commercial compilation was selected")
             return RedirectResponse(
                 "/commercials?error=" + quote_plus("No compilation was named"), status_code=303
             )
@@ -1121,10 +1441,16 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             try:
                 message = set_family_enabled(catalog, family, enabled=action == "enable")
             except LookupError as exc:
+                fail_progress(request, "The selected compilation was not found")
                 return RedirectResponse(
                     "/commercials?error=" + quote_plus(str(exc)), status_code=303
                 )
-        built = queue_deploy(config, paths)
+        built = queue_deploy(
+            config,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        )
         return RedirectResponse(
             f"/commercials?saved={quote_plus(message)}&built={quote_plus(built)}",
             status_code=303,
@@ -1140,9 +1466,11 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         """
         if action not in ("disable", "enable"):
             raise HTTPException(status_code=404, detail=f"no action {action!r}")
+        report_progress(request, "Updating commercial availability")
         form_data = await request.form()
         key = str(form_data.get("key") or "")
         if not key:
+            fail_progress(request, "No commercial file was selected")
             return RedirectResponse(
                 "/commercials?error=" + quote_plus("No file was named"), status_code=303
             )
@@ -1151,11 +1479,17 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             try:
                 message = set_spot_enabled(catalog, key, enabled=action == "enable")
             except LookupError as exc:
+                fail_progress(request, "The selected commercial was not found")
                 return RedirectResponse(
                     "/commercials?error=" + quote_plus(str(exc)), status_code=303
                 )
 
-        built = queue_deploy(config, paths)
+        built = queue_deploy(
+            config,
+            paths,
+            progress=lambda label: report_progress(request, label),
+            failure=lambda label: fail_progress(request, label),
+        )
         return RedirectResponse(
             f"/commercials?saved={quote_plus(message)}&built={quote_plus(built)}",
             status_code=303,
@@ -1189,6 +1523,7 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
         """
         from .config_edit import save_all
 
+        report_progress(request, "Validating and saving settings")
         form = await request.form()
         submitted = {
             str(key): ("" if value is None else str(value)) for key, value in form.items()
@@ -1203,11 +1538,13 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
             updated = load_config(paths.config_dir)
         except ConfigEditError as exc:
             _restore(paths, before)
+            fail_progress(request, "Settings were rejected")
             return _render(
                 _config_page(_reload(config, paths), paths, card=_card(config), error=str(exc))
             )
         except ConfigError as exc:
             _restore(paths, before)
+            fail_progress(request, "Settings would leave the config invalid")
             return _render(
                 _config_page(
                     _reload(config, paths),
@@ -1216,9 +1553,29 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                     error=f"That would leave the config invalid, so nothing was saved:\n{exc}",
                 )
             )
+        except OSError as exc:
+            _restore(paths, before)
+            fail_progress(request, "Settings could not be saved")
+            return _render(
+                _config_page(
+                    _reload(config, paths),
+                    paths,
+                    card=_card(config),
+                    error=f"Settings could not be saved; no changes were kept: {exc}",
+                )
+            )
 
         names = [f"{title} ({len(changed)})" for title, changed in written]
-        message = queue_deploy(updated, paths) if written else ""
+        if written:
+            report_progress(request, "Preparing a schedule from the updated settings")
+            message = queue_deploy(
+                updated,
+                paths,
+                progress=lambda label: report_progress(request, label),
+                failure=lambda label: fail_progress(request, label),
+            )
+        else:
+            message = ""
         query = f"saved={quote_plus('|'.join(names))}" if names else ""
         if message:
             query += ("&" if query else "") + f"built={quote_plus(message)}"
@@ -1260,7 +1617,13 @@ def _request_deploy_paths(paths: Paths):
     return Roots.of(paths.playout_dir, paths.xmltv_dir)
 
 
-def queue_deploy(config: RootConfig, paths: Paths) -> str:
+def queue_deploy(
+    config: RootConfig,
+    paths: Paths,
+    *,
+    progress: Callable[[str], None] | None = None,
+    failure: Callable[[str], None] | None = None,
+) -> str:
     """Stage the whole horizon, ready to launch. Returns a sentence for the page.
 
     Never raises: the settings are already saved, and saying both halves is the
@@ -1269,17 +1632,36 @@ def queue_deploy(config: RootConfig, paths: Paths) -> str:
     from ..deploy import fingerprint
 
     try:
+        if progress is not None:
+            progress("Opening the catalog and preparing the schedule")
         with Catalog(paths.catalog) as catalog:
-            result = build(config, catalog, paths, deploy=True)
+            result = build(
+                config,
+                catalog,
+                paths,
+                deploy=True,
+                progress=progress,
+            )
     except Exception as exc:  # noqa: BLE001 - surfaced to the page
+        if failure is not None:
+            failure("Staging the new schedule failed")
+        elif progress is not None:
+            progress("Staging the new schedule failed")
         return f"saved, but staging the new schedule failed: {exc}"
+    if progress is not None:
+        progress("Schedule staged and ready to launch")
     return (
         f"{len(result.plans)} day(s) staged with {fingerprint(config)}"
         " -- launch it when you want it on air"
     )
 
 
-def _launch(config: RootConfig, paths: Paths) -> str:
+def _launch(
+    config: RootConfig,
+    paths: Paths,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> str:
     """Rebuild the staged horizon, then swap it in. Raises only on unusable input.
 
     Rebuilt first on purpose: the files on disk were built from the settings at the
@@ -1291,10 +1673,16 @@ def _launch(config: RootConfig, paths: Paths) -> str:
 
     roots = _request_deploy_paths(paths)
     with Catalog(paths.catalog) as catalog:
-        build(config, catalog, paths, deploy=True)
+        if progress is not None:
+            progress("Rebuilding the latest schedule")
+        build(config, catalog, paths, deploy=True, progress=progress)
+    if progress is not None:
+        progress("Checking the staged media files")
     gone = missing_inputs(roots)
     if gone:
         raise LookupError(f"{len(gone)} file(s) the staged schedule needs are missing; press Replan")
+    if progress is not None:
+        progress("Switching the live schedule at a safe boundary")
     report = push(roots)
     from ..grid import format_clock
 
@@ -1303,7 +1691,7 @@ def _launch(config: RootConfig, paths: Paths) -> str:
     return f"launched {report.days} day(s) at {at}; {report.note}"
 
 
-def _snapshot(paths: Paths, entries: Sequence[SettingsFile]) -> dict[Path, str | None]:
+def _snapshot(paths: Paths, entries: Sequence[SettingsFile]) -> dict[Path, bytes | None]:
     """The current bytes of every file the form can write, so a bad save can be undone.
 
     Validation runs *after* writing, because a rule like "a weekday may only appear
@@ -1311,19 +1699,21 @@ def _snapshot(paths: Paths, entries: Sequence[SettingsFile]) -> dict[Path, str |
     meant a rejected submission used to leave the edited file on disk; this is what
     makes "nothing was saved" true.
     """
-    snapshot: dict[Path, str | None] = {}
+    snapshot: dict[Path, bytes | None] = {}
     for entry in entries:
         path = paths.config_dir / entry.path
-        snapshot[path] = path.read_text(encoding="utf-8") if path.is_file() else None
+        snapshot[path] = path.read_bytes() if path.is_file() else None
     return snapshot
 
 
-def _restore(paths: Paths, snapshot: dict[Path, str | None]) -> None:
-    for path, text in snapshot.items():
-        if text is None:
+def _restore(paths: Paths, snapshot: dict[Path, bytes | None]) -> None:
+    from .config_edit import _write_atomic
+
+    for path, content in snapshot.items():
+        if content is None:
             path.unlink(missing_ok=True)
-        else:
-            path.write_text(text, encoding="utf-8")
+        elif not path.is_file() or path.read_bytes() != content:
+            _write_atomic(path, content)
 
 
 def _episodes(paths: Paths) -> list[EpisodeRef]:
@@ -1354,7 +1744,14 @@ def pending_deploy(config: RootConfig, paths: Paths) -> str:
     time quoted here is an estimate of the seam, not a promise.
     """
     from ..deploy import clock as at_clock
-    from ..deploy import fingerprint, load, missing_inputs, plan_switch, intervals
+    from ..deploy import (
+        fingerprint,
+        intervals,
+        load,
+        missing_inputs,
+        plan_switch,
+        preview_schedule,
+    )
     import json as _json
 
     roots = _request_deploy_paths(paths)
@@ -1377,6 +1774,38 @@ def pending_deploy(config: RootConfig, paths: Paths) -> str:
 
     stale = deploy.fingerprint and deploy.fingerprint != fingerprint(config)
     gone = missing_inputs(roots)
+    try:
+        preview = preview_schedule(roots)
+        total_changes = preview.added + preview.removed + preview.changed
+        if preview.compared_days:
+            preview_summary = (
+                f"Compared {preview.compared_days} day(s) with the live schedule: "
+                f"{preview.changed} replaced, {preview.added} added, "
+                f"{preview.removed} removed."
+            )
+        else:
+            preview_summary = (
+                f"No matching live days; {preview.added} staged item(s) are new."
+            )
+        preview_details = (
+            "<ul>"
+            + "".join(f"<li>{_h(detail)}</li>" for detail in preview.details)
+            + "</ul>"
+            if preview.details
+            else "<p>No item-level differences found.</p>"
+        )
+        if total_changes > len(preview.details):
+            preview_details += (
+                f"<p>{total_changes - len(preview.details)} more change(s) not shown.</p>"
+            )
+        preview_html = (
+            '<details class="schedule-preview"><summary>Preview staged changes</summary>'
+            f"<p>{_h(preview_summary)}</p>{preview_details}</details>"
+        )
+    except LookupError as exc:
+        preview_html = (
+            f'<p class="warn">Schedule preview unavailable: {_h(str(exc))}</p>'
+        )
     notes = []
     if stale:
         notes.append("Settings have changed since this was prepared; launching rebuilds it first.")
@@ -1388,12 +1817,13 @@ def pending_deploy(config: RootConfig, paths: Paths) -> str:
   <p class="label">Schedule changes pending</p>
   <p><b>{len(deploy.days)} day(s)</b> staged, ready to go on air at
   <b>{_h(at_clock(switch, zone))}</b> &mdash; the end of the programme on air now.</p>
-  <form method="post" action="/schedule/launch" class="inline">
+  <form method="post" action="/schedule/launch" class="inline" data-progress="Rebuilding and launching the schedule">
     <button type="submit">Launch new schedule</button>
   </form>
-  <form method="post" action="/schedule/cancel" class="inline">
+  <form method="post" action="/schedule/cancel" class="inline" data-progress="Discarding the staged schedule">
     <button type="submit">Discard</button>
   </form>
+  {preview_html}
   {f'<p class="warn">{_h(detail)}</p>' if detail else ''}
   <p class="hint">The stream keeps playing the old schedule until the launch. The
   switch finishes the programme that is on air, so it never cuts mid-episode.</p>
@@ -1524,7 +1954,7 @@ def _schedule_page(
 {banner}
 {pending}
 <div class="card">
-  <form method="post" action="/schedule">
+  <form method="post" action="/schedule" data-progress="Saving and staging the schedule">
     <p class="label">Programming mode</p>
     <div class="modes">
       {mode_radio("dayparts", "Day files")}
@@ -1651,7 +2081,7 @@ def _config_page(
     save_button = '<button type="submit">Save changes</button>'
     body.append(
         f"""
-<form method="post" action="/config" class="settings-form" novalidate>
+<form method="post" action="/config" class="settings-form" novalidate data-progress="Saving and validating settings">
   <div class="save-bar">
     <p class="label">Settings</p>
     {save_button}
@@ -1849,7 +2279,7 @@ def _bumps_panel(form) -> str:
 <div class="panel-block settings">
   <p class="label">{_h(FAMILY_LABELS.get(family, family))}</p>
   <p class="hint">{form.total_cards()} card(s) per slot across all points.</p>
-  <form method="post" action="/bumps/placement/{_h(family)}">
+  <form method="post" action="/bumps/placement/{_h(family)}" data-progress="Saving continuity settings">
     {''.join(rows)}
     <div class="field narrow">
       <label for="f-{family}-max">Capped at (seconds)</label>

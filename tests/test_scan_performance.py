@@ -14,6 +14,7 @@ from pathlib import Path
 
 from nostalgia.catalog import Catalog, _scan_workers
 from nostalgia.pipeline import scan
+from nostalgia.probe import MediaInfo
 
 
 def test_workers_are_bounded() -> None:
@@ -72,3 +73,160 @@ def test_sidecar_tags_reach_the_database(config, paths) -> None:
         assert not any(Path(path).name == bump.name for path in pending), (
             "a bump with a confirmed sidecar was still queued for review"
         )
+
+
+def test_unchanged_files_reuse_probe_results_unless_forced(
+    config, paths, monkeypatch
+) -> None:
+    import nostalgia.catalog as catalog_module
+
+    calls = []
+    media = paths.media_root / "bumps" / "probe-cache" / "probe-cache.mp4"
+    media.parent.mkdir(parents=True, exist_ok=True)
+    media.write_bytes(b"test")
+    monkeypatch.setattr(catalog_module, "find_ffprobe", lambda _path=None: "ffprobe")
+
+    def fake_probe(path, _ffprobe):
+        calls.append(path)
+        return MediaInfo(duration_ms=10_000)
+
+    monkeypatch.setattr(catalog_module, "probe", fake_probe)
+    with Catalog(paths.catalog) as catalog:
+        kwargs = {
+            "media_root": paths.media_root,
+            "show_folders": {},
+            "bump_root": media.parent,
+            "ad_root": None,
+            "ident_root": None,
+            "extra_root": None,
+        }
+        first = catalog.scan(**kwargs)
+        second = catalog.scan(**kwargs)
+        third = catalog.scan(**kwargs, force=True)
+
+    assert len(calls) == 2
+    assert first.probed == 1
+    assert second.probed == 0
+    assert second.skipped_existing >= 1
+    assert third.probed == 1
+
+
+def test_scan_command_passes_force_to_the_pipeline(config, paths, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    import nostalgia.cli as cli
+    from nostalgia.catalog import ScanReport
+
+    received = {}
+
+    def fake_scan(_config, _catalog, _paths, **kwargs):
+        received.update(kwargs)
+        return ScanReport()
+
+    monkeypatch.setattr(cli, "scan", fake_scan)
+    args = SimpleNamespace(
+        ffprobe=None,
+        force=True,
+        sidecars=False,
+        detect_marks=False,
+        detect_spots=False,
+    )
+
+    assert cli._cmd_scan(args, config, paths) == 0
+    assert received["force"] is True
+
+
+def test_scan_reconciles_an_empty_root(config, paths) -> None:
+    folder = paths.media_root / "shows" / "temporary-show"
+    episode = folder / "Temporary Show - S01E01.mkv"
+    episode.parent.mkdir(parents=True)
+    episode.write_bytes(b"")
+    episode.with_suffix(".mkv.json").write_text(
+        '{"duration_ms": 10000}', encoding="utf-8"
+    )
+
+    with Catalog(paths.catalog) as catalog:
+        catalog.scan(
+            media_root=paths.media_root,
+            show_folders={"temporary-show": folder},
+            bump_root=None,
+            ad_root=None,
+            ident_root=None,
+            extra_root=None,
+        )
+        assert len(catalog.episodes("temporary-show")) == 1
+        episode.unlink()
+        episode.with_suffix(".mkv.json").unlink()
+        catalog.scan(
+            media_root=paths.media_root,
+            show_folders={"temporary-show": folder},
+            bump_root=None,
+            ad_root=None,
+            ident_root=None,
+            extra_root=None,
+        )
+        assert catalog.episodes("temporary-show") == []
+
+
+def test_burned_mark_detection_tracks_each_file_not_last_derived(
+    config, paths, monkeypatch
+) -> None:
+    folder = paths.media_root / "shows" / "aqua-teen-hunger-force"
+    original = folder / "Season 01" / "aqua-teen-hunger-force - S01E001.mkv"
+    original.parent.mkdir(parents=True, exist_ok=True)
+    original.write_bytes(b"")
+    original.with_suffix(".mkv.json").write_text(
+        '{"duration_ms": 10000}', encoding="utf-8"
+    )
+    final_episode = folder / "Season 01" / "aqua-teen-hunger-force - S01E002.mkv"
+    final_episode.write_bytes(b"")
+    final_episode.with_suffix(".mkv.json").write_text(
+        '{"duration_ms": 10000}', encoding="utf-8"
+    )
+    derived_root = paths.media_root / "derived" / "watermark"
+    derived_root.mkdir(parents=True)
+    derived = derived_root / "aqua-teen-hunger-force_s01e002.mkv"
+    derived.write_bytes(b"")
+    derived.with_suffix(".mkv.json").write_text(
+        '{"duration_ms": 10000}', encoding="utf-8"
+    )
+    detected = []
+    monkeypatch.setattr(
+        Catalog,
+        "_detect_mark",
+        staticmethod(lambda path, _ffmpeg: detected.append(path) or False),
+    )
+
+    with Catalog(paths.catalog) as catalog:
+        catalog.scan(
+            media_root=paths.media_root,
+            show_folders={"aqua-teen-hunger-force": folder},
+            bump_root=None,
+            ad_root=None,
+            ident_root=None,
+            extra_root=None,
+            derived_root=derived_root,
+            detect_burned_in=True,
+        )
+
+    assert original in detected
+    assert final_episode not in detected
+
+
+def test_generated_registration_removes_stale_cards(config, paths) -> None:
+    folder = paths.media_root / "bumps" / "generated"
+    card = folder / "generated-card.mp4"
+    card.parent.mkdir(parents=True)
+    card.write_bytes(b"")
+    card.with_suffix(".mp4.json").write_text(
+        '{"duration_ms": 10000}', encoding="utf-8"
+    )
+
+    with Catalog(paths.catalog) as catalog:
+        assert catalog.register_generated(folder) == 1
+        card.unlink()
+        card.with_suffix(".mp4.json").unlink()
+        assert catalog.register_generated(folder) == 0
+        assert catalog.connect().execute(
+            "SELECT 1 FROM media WHERE key='bump:generated-card.mp4'"
+        ).fetchone() is None

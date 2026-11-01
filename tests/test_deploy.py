@@ -307,6 +307,31 @@ def test_missing_inputs_names_the_files_a_staged_document_needs(tmp_path):
     assert D.missing_inputs(roots) == [str(tmp_path / "gone.mkv")]
 
 
+def test_preview_compares_staged_items_to_live_schedule_by_start_time(tmp_path):
+    roots = _roots(tmp_path)
+    _write(roots.live.playout_dir / "day.json", BREAK_DAY)
+    _write(roots.pending.playout_dir / "day.json", _staged())
+
+    preview = D.preview_schedule(roots)
+
+    assert preview.compared_days == 1
+    assert preview.changed > 0
+    assert preview.added > 0
+    assert preview.removed > 0
+    assert preview.details
+
+
+def test_preview_reports_no_changes_for_identical_days(tmp_path):
+    roots = _roots(tmp_path)
+    _write(roots.live.playout_dir / "day.json", BREAK_DAY)
+    _write(roots.pending.playout_dir / "day.json", BREAK_DAY)
+
+    preview = D.preview_schedule(roots)
+
+    assert preview.compared_days == 1
+    assert (preview.added, preview.removed, preview.changed) == (0, 0, 0)
+
+
 # -- launching -------------------------------------------------------------------------
 
 

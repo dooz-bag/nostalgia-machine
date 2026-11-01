@@ -472,6 +472,11 @@ live document still names them.
 The unattended scheduler `emit` still writes live. It is the path that keeps the
 horizon rolling overnight, and a channel with no future playout is down.
 
+Each CLI live emit records its last attempt, success and error in the catalog's
+`state` table. `doctor` reports that history, while the scheduler container health
+check asks whether a readable live playout covers the current time. This keeps a
+failed refresh visible without marking a still-playing channel down prematurely.
+
 ## The corner bug belongs to one side or the other
 
 A watermark can be applied by the scheduler or by the streamer, and doing both

@@ -96,6 +96,33 @@ docker compose up -d --build
 | **Plex** | Needs an HDHomeRun-style tuner, which ErsatzTV Next doesn't emulate. Run `docker compose --profile plex up -d` to put **Dispatcharr** in front of it, then add that as a tuner. Plex Pass required. |
 | **Browser** | `https://hlsjs.video-dev.org/demo/?src=http%3A%2F%2Flocalhost%3A8409%2Fchannel%2F1.m3u8` |
 
+### Change the channel in your browser
+
+The project also includes a local web UI for changing settings without editing
+YAML by hand. It is not a website hosted on GitHub: run it alongside your channel
+and open it on your own machine or network.
+
+With the Windows launcher, run:
+
+```powershell
+.\run.ps1 web
+```
+
+Then open `http://localhost:8099`. With Docker Compose, the UI starts with the
+rest of the stack at the same address; from another device, replace `localhost`
+with the computer running Docker.
+
+Use **Schedule** to choose what airs, **Config** to change channel and break
+settings, and the other pages to review bumps and commercials or manage bump
+lines. The UI edits the project's existing configuration files rather than
+creating a separate database of settings. A schedule change is checked and
+staged first; while it works, an on-page checklist shows real steps, including
+planning each day. The current stream keeps playing until you explicitly launch
+the new schedule at a safe boundary. This makes routine changes easier while
+keeping the files reviewable and the on-air schedule from changing unexpectedly.
+See the [setup guide](docs/SETUP.md#programming-the-channel-from-the-web-page)
+for details.
+
 ## What makes the schedule accurate
 
 **It's a function of the clock, not a loop.** Ask for any date and you get the same
@@ -309,7 +336,8 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia scan` | Walk media folders into the catalog (`--force`, `--sidecars`, `--detect-spots`) |
 | `nostalgia plan` | Build a schedule and print it (`--date`, `--days`, `--show`) |
 | `nostalgia emit` | Write playout JSON + XMLTV + ErsatzTV lineup |
-| `nostalgia doctor` | Check config, ffmpeg, library and catalog |
+| `nostalgia doctor` | Check config, ffmpeg, library, catalog and last scheduler emit |
+| `nostalgia health` | Check that a readable live playout covers the current time |
 | `nostalgia shows` | List shows and episode counts (`--verbose`) |
 | `nostalgia import` | File a download into `media/shows/<id>/Season NN/` (dry run by default, never overwrites) |
 | `nostalgia watermark` | Composite the `[adult swim]` corner bug into the media (burn mode) |
