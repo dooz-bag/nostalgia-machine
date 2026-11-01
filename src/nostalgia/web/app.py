@@ -1287,16 +1287,38 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
 
         report_progress(request, "Saving the schedule settings")
         write_schedule(paths.config_dir / "programming.yaml", form)
-        # Staged, not live: the schedule you can see changing is the one being
-        # prepared, and it goes on air when you launch it.
-        message = queue_deploy(
-            new_config,
-            paths,
-            progress=lambda label: report_progress(request, label),
-            failure=lambda label: fail_progress(request, label),
-        )
+        try:
+            with Catalog(paths.catalog) as catalog:
+                report_progress(request, "Planning and writing the schedule")
+                build(
+                    new_config,
+                    catalog,
+                    paths,
+                    deploy=True,
+                    progress=lambda label: report_progress(request, label),
+                )
+        except Exception as exc:  # noqa: BLE001 - surfaced to the page
+            fail_progress(request, "Schedule planning failed")
+            message = quote_plus(f"Schedule saved, but planning failed: {exc}")
+            return RedirectResponse(
+                f"/schedule?error={message}",
+                status_code=303,
+            )
+        try:
+            message = _activate_staged(
+                new_config,
+                paths,
+                progress=lambda label: report_progress(request, label),
+            )
+        except (LookupError, ValueError, OSError) as exc:
+            fail_progress(request, "Schedule launch could not complete")
+            message = quote_plus(f"Schedule saved, but launch failed: {exc}")
+            return RedirectResponse(
+                f"/schedule?error={message}",
+                status_code=303,
+            )
         return RedirectResponse(
-            f"/schedule?saved=1&built={quote_plus(message)}", status_code=303
+            f"/schedule?launched={quote_plus(message)}", status_code=303
         )
 
     @app.post("/bumps/placement/{family}")
@@ -2058,14 +2080,24 @@ def _launch(
     time, and a launch is the one moment where "what is live" is about to change, so
     it should reflect the settings as they are now.
     """
-    from ..deploy import launch as push
-    from ..deploy import missing_inputs
-
-    roots = _request_deploy_paths(paths)
     with Catalog(paths.catalog) as catalog:
         if progress is not None:
             progress("Rebuilding the latest schedule")
         build(config, catalog, paths, deploy=True, progress=progress)
+    return _activate_staged(config, paths, progress=progress)
+
+
+def _activate_staged(
+    config: RootConfig,
+    paths: Paths,
+    *,
+    progress: Callable[[str], None] | None = None,
+) -> str:
+    """Validate and launch an already built stage without rebuilding it."""
+    from ..deploy import launch as push
+    from ..deploy import missing_inputs
+
+    roots = _request_deploy_paths(paths)
     if progress is not None:
         progress("Checking the staged media files")
     gone = missing_inputs(roots)
@@ -2368,7 +2400,7 @@ def _schedule_page(
 {banner}
 {pending}
 <div class="card">
-  <form method="post" action="/schedule" data-progress="Saving and staging the schedule">
+  <form method="post" action="/schedule" data-progress="Saving, planning, and launching the schedule">
     <p class="label">Programming mode</p>
     <div class="modes">
       {mode_radio("dayparts", "Day files")}
@@ -2416,16 +2448,16 @@ def _schedule_page(
       </div>
     </div>
 
-    <p style="margin-top:18px"><button type="submit">Save &amp; stage</button></p>
+    <p style="margin-top:18px"><button type="submit">Save &amp; launch</button></p>
   </form>
 </div>
 
 <div class="card">
   <p class="label">How this is stored</p>
   <p class="hint">Saved to <code>config/programming.yaml</code>, so the schedule
-  is diffable and survives a wiped catalog. Saving stages a new schedule; launch it
-  from the notice on this page when you want it on air.
-  immediately: playout files and the guide are rewritten in place.</p>
+  is diffable and survives a wiped catalog. Saving plans the schedule once and
+  launches it automatically. The stream finishes the programme already on air,
+  then switches to the new schedule.</p>
 </div>
 """
     return _page("Schedule", body, active="/schedule", card=card)

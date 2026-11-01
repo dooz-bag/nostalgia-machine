@@ -2,7 +2,7 @@
 
 What has to be true from the outside:
 
-* saving anything stages a schedule and says so, and the live playout does not change;
+* schedule-page saves plan once and launch, while other changes can stage for later;
 * the pending notice appears on every page that can be the source of the change, and
   names when the switch would happen;
 * launching swaps the files in and clears the notice;
@@ -141,12 +141,22 @@ def test_staging_error_is_reported_as_failed_progress(paths, config, monkeypatch
     }
 
 
-def test_every_save_stages_instead_of_going_live(paths, config):
-    """A save that silently rewrote the live files is what this whole change removes."""
+def test_saving_schedule_plans_once_and_launches(paths, config, monkeypatch):
+    """The schedule editor saves and activates one build in the same submission."""
     _emit_live(config, paths)
-    before = _live_day(paths)
-    client = _client(paths, config)
+    from nostalgia import web as web_pkg
 
+    original_build = web_pkg.app.build
+    calls = 0
+
+    def count_build(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_build(*args, **kwargs)
+
+    monkeypatch.setattr(web_pkg.app, "build", count_build)
+    client = _client(paths, config)
+    task_id = "d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
     response = client.post(
         "/schedule",
         data={
@@ -158,10 +168,23 @@ def test_every_save_stages_instead_of_going_live(paths, config):
             "pinned_season": [""],
             "pinned_episode": [""],
         },
+        headers={"X-Progress-ID": task_id},
+        follow_redirects=False,
     )
     assert response.status_code == 303
-    assert _live_day(paths) == before
-    assert D.load(_roots(paths)) is not None
+    assert response.headers["location"].startswith("/schedule?launched=")
+    assert calls == 1
+    assert D.load(_roots(paths)) is None
+    report = D.last(_roots(paths))
+    assert report is not None
+    assert "Schedule changes pending" not in client.get("/schedule").text
+    progress = client.get(f"/api/progress/{task_id}").json()
+    assert progress["state"] == "complete"
+    labels = [step["label"] for step in progress["steps"]]
+    assert any(label.startswith("Planning day 1 of 1:") for label in labels)
+    assert any(label.startswith("Writing day 1 of 1:") for label in labels)
+    assert "Switching the live schedule at a safe boundary" in labels
+    assert "Rebuilding the latest schedule" not in labels
 
 
 def test_a_skip_is_staged_too(paths, config):

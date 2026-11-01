@@ -213,10 +213,11 @@ it airs (a "next" card never says "you just watched") and waits for your approva
 Music comes from `media/music/`, or is harvested from your own text-on-black bumps. No
 music is shipped or downloaded.
 
-**A schedule change is staged, then launched.** Saving anything prepares a new
-schedule in `playout/pending/` and leaves the stream alone; a notice on the pages gives
-you **Launch new schedule** and **Discard**. The launch finishes the programme that's
-on air and takes over at its end, so it never cuts mid-episode.
+**Schedule-page changes take one click.** **Save & launch** saves the schedule,
+plans it once, and puts it on air without a second rebuild. The current programme
+finishes before the new schedule takes over, so it never cuts mid-episode. Changes
+made on other pages are still staged in `playout/pending/`; a notice gives you
+**Launch new schedule** and **Discard**.
 
 **The guide is continuous.** Playout JSON lists every commercial and bumper, because
 the streamer airs each one. The XMLTV lists *programmes*, each stretched to the next
@@ -363,7 +364,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia conform` | Re-encode every spot and bump to one shape, loudness and frame rate (`--jobs`, `--status`, `--force`, `--keep-silent`) |
 | `nostalgia lines` | The bump-sentence bank: `list`, `check`, `generate` (asks a local model), `approve`, `clear` |
 | `nostalgia music` | Music beds for generated cards: `list`, `harvest` (takes them from your own text-on-black bumps) |
-| `nostalgia serve` | Web UI: what's on now, the schedule editor, bump review, commercial history, the lines queue and settings — styled as a broadcast test card. Saving stages a new schedule; a second button launches it |
+| `nostalgia serve` | Web UI: what's on now, the schedule editor, bump review, commercial history, the lines queue and settings — styled as a broadcast test card. Schedule-page saves plan once and launch; other settings can be staged for later |
 | `scripts/import-breaks.ps1` | Bulk-import commercial breaks from archive.org and split them into spots |
 
 ## Layout

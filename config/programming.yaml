@@ -12,8 +12,29 @@
 #   by_season   pick a season first, then an episode inside it
 #   sequential  in order, wrapping -- watch the show progress
 programming:
-  mode: shuffle
-  lineup: []
+  mode: lineup
+  lineup:
+  - show_id: king-of-the-hill
+    order: sequential
+    start_season: 1
+    start_episode: 1
+    start_date: '2026-11-02'
+  - show_id: aqua-teen-hunger-force
+    order: random
+  - show_id: futurama
+    order: sequential
+    start_season: 2
+    start_episode: 1
+    start_date: '2026-11-02'
+  - show_id: home-movies
+    order: random
+  - show_id: space-ghost-coast-to-coast
+    order: random
+  - show_id: the-venture-bros
+    order: sequential
+    start_season: 2
+    start_episode: 1
+    start_date: '2026-11-02'
   pinned: []
   shuffle_shows:
   - aqua-teen-hunger-force

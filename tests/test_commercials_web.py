@@ -161,6 +161,23 @@ def test_a_disabled_spot_is_always_reachable_to_undo(paths, config, catalog):
         assert 'action="/commercials/enable"' in body, url
 
 
+def test_switched_off_section_is_collapsed_below_the_main_lists(
+    paths, config, catalog
+):
+    spot = _first_ad(catalog)
+    client = _client(paths, config)
+    client.post("/commercials/disable", data={"key": spot.key}, follow_redirects=False)
+
+    body = client.get("/commercials").text
+    details_start = body.index('<details class="card">')
+    assert "<summary>" in body[details_start:]
+    assert "Switched off (1)" in body[details_start:]
+    assert "</details>" in body[details_start:]
+    assert body.index("Recently aired") < details_start
+    assert body.index("Long files") < details_start
+    assert "<details class=\"card\" open>" not in body
+
+
 def test_a_spot_disabled_before_it_ever_aired_can_still_be_enabled(
     paths, config, catalog
 ):

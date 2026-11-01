@@ -238,7 +238,8 @@ def test_schedule_page_renders_every_mode(paths, config):
     for mode in ("dayparts", "lineup", "shuffle"):
         assert f'value="{mode}"' in body
     assert 'action="/schedule"' in body
-    assert 'data-progress="Saving and staging the schedule"' in body
+    assert 'data-progress="Saving, planning, and launching the schedule"' in body
+    assert "Save &amp; launch" in body
 
 
 def test_schedule_page_lists_the_roster_with_episode_counts(paths, config):
@@ -271,7 +272,12 @@ def test_schedule_page_warns_about_a_show_with_no_media(paths, library):
     assert "cannot air" in body
 
 
-def test_saving_a_lineup_persists_and_replans(paths, config):
+def test_saving_a_lineup_persists_and_launches(paths, config):
+    from nostalgia.catalog import Catalog
+    from nostalgia.pipeline import scan
+
+    with Catalog(paths.catalog) as catalog:
+        scan(config, catalog, paths)
     client = _client(paths, config)
     response = client.post(
         "/schedule",
@@ -287,7 +293,7 @@ def test_saving_a_lineup_persists_and_replans(paths, config):
         follow_redirects=False,
     )
     assert response.status_code == 303
-    assert response.headers["location"].startswith("/schedule?saved=1")
+    assert response.headers["location"].startswith("/schedule?launched=")
 
     saved = load_config(paths.config_dir)
     assert saved.programming.mode == "lineup"
@@ -316,6 +322,30 @@ def test_a_rejected_form_leaves_the_file_untouched(paths, config, programming_ya
     assert response.status_code == 200
     assert "lineup" in response.text.lower()
     assert programming_yaml.read_text(encoding="utf-8") == before
+
+
+def test_schedule_planning_failure_is_reported_after_saving(paths, config, monkeypatch):
+    from nostalgia import web as web_pkg
+
+    def fail_build(*args, **kwargs):
+        raise RuntimeError("planning failed")
+
+    monkeypatch.setattr(web_pkg.app, "build", fail_build)
+    task_id = "d1f766a8-39fc-4ed0-9fa0-7da172fcd103"
+    client = _client(paths, config)
+    response = client.post(
+        "/schedule",
+        data={"mode": "shuffle", "shuffle_order": "random"},
+        headers={"X-Progress-ID": task_id},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert "planning+failed" in response.headers["location"]
+    assert load_config(paths.config_dir).programming.mode == "shuffle"
+    progress = client.get(f"/api/progress/{task_id}").json()
+    assert progress["state"] == "failed"
+    assert progress["steps"][-1]["label"] == "Schedule planning failed"
 
 
 def test_saved_flag_shows_a_confirmation(paths, config):

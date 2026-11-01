@@ -243,22 +243,9 @@ def commercials_body(
 </div>"""
     )
 
-    # Always shown when anything is switched off, and never filtered by `all=1`:
-    # this is the undo list. A spot disabled before its first airing appears in
-    # neither of the sections below, so without this it would be unreachable.
+    # Keep the undo list available, but below the primary airing and library views.
     disabled_rows = _disabled_rows(all_ads)
-    if disabled_rows:
-        body.append(
-            f"""<div class="card">
-  <p class="label">Switched off</p>
-  <p class="hint">These spots are out of the pool and will not air. The files are
-  still catalogued, so enabling one puts it straight back.</p>
-  <table>
-    <thead><tr><th>File</th><th>Length</th><th></th></tr></thead>
-    <tbody>{disabled_rows}</tbody>
-  </table>
-</div>"""
-        )
+    disabled_count = sum(1 for asset in all_ads if asset.disabled)
 
     rows = _rows(airings, timezone=timezone, show_disabled=show_disabled)
     if airings and not rows:
@@ -333,6 +320,20 @@ def commercials_body(
   <p class="empty">No commercial is longer than {SHORT_POD_HINT_MS // 1000}s, so
   nothing is being trimmed to fit a pod.</p>
 </div>"""
+        )
+
+    if disabled_rows:
+        body.append(
+            f"""<details class="card">
+  <summary><span class="label">Switched off ({disabled_count})</span>
+    <span class="dim"> &mdash; spots excluded from the pool</span></summary>
+  <p class="hint">These spots will not air. They remain catalogued, so enabling
+  one puts it straight back.</p>
+  <table>
+    <thead><tr><th>File</th><th>Length</th><th></th></tr></thead>
+    <tbody>{disabled_rows}</tbody>
+  </table>
+</details>"""
         )
 
     body.append(_smooth_section(config, catalog))

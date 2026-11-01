@@ -514,10 +514,11 @@ nostalgia serve --host 0.0.0.0 --port 8099
 
 While a schedule-changing action runs, the page shows a checklist of backend
 steps. It marks completed work and the current operation, including each day
-being planned; it does not guess at a percentage or an end time. Config and
-schedule saves, schedule launch/discard, episode skips, continuity changes, and
-commercial toggles all use this feedback. A completed step list does not mean a
-staged schedule is live: launching remains a separate, explicit action.
+being planned; it does not guess at a percentage or an end time. Config saves,
+schedule save-and-launch, pending schedule launch/discard, episode skips,
+continuity changes, and commercial toggles all use this feedback. A completed
+step list does not mean a staged config change is live: those still require an
+explicit launch.
 
 Go to **Schedule** (`/schedule`). This is the one place you can change *what the
 channel is* without editing YAML.
@@ -529,11 +530,10 @@ Two things worth knowing:
   refuse to emit. In lineup and shuffle modes the grid is generated from each
   show's own `slot` family and filled to the millisecond, ending with a shorter
   slot if the day needs one.
-- **Saving stages a new schedule.** The page writes `config/programming.yaml` and
-  builds the whole horizon into a staging folder; the stream keeps playing what it
-  was playing. See [Replan, then launch](#replan-then-launch) for how it goes on
-  air. Nothing is saved if the form is invalid — the page shows the error and
-  leaves the file alone.
+- **Save & launch is one action.** The page writes `config/programming.yaml`, plans
+  the horizon once, and launches that build. The current programme finishes before
+  the new schedule takes over. Nothing is saved if the form is invalid — the page
+  shows the error and leaves the file alone.
 
 The mode is recorded in a file rather than in a database, so a wipe of
 `data/catalog.db` does not forget your schedule, and `git diff` shows what you
@@ -571,8 +571,8 @@ predates the era wholesale, while commercials are filed by year — so a shared 
 forced a compromise on both. `0` means the era year only; untagged material is always
 eligible, because "unknown year" is not "wrong year".
 
-Saving stages a new schedule (see [Replan, then launch](#replan-then-launch)); the
-stream keeps playing what it was playing until you launch it.
+Saving config changes stages a new schedule (see [Replan, then launch](#replan-then-launch));
+the stream keeps playing what it was playing until you launch it.
 
 The page is a *form over the files*, never a second source of truth. Editing
 through it changes only the key you touched — comments, key order, quote style and
@@ -749,13 +749,14 @@ hiss.
 
 ### Replan, then launch
 
-Every change to the schedule is prepared first and deployed on purpose. That matters
-because the streamer re-reads the playout file at every item boundary and positions
-itself by wall clock: rewriting that file *is* changing the channel, and it lands on
-whatever is airing next — which may be the middle of an episode.
+Every change to the schedule is prepared before it affects playout. The Schedule
+page's **Save & launch** plans once and deploys that same build automatically; other
+pages stage changes for an explicit launch. This matters because the streamer
+re-reads the playout file at every item boundary and positions itself by wall clock:
+rewriting that file *is* changing the channel, and it lands on whatever is airing
+next — which may be the middle of an episode.
 
-So every save (Schedule, Config, Bump review, Commercials, a skip) **stages** a new
-schedule instead:
+Config, Bump review, Commercials and episode skips **stage** a new schedule:
 
 ```text
 playout/pending/    the staged days, waiting
