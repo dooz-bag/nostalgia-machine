@@ -18,6 +18,7 @@ strict order of preference:
 
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
@@ -129,44 +130,90 @@ def fill_pod(
     # real library easily reaches 200+ spots in one era window; searching all of
     # them per pod made a day's build take 25s. A shuffled, budgeted window keeps
     # variety (the shuffle changes per pod) while bounding the work.
-    if max_candidates > 0:
-        order = _budgeted_window(order, target_ms, max_candidates)
-
     # Anything longer than target + overshoot cannot be part of this pod: it would
     # have to be cut, or it would swallow the slot.
     ceiling = target_ms + max(0, max_overshoot_ms)
+    preferred_order = [asset for asset in order if asset.key not in cooling]
+    cooling_order = [asset for asset in order if asset.key in cooling]
+    choice_rng = rng_for("pod-choice", *seed_parts)
 
-    preferred = [asset for asset in order if asset.key not in cooling]
-    for candidates, suffix in ((preferred, ""), (order, " (cooldown relaxed)")):
-        if not candidates:
-            continue
+    # Start with a non-cooling window. If the mixed window would need a repeat,
+    # widen the non-cooling search before accepting it; normal pods still use the
+    # original small search window.
+    preferred_windows = list(
+        _candidate_windows(preferred_order, target_ms, max_candidates)
+    )
+    preferred_fill = (
+        _within_tolerance(
+            preferred_windows[0],
+            target_ms=target_ms,
+            tolerance_ms=tolerance_ms,
+            ceiling_ms=ceiling,
+            max_items=max_items,
+            rng=choice_rng,
+        )
+        if preferred_windows
+        else None
+    )
+    if preferred_fill is not None:
+        return preferred_fill
 
-        bounded = [asset for asset in candidates if asset.duration_ms <= ceiling]
-        if bounded:
-            candidates = bounded
-
-        closest = _closest_to(candidates, target_ms, max_items)
-        if closest is not None:
-            total = sum(asset.duration_ms for asset in closest)
-            if abs(total - target_ms) <= tolerance_ms:
-                return PodFill(
-                    items=tuple(PodItem(asset) for asset in closest),
-                    target_ms=target_ms,
-                    achieved_ms=total,
-                    note=f"whole spots{suffix}",
-                )
-
-        selected = _exact_sum(candidates, target_ms, max_items)
-        if selected:
-            return PodFill(
-                items=tuple(PodItem(asset) for asset in selected),
+    mixed_window = next(
+        iter(_candidate_windows(order, target_ms, max_candidates)), []
+    )
+    mixed_fill = _within_tolerance(
+        mixed_window,
+        target_ms=target_ms,
+        tolerance_ms=tolerance_ms,
+        ceiling_ms=ceiling,
+        max_items=max_items,
+        rng=choice_rng,
+        suffix=" (cooldown relaxed)",
+        relaxed_keys=cooling,
+    )
+    if mixed_fill is not None and "cooldown relaxed" in mixed_fill.note:
+        for candidate_window in preferred_windows[1:]:
+            fill = _within_tolerance(
+                candidate_window,
                 target_ms=target_ms,
-                achieved_ms=target_ms,
-                note=f"exact{suffix}",
+                tolerance_ms=tolerance_ms,
+                ceiling_ms=ceiling,
+                max_items=max_items,
+                rng=choice_rng,
             )
+            if fill is not None:
+                return fill
 
-    if trim_slop_ms > 0:
-        trimmed = _exact_sum_trimmed(preferred or order, target_ms, trim_slop_ms)
+            if trim_slop_ms > 0:
+                bounded = [
+                    asset
+                    for asset in candidate_window
+                    if asset.duration_ms <= ceiling
+                ]
+                trimmed = _exact_sum_trimmed(
+                    bounded, target_ms, trim_slop_ms
+                )
+                if trimmed:
+                    items = [PodItem(asset, cut) for asset, cut in trimmed]
+                    trimmed_asset, trimmed_to = trimmed[-1]
+                    return PodFill(
+                        items=tuple(items),
+                        target_ms=target_ms,
+                        achieved_ms=target_ms,
+                        note=f"trimmed {trimmed_asset.key} to {trimmed_to}ms",
+                    )
+        return mixed_fill
+    if mixed_fill is not None:
+        return mixed_fill
+
+    # A trimmed preferred spot is still better than airing one inside cooldown.
+    if trim_slop_ms > 0 and preferred_windows:
+        bounded = [
+            asset
+            for asset in preferred_windows[0]
+            if asset.duration_ms <= ceiling
+        ]
+        trimmed = _exact_sum_trimmed(bounded, target_ms, trim_slop_ms)
         if trimmed:
             items = [PodItem(asset, cut) for asset, cut in trimmed]
             trimmed_asset, trimmed_to = trimmed[-1]
@@ -181,7 +228,24 @@ def fill_pod(
     # than failing. A pod target is a booking length, and real spots come in
     # 30.02 s and 14.98 s, so "77.5 s" is simply not reachable. The slot's tail
     # absorbs the difference, which is how a station actually operates.
-    closest = _closest_to(preferred or order, target_ms, max_items)
+    candidates = preferred_order or cooling_order
+    closest = None
+    closest_delta: int | None = None
+    for candidate_window in _candidate_windows(candidates, target_ms, max_candidates):
+        bounded = [asset for asset in candidate_window if asset.duration_ms <= ceiling]
+        if not bounded:
+            bounded = candidate_window
+        fill_items = _closest_to(bounded, target_ms, max_items)
+        if not fill_items:
+            continue
+        total = sum(asset.duration_ms for asset in fill_items)
+        delta = abs(total - target_ms)
+        if closest_delta is None or delta < closest_delta:
+            closest = fill_items
+            closest_delta = delta
+        elif delta == closest_delta and choice_rng.randrange(2) == 0:
+            closest = fill_items
+
     if not closest:
         raise PodError(f"no commercial fits a {target_ms}ms pod")
     total = sum(asset.duration_ms for asset in closest)
@@ -190,6 +254,70 @@ def fill_pod(
         target_ms=target_ms,
         achieved_ms=total,
         note=f"nearest whole spots ({total - target_ms:+d}ms)",
+    )
+
+
+def _candidate_windows(
+    order: Sequence[Asset], target_ms: int, limit: int
+) -> Iterable[list[Asset]]:
+    """Yield the normal candidate window and one wider fallback window."""
+    if limit <= 0 or len(order) <= limit:
+        if order:
+            yield list(order)
+        return
+    yield _budgeted_window(order, target_ms, limit)
+    if len(order) > limit * 2:
+        yield _budgeted_window(order, target_ms, limit * 2)
+    else:
+        yield list(order)
+
+
+def _within_tolerance(
+    candidates: Sequence[Asset],
+    *,
+    target_ms: int,
+    tolerance_ms: int,
+    ceiling_ms: int,
+    max_items: int,
+    rng: random.Random,
+    suffix: str = "",
+    relaxed_keys: set[str] | None = None,
+) -> PodFill | None:
+    bounded = [asset for asset in candidates if asset.duration_ms <= ceiling_ms]
+    if not bounded:
+        return None
+    reachable = _reachable_totals(
+        bounded,
+        ceiling_ms,
+        max_items,
+        alternatives=2,
+        rng=rng,
+        alternate_totals=range(
+            max(1, target_ms - tolerance_ms),
+            min(ceiling_ms, target_ms + tolerance_ms) + 1,
+        ),
+    )
+    totals = [
+        total
+        for total in reachable
+        if total > 0 and abs(total - target_ms) <= tolerance_ms
+    ]
+    if not totals:
+        return None
+    total = rng.choice(totals)
+    options = reachable[total]
+    chosen = rng.choice(options)
+    selected = _to_assets(bounded, chosen)
+    note_suffix = (
+        suffix
+        if relaxed_keys is None or any(asset.key in relaxed_keys for asset in selected)
+        else ""
+    )
+    return PodFill(
+        items=tuple(PodItem(asset) for asset in selected),
+        target_ms=target_ms,
+        achieved_ms=total,
+        note=f"whole spots{note_suffix}",
     )
 
 
@@ -508,7 +636,7 @@ def _exact_sum(candidates: Sequence[Asset], target: int, max_items: int) -> list
     """First subset (in *candidates* order) whose durations sum to *target*."""
     reachable = _reachable_totals(candidates, target, max_items)
     chosen = reachable.get(target)
-    return None if chosen is None else _to_assets(candidates, chosen)
+    return None if chosen is None else _to_assets(candidates, chosen[0])
 
 
 def _exact_sum_trimmed(
@@ -520,17 +648,18 @@ def _exact_sum_trimmed(
     reachable = _reachable_totals(candidates, target - 1, 8)
 
     best: tuple[int, frozenset[int], int] | None = None
-    for subtotal, chosen in reachable.items():
-        need = target - subtotal
-        if need <= 0:
-            continue
-        for index, asset in enumerate(candidates):
-            if index in chosen or asset.duration_ms < need:
+    for subtotal, options in reachable.items():
+        for chosen in options:
+            need = target - subtotal
+            if need <= 0:
                 continue
-            if asset.duration_ms - need <= slop:
-                # Prefer the combination that uses the most real spots.
-                if best is None or len(chosen) > len(best[1]):
-                    best = (need, chosen, index)
+            for index, asset in enumerate(candidates):
+                if index in chosen or asset.duration_ms < need:
+                    continue
+                if asset.duration_ms - need <= slop:
+                    # Prefer the combination that uses the most real spots.
+                    if best is None or len(chosen) > len(best[1]):
+                        best = (need, chosen, index)
     if best is None:
         return None
     need, chosen, index = best
@@ -541,10 +670,14 @@ def _exact_sum_trimmed(
 def _closest_under(candidates: Sequence[Asset], target: int, max_items: int) -> list[Asset]:
     """The subset that gets closest to *target* without exceeding it."""
     reachable = _reachable_totals(candidates, target, max_items)
-    return _to_assets(candidates, reachable[max(reachable)])
+    return _to_assets(candidates, reachable[max(reachable)][0])
 
 
-def _closest_to(candidates: Sequence[Asset], target: int, max_items: int) -> list[Asset] | None:
+def _closest_to(
+    candidates: Sequence[Asset],
+    target: int,
+    max_items: int,
+) -> list[Asset] | None:
     """The subset whose total is nearest *target*, over or under.
 
     The search window is one spot beyond the target, and the *caller* is
@@ -553,16 +686,26 @@ def _closest_to(candidates: Sequence[Asset], target: int, max_items: int) -> lis
     """
     longest = max((asset.duration_ms for asset in candidates), default=0)
     limit = target + max(longest, 1)
-    reachable = _reachable_totals(candidates, limit, max_items)
+    reachable = _reachable_totals(
+        candidates,
+        limit,
+        max_items,
+    )
     if not reachable:
         return None
     best = min(reachable, key=lambda total: (abs(total - target), total))
-    return _to_assets(candidates, reachable[best])
+    return _to_assets(candidates, reachable[best][0])
 
 
 def _reachable_totals(
-    candidates: Sequence[Asset], limit: int, max_items: int
-) -> dict[int, frozenset[int]]:
+    candidates: Sequence[Asset],
+    limit: int,
+    max_items: int,
+    *,
+    alternatives: int = 1,
+    rng: random.Random | None = None,
+    alternate_totals: range | None = None,
+) -> dict[int, list[frozenset[int]]]:
     """Totals up to *limit*, with the indices that reach each one.
 
     Two things make this cheap enough to call per break:
@@ -573,12 +716,13 @@ def _reachable_totals(
       rather than round numbers, which multiplies the state space; membership on a
       frozenset of ints is O(1) and was the difference between seconds and minutes.
 
-    * **One best combination per total.** Subset-sum only needs to know whether a
-      total is reachable, so re-deriving the same total from a different
-      combination is wasted work. Keeping the first reachable set and skipping
-      everything that repeats it is what stops the enumeration from exploding.
+    * **A bounded number of combinations per total.** Most callers need only one
+      path. Pod selection can retain a small randomized sample, so equally good
+      duration totals do not always resolve to the same exact-duration spots.
     """
-    reachable: dict[int, frozenset[int]] = {0: frozenset()}
+    alternatives = max(1, alternatives)
+    reachable: dict[int, list[frozenset[int]]] = {0: [frozenset()]}
+    seen: dict[int, int] = {0: 1}
     durations = [asset.duration_ms for asset in candidates]
 
     # A hard budget, in "states grown". The loop is O(states x candidates), so
@@ -591,18 +735,46 @@ def _reachable_totals(
 
     for _round in range(max_items):
         grew = False
-        for subtotal, chosen in sorted(reachable.items()):
-            for index in range(len(candidates)):
-                work += 1
-                if work > budget:
-                    return reachable
-                if index in chosen:
-                    continue
-                total = subtotal + durations[index]
-                if total > limit or total in reachable:
-                    continue
-                reachable[total] = chosen | {index}
-                grew = True
+        snapshot = [
+            (subtotal, tuple(options))
+            for subtotal, options in sorted(reachable.items())
+        ]
+        for subtotal, options in snapshot:
+            for chosen in options:
+                for index in range(len(candidates)):
+                    work += 1
+                    if work > budget:
+                        return reachable
+                    if index in chosen:
+                        continue
+                    total = subtotal + durations[index]
+                    if total > limit:
+                        continue
+                    option = chosen | {index}
+                    choices = reachable.get(total)
+                    if choices is None:
+                        reachable[total] = [option]
+                        seen[total] = 1
+                        grew = True
+                        continue
+                    if option in choices:
+                        continue
+                    seen[total] = seen.get(total, 0) + 1
+                    capacity = (
+                        alternatives
+                        if alternate_totals is None or total in alternate_totals
+                        else 1
+                    )
+                    if len(choices) < capacity:
+                        choices.append(option)
+                        grew = True
+                    elif rng is not None and capacity > 1:
+                        # Reservoir sampling retains a varied, bounded sample of
+                        # equally good combinations for this duration total.
+                        replacement = rng.randrange(seen[total])
+                        if replacement < capacity:
+                            choices[replacement] = option
+                            grew = True
         if not grew:
             break
     return reachable

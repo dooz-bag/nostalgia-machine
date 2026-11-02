@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import random
+
 import pytest
 
 from nostalgia.ads import BLACK_CARD_MIN_MS, PodError, fill_gap, fill_pod
@@ -44,6 +46,50 @@ def test_cooldown_is_relaxed_when_nothing_else_fits(pool: list[Asset]) -> None:
     fill = fill_pod(pool, target_ms=45_000, on_cooldown=cooling, trim_slop_ms=1500)
     assert fill.exact
     assert "relaxed" in fill.note
+
+
+def test_searches_later_non_cooling_windows_before_relaxing_cooldown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedRandom(random.Random):
+        def shuffle(self, values: list[Asset]) -> None:
+            pass
+
+    monkeypatch.setattr("nostalgia.ads.rng_for", lambda *_: FixedRandom(0))
+    pool = [_ad(f"ad:40:{index}", 40) for index in range(9)]
+    cooling = [_ad(f"ad:30:cool:{index}", 30) for index in range(2)]
+    pool.extend(cooling)
+    pool.append(_ad("ad:30:clean:first", 30))
+    pool.extend(_ad(f"ad:40:later:{index}", 40) for index in range(4))
+    pool.append(_ad("ad:30:clean:second", 30))
+
+    fill = fill_pod(
+        pool,
+        target_ms=60_000,
+        on_cooldown={asset.key for asset in cooling},
+    )
+
+    assert fill.exact
+    assert {item.asset.key for item in fill.items} == {
+        "ad:30:clean:first",
+        "ad:30:clean:second",
+    }
+    assert "relaxed" not in fill.note
+
+
+def test_comparable_duration_fits_rotate_between_spot_combinations() -> None:
+    pool = [_ad("ad:30", 30), _ad("ad:15:a", 15), _ad("ad:15:b", 15)]
+    combinations = set()
+    for seed in range(40):
+        fill = fill_pod(
+            pool,
+            target_ms=30_000,
+            seed_parts=("fit-variety", seed),
+        )
+        combinations.add(tuple(sorted(item.asset.key for item in fill.items)))
+
+    assert ("ad:30",) in combinations
+    assert ("ad:15:a", "ad:15:b") in combinations
 
 
 def test_trim_is_the_last_resort() -> None:

@@ -169,6 +169,14 @@ exact number. The slot itself is still exact. A break that still comes up short 
 rounded out with short promos, the way a station would, and only a remainder too
 small for anything becomes a brief black card (under 1% of a healthy day).
 
+**Commercial rotation is deterministic but varied.** Each pod starts with a
+shuffled, bounded window of commercials that are not on cooldown. If a repeat
+would otherwise be needed, it checks a wider window of eligible spots first.
+Within the allowed duration tolerance, it samples among comparable duration sums
+and a small set of spot combinations, so a single exact-duration ad does not always
+beat other equally good combinations. Rebuilding the same schedule still produces
+the same choices.
+
 **Break structure adapts to your files.** Pods are sized by `share` of the slot's
 remaining break budget rather than a fixed number of seconds, because a library's
 "22-minute" episodes run a few seconds over. A fixed pod would starve the closing
