@@ -30,9 +30,10 @@ flowchart LR
   subgraph play["ErsatzTV Next"]
     ETV["transcode + HLS"]
   end
+  TELEMETRY["HLS request telemetry proxy"]
   S & B & C --> SCAN
   EMIT -- "playout JSON + XMLTV" --> ETV
-  ETV --> VOD["Jellyfin / VLC / Plex"]
+  VOD["Jellyfin / VLC / Plex"] -- "HLS requests" --> TELEMETRY --> ETV
 ```
 
 ## Why this exists
@@ -112,10 +113,16 @@ Then open `http://localhost:8099`. With Docker Compose, the UI starts with the
 rest of the stack at the same address; from another device, replace `localhost`
 with the computer running Docker.
 
-Use **Schedule** to choose what airs, **Config** to change channel and break
-settings, and the other pages to review bumps and commercials or manage bump
-lines. The UI edits the project's existing configuration files rather than
-creating a separate database of settings. A schedule change is checked and
+Use **Schedule** to choose what airs, **Rotation** to compare episode and
+commercial airing counts, and **Config** to change channel and break settings.
+The other pages let you review bumps and commercials or manage bump lines.
+Rotation shows observed episode and commercial starts alongside scheduled counts.
+In Docker Compose, the stream port is routed through a small HLS proxy that records
+an item when a client successfully requests one of its segments. Players may buffer
+ahead, and a segment request does not prove a person watched the full item. Native
+streaming without the proxy records no observed starts. The UI edits the project's
+existing configuration files rather than creating a separate database of settings.
+A schedule change is checked and
 staged first; while it works, an on-page checklist shows real steps, including
 planning each day. The current stream keeps playing until you explicitly launch
 the new schedule at a safe boundary. This makes routine changes easier while

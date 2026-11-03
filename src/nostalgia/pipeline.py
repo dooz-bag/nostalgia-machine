@@ -40,6 +40,7 @@ from .grid import GridError, build_day, day_bounds_ms, is_dst_transition_day
 from .mergebreaks import MergedRun, merge_plan, prune_merged
 from .plan import Plan, PlanContext, PlanError, build_plan
 from .paths import Paths
+from .playback import schedule_rows, write_schedule_map
 from .skip import (
     OverrideFile,
     load_overrides,
@@ -666,6 +667,8 @@ def build(
             )
 
     if emit:
+        map_name = "rotation-map.pending.json" if deploy else "rotation-map.json"
+        write_schedule_map(paths.data_dir / map_name, schedule_rows(result.plans))
         if progress is not None:
             progress("Writing the guide and finalizing the schedule")
         # Every playout was just rewritten, so `kept_merged` is the complete set of

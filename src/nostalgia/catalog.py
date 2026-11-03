@@ -221,6 +221,20 @@ CREATE TABLE IF NOT EXISTS airings (
 CREATE INDEX IF NOT EXISTS airings_asset ON airings(asset_key, start_ms);
 CREATE INDEX IF NOT EXISTS airings_day   ON airings(day);
 
+CREATE TABLE IF NOT EXISTS playback_events (
+    channel            TEXT NOT NULL,
+    item_id            TEXT NOT NULL,
+    asset_key          TEXT NOT NULL,
+    kind               TEXT NOT NULL,
+    scheduled_start_ms INTEGER NOT NULL,
+    first_requested_ms INTEGER NOT NULL,
+    last_requested_ms  INTEGER NOT NULL,
+    segment_requests   INTEGER NOT NULL DEFAULT 1,
+    PRIMARY KEY (channel, item_id)
+);
+CREATE INDEX IF NOT EXISTS playback_events_kind_time
+    ON playback_events(kind, first_requested_ms);
+
 CREATE TABLE IF NOT EXISTS state (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -1326,6 +1340,104 @@ class Catalog:
             "disabled": int(row["off"] or 0),
             "multi_spot": int(row["multi"] or 0),
         }
+
+    def airing_counts(
+        self,
+        kind: str,
+        *,
+        since_ms: int | None,
+        before_ms: int,
+        limit: int = 100,
+    ) -> dict[str, object]:
+        """Per-media airing totals for the website's rotation report.
+
+        Airings are scheduler records, not player telemetry. ``before_ms`` keeps
+        future schedule entries out of the counters, and ``since_ms=None`` means
+        all recorded history.
+        """
+        if kind not in {"ad", "episode"}:
+            raise ValueError(f"unsupported airing kind: {kind!r}")
+
+        conditions = ["a.kind = ?", "a.start_ms <= ?"]
+        params: list[object] = [kind, before_ms]
+        if since_ms is not None:
+            conditions.append("a.start_ms >= ?")
+            params.append(since_ms)
+        where = " AND ".join(conditions)
+        connection = self.connect()
+        totals = connection.execute(
+            f"""
+            SELECT COUNT(*) AS total_airings,
+                   COUNT(DISTINCT a.asset_key) AS distinct_assets
+            FROM airings a
+            WHERE {where}
+            """,
+            tuple(params),
+        ).fetchone()
+        rows = connection.execute(
+            f"""
+            SELECT a.asset_key, COUNT(*) AS airing_count,
+                   MAX(a.start_ms) AS last_aired_ms,
+                   m.path, m.title, m.show_id, m.season, m.episode
+            FROM airings a
+            LEFT JOIN media m ON m.key = a.asset_key
+            WHERE {where}
+            GROUP BY a.asset_key, m.path, m.title, m.show_id, m.season, m.episode
+            ORDER BY airing_count DESC, last_aired_ms DESC, a.asset_key
+            LIMIT ?
+            """,
+            (*params, max(1, int(limit))),
+        )
+        return {
+            "total_airings": int(totals["total_airings"] or 0),
+            "distinct_assets": int(totals["distinct_assets"] or 0),
+            "items": [
+                {
+                    "key": row["asset_key"],
+                    "airings": int(row["airing_count"]),
+                    "last_aired_ms": int(row["last_aired_ms"]),
+                    "path": row["path"] or "",
+                    "title": row["title"] or "",
+                    "show_id": row["show_id"] or "",
+                    "season": int(row["season"] or 0),
+                    "episode": int(row["episode"] or 0),
+                }
+                for row in rows
+            ],
+        }
+
+    def airing_counts_by_key(
+        self,
+        kind: str,
+        *,
+        since_ms: int | None,
+        before_ms: int,
+    ) -> dict[str, int]:
+        """Scheduled airing totals for *every* asset of *kind*, keyed by asset.
+
+        The rotation report shows observed starts for a bounded list of items and
+        needs each one's scheduled count for comparison. Reading that from
+        :meth:`airing_counts` would only cover its own top-N page, so an item that
+        aired rarely would compare against a misleading zero.
+        """
+        if kind not in {"ad", "episode"}:
+            raise ValueError(f"unsupported airing kind: {kind!r}")
+
+        conditions = ["kind = ?", "start_ms <= ?"]
+        params: list[object] = [kind, before_ms]
+        if since_ms is not None:
+            conditions.append("start_ms >= ?")
+            params.append(since_ms)
+        rows = self.connect().execute(
+            f"""
+            SELECT asset_key, COUNT(*) AS airing_count
+            FROM airings
+            WHERE {' AND '.join(conditions)}
+            GROUP BY asset_key
+            """,
+            tuple(params),
+        )
+        return {row["asset_key"]: int(row["airing_count"]) for row in rows}
 
     def last_aired(self, kinds: Sequence[str] = ("bump", "ad")) -> dict[str, int]:
         placeholders = ",".join("?" for _ in kinds)

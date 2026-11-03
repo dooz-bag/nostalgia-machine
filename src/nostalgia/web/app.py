@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import sqlite3
+import time
 from collections import Counter
 from dataclasses import asdict
 from datetime import date
@@ -39,6 +40,7 @@ from ..media_review import (
 )
 from ..paths import Paths
 from ..pipeline import build
+from ..playback import PlaybackStore
 from ..rotation import EpisodeRef
 from .config_edit import (
     BOOL,
@@ -67,6 +69,7 @@ from .continuity_edit import (
 from . import lines as lines_web
 from . import imports as imports_web
 from .commercials import commercials_body, set_family_enabled, set_spot_enabled
+from .rotation import PERIODS, rotation_body
 from .schedule import (
     ScheduleFormError,
     load_schedule,
@@ -808,7 +811,7 @@ def _page(title: str, body: str, *, active: str = "", card: str = "ntsc") -> str
 {_test_card(card)}
 <header>
   <h1><span class="bracket">[</span>adult swim<span class="bracket">]</span> machine</h1>
-  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/imports", "Import media")}{nav("/lines", "Lines")}{nav("/config", "Config")}</nav>
+  <nav>{nav("/", "On now")}{nav("/schedule", "Schedule")}{nav("/bumps", "Bump review")}{nav("/commercials", "Commercials")}{nav("/rotation", "Rotation")}{nav("/imports", "Import media")}{nav("/lines", "Lines")}{nav("/config", "Config")}</nav>
 </header>
 <main>
   <section id="work-progress" class="work-progress" role="status" aria-live="polite" hidden>
@@ -1183,6 +1186,9 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
 
         report_progress(request, "Discarding the staged schedule")
         removed = discard(_request_deploy_paths(paths))
+        # The staged map describes the schedule that was just thrown away; leaving
+        # it behind would let a later launch promote timings nothing is airing.
+        (paths.data_dir / "rotation-map.pending.json").unlink(missing_ok=True)
         noun = "file" if removed == 1 else "files"
         return RedirectResponse(
             f"/schedule?launched={quote_plus(f'pending schedule discarded ({removed} {noun})')}",
@@ -1470,6 +1476,21 @@ def create_app(paths: Paths, config: RootConfig) -> Any:
                 error=error,
             )
         return _render(_page("Commercials", body, active="/commercials", card=_card(current)))
+
+    @app.get("/rotation", response_class=HTMLResponse)
+    def rotation(period: str = "30d") -> Any:
+        if period not in PERIODS:
+            raise HTTPException(status_code=400, detail="unsupported rotation period")
+        current = _reload(config, paths)
+        with Catalog(paths.catalog) as catalog:
+            playback = PlaybackStore(paths.catalog)
+            body = rotation_body(
+                current,
+                catalog,
+                period=period,
+                playback=playback,
+            )
+        return _render(_page("Rotation", body, active="/rotation", card=_card(current)))
 
     @app.get("/imports", response_class=HTMLResponse)
     def imports_page(
@@ -2106,11 +2127,25 @@ def _activate_staged(
     if progress is not None:
         progress("Switching the live schedule at a safe boundary")
     report = push(roots)
+    map_warning = ""
+    pending_map = paths.data_dir / "rotation-map.pending.json"
+    if pending_map.is_file():
+        from ..playback import activate_schedule_map
+
+        try:
+            activate_schedule_map(
+                paths.data_dir / "rotation-map.json",
+                pending_map,
+                swap_ms=report.swap_ms,
+                now_ms=int(time.time() * 1000),
+            )
+        except (OSError, ValueError) as exc:
+            map_warning = f"; playback telemetry schedule map was not updated: {exc}"
     from ..grid import format_clock
 
     zone = __import__("zoneinfo").ZoneInfo(config.channel.grid.timezone)
     at = format_clock(report.swap_ms, config.channel.grid)
-    return f"launched {report.days} day(s) at {at}; {report.note}"
+    return f"launched {report.days} day(s) at {at}; {report.note}{map_warning}"
 
 
 def _snapshot(paths: Paths, entries: Sequence[SettingsFile]) -> dict[Path, bytes | None]:

@@ -116,8 +116,8 @@ services:
     restart: unless-stopped
     environment:
       TZ: ${TZ:-Asia/Tokyo}
-    ports:
-      - "${ETV_PORT:-8409}:8409"
+    expose:
+      - "8409"
     volumes:
       # Exactly the folders the streamer needs. `lineup/` holds lineup.json and
       # channels/<n>/channel.json, which is what `emit` writes.
@@ -147,6 +147,42 @@ services:
       hls-init:
         condition: service_completed_successfully
 
+  telemetry:
+    build: .
+    container_name: nostalgia-telemetry
+    restart: unless-stopped
+    entrypoint: ["python"]
+    command: ["-m", "nostalgia.telemetry"]
+    environment:
+      NOSTALGIA_ROOT: /app
+      NOSTALGIA_STREAMER_URL: http://ersatztv:8409
+      NOSTALGIA_HLS_DIR: /app/hls
+      TZ: ${TZ:-Asia/Tokyo}
+    ports:
+      - "${ETV_PORT:-8409}:8409"
+    volumes:
+      - ./data:/app/data
+      - hls:/app/hls:ro
+    depends_on:
+      ersatztv:
+        condition: service_started
+      # The proxy only reads the HLS volume, but it must exist and be readable
+      # before the first segment request arrives.
+      hls-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - |
+          import socket
+          socket.create_connection(("127.0.0.1", 8409), timeout=5).close()
+      interval: 1m
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
   hls-init:
     image: alpine:3.20
     container_name: nostalgia-hls-init
@@ -164,8 +200,8 @@ services:
   #
   # Then add Dispatcharr (http://localhost:9191) as a tuner in Plex. Next's own
   # URLs also need adding to Dispatcharr once:
-  #   http://ersatztv:8409/channels.m3u
-  #   http://ersatztv:8409/xmltv.xml
+  #   http://telemetry:8409/channels.m3u
+  #   http://telemetry:8409/xmltv.xml
   dispatcharr:
     profiles: ["plex"]
     image: ghcr.io/dispatcharr/dispatcharr:latest

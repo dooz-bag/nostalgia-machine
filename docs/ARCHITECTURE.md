@@ -537,9 +537,25 @@ a file next to the media for a setting that only matters to this channel.
 
 ### Airing history
 
-`airings` records what has actually gone out, and two things read it: the
-Commercials page, and `last_aired`, which seeds the cooldowns. Both need it to be
-*true*, so `build` writes only items at or before the wall clock — a plan covers a
-whole broadcast day, and a spot scheduled for 41:00 is tomorrow afternoon, not
-something that has run. Each day's rows are replaced wholesale on every build, so a
-replan cannot leave stale entries behind.
+`airings` records scheduled items whose start time has passed; it is not player
+telemetry. The Commercials page and `last_aired` (which seeds the cooldowns) read
+it, so `build` writes only items at or before the wall clock — a plan covers a whole
+broadcast day, and a spot scheduled for 41:00 is tomorrow afternoon, not something
+that has run. Each day's rows are replaced wholesale on every build, so a replan
+cannot leave stale entries behind.
+
+### HLS playback observations
+
+The Docker Compose stream endpoint is a small HTTP proxy in front of ErsatzTV.
+For a successful client request for an HLS segment, it reads that segment's
+`EXT-X-PROGRAM-DATE-TIME` from the streamer's live playlist and maps the timestamp
+to the full per-item schedule map written by the scheduler. This map is separate
+from `airings`: it includes future items and keeps individual commercial intervals
+even when the playout document merges a break into one file. Staged maps are
+promoted when a schedule launches, retaining the item carried over the switch.
+
+The proxy records one observed start per scheduled item in `playback_events` and
+tracks subsequent segment requests separately. This proves a client requested
+content from the channel, not that a person watched the full item; HLS clients may
+buffer ahead. Direct native streaming bypasses the proxy and does not create these
+observations.

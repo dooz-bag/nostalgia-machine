@@ -1024,6 +1024,12 @@ into `.\ersatztv\`. It needs to sit next to its own `ffmpeg.exe`.
 | Guide (XMLTV) | `http://<host>:8409/xmltv.xml` |
 | Channel 1 HLS | `http://<host>:8409/channel/1.m3u8` |
 
+With Docker Compose, port 8409 is served by the telemetry proxy in front of
+ErsatzTV. Successful HLS segment requests are matched to the schedule and counted
+on the website's Rotation page. Requests can be buffered ahead, so this is not
+proof that a person watched the entire item. The native `run.ps1 stream` command
+connects directly to ErsatzTV and does not produce these observed-start counts.
+
 > **Use a LAN address, not `localhost`, for anything except this machine.**
 > ErsatzTV builds the playlist from the address it was requested *by*, so
 > `channels.m3u` fetched as `localhost` returns stream URLs pointing at
