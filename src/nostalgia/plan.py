@@ -36,7 +36,7 @@ from .continuity import (
 from .grid import Slot, build_day, day_bounds_ms, format_wall
 from .rng import rng_for
 from .rotation import NoEpisodesError, RotationRing, build_rings, select
-from .schedule import AssignedSlot, assign_day
+from .schedule import AssignedSlot, PlayCounts, assign_day
 from .watermark import WatermarkRule
 
 if TYPE_CHECKING:
@@ -192,6 +192,13 @@ class PlanContext:
     ads: list[Asset]
     idents: list[Asset]
     last_aired: dict[str, int]
+    play_counts: PlayCounts = field(init=False, repr=False)
+    """Per-show play counts from the day files, for the rotation ordinal.
+
+    Built from ``root`` in :meth:`__post_init__` rather than passed in, so every
+    construction path gets one and no caller has to remember.
+    """
+
     era_file: Path | None = None
     """``config/bumps-era.yaml``, used by the generated-bump renderer."""
 
@@ -211,6 +218,9 @@ class PlanContext:
     different length class -- these run for minutes, so they can only ever fill a
     whole break, never a 30-second pod.
     """
+
+    def __post_init__(self) -> None:
+        self.play_counts = PlayCounts(self.root)
 
     @classmethod
     def load(
@@ -1502,6 +1512,9 @@ def _episode_for(plan: Plan, assigned: AssignedSlot, context: PlanContext):
             anchor=context.root.channel.grid.anchor,
             slots_per_day=max(1, assigned.of_same_show),
             slot_in_day=assigned.slot_in_day,
+            cumulative=context.play_counts.plays_before(
+                assigned.show_id, context.root.channel.grid.anchor
+            ),
         )
     except NoEpisodesError:
         return None

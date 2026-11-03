@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 
@@ -126,6 +126,71 @@ def test_episode_order_is_season_then_episode(episodes: list[EpisodeRef]) -> Non
 def test_empty_show_raises(episodes: list[EpisodeRef]) -> None:
     with pytest.raises(NoEpisodesError):
         order_episodes([], order="episode", show_id="empty")
+
+
+def test_cumulative_ordinal_survives_uneven_days(episodes: list[EpisodeRef]) -> None:
+    """A show that airs a different number of times each day must still walk the ring.
+
+    The ordinal used to be ``day_index * plays_today``, which assumes every day
+    plays the show the same number of times. Weekday and weekend day files do not,
+    so the stride changed at every weekend boundary and the rotation jumped -- the
+    same episodes came back long before the ring was walked.
+    """
+    rings = build_rings(episodes, {})
+    ring = rings["athf"]
+    anchor = date(2001, 9, 2)
+
+    # Three plays on weekdays, one at the weekend: a deliberately uneven week.
+    per_day = {0: 3, 1: 3, 2: 3, 3: 3, 4: 3, 5: 1, 6: 1}
+    totals: dict[date, int] = {}
+    running = 0
+    for offset in range(60):
+        day = anchor + timedelta(days=offset)
+        totals[day] = running
+        running += per_day[day.weekday()]
+
+    def cumulative(day: date) -> int:
+        return totals.get(day, running)
+
+    seen: list[str] = []
+    for offset in range(60):
+        day = anchor + timedelta(days=offset)
+        for slot in range(per_day[day.weekday()]):
+            chosen = select(
+                ring,
+                day=day,
+                anchor=anchor,
+                slots_per_day=per_day[day.weekday()],
+                slot_in_day=slot,
+                cumulative=cumulative,
+            )
+            seen.append(chosen.key)
+
+    # Every episode must appear once before any of them appears again.
+    assert seen[: len(ring)] == [ep.key for ep in ring.episodes]
+    assert seen[len(ring) : 2 * len(ring)] == [ep.key for ep in ring.episodes]
+
+
+def test_cumulative_ordinal_matches_constant_stride(episodes: list[EpisodeRef]) -> None:
+    """With a uniform day shape the running total must agree with the old formula."""
+    anchor = date(2001, 9, 2)
+    day = date(2001, 9, 12)
+    plays = 3
+
+    def cumulative(target: date) -> int:
+        return max(0, (target - anchor).days) * plays
+
+    for slot in range(plays):
+        assert ordinal_for(
+            "athf", day=day, anchor=anchor, slots_per_day=plays, slot_in_day=slot
+        ) == ordinal_for(
+            "athf",
+            day=day,
+            anchor=anchor,
+            slots_per_day=plays,
+            slot_in_day=slot,
+            cumulative=cumulative,
+        )
 
 
 def test_cycle_length_is_the_lcm(episodes: list[EpisodeRef]) -> None:

@@ -273,7 +273,7 @@ def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
     """
     from .grid import build_day
     from .rotation import build_rings, select as _select
-    from .schedule import assign_day
+    from .schedule import PlayCounts, assign_day
 
     day = config.channel.on_air_date or date.today()
     while day.weekday() >= 5:
@@ -290,6 +290,7 @@ def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
 
     break_ms = 0
     episode_ms = 0
+    counts = PlayCounts(config)
     for assigned in schedule.slots:
         ring = rings.get(assigned.show_id)
         if ring is None or not ring.episodes:
@@ -301,6 +302,7 @@ def break_budget_summary(config: RootConfig, catalog: Catalog) -> dict:
                 anchor=config.channel.grid.anchor,
                 slots_per_day=max(1, assigned.of_same_show),
                 slot_in_day=assigned.slot_in_day,
+                cumulative=counts.plays_before(assigned.show_id, config.channel.grid.anchor),
             )
         except Exception:  # noqa: BLE001 - a summary must never fail a build
             continue

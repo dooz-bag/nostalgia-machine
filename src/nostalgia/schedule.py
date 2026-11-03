@@ -18,7 +18,8 @@ listing several shows alternates them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, timedelta
+from typing import Callable
 
 from .config import DayConfig, Daypart, RootConfig, ShowConfig
 from .grid import Slot
@@ -93,8 +94,10 @@ def assign_day(
         else:
             groups.append((slot.daypart, [slot]))
 
-    show_use: dict[str, int] = {}
-
+    # Pass 1: which show airs in each slot. Rotation happens within a daypart, so
+    # a block listing one show is a marathon and a block listing several alternates
+    # them.
+    placed: list[tuple[Slot, str]] = []
     for daypart_label, group in groups:
         part = _resolve_part(daypart_label, day_config, group[0], root)
         if part is None:
@@ -119,16 +122,32 @@ def assign_day(
 
         rotation = _rotation_order(eligible, root, day, daypart_label)
         for position, slot in enumerate(group):
-            show_id = rotation[position % len(rotation)]
-            report.slots.append(
-                AssignedSlot(
-                    slot=slot,
-                    show_id=show_id,
-                    slot_in_day=show_use.get(show_id, 0),
-                    of_same_show=_count_in_day(rotation, group, show_id),
-                )
+            placed.append((slot, rotation[position % len(rotation)]))
+
+    # Pass 2: the rotation position.
+    #
+    # `of_same_show` is the stride between one day and the next, so it has to be
+    # the show's count for the *whole day*, not for whichever daypart it happens
+    # to sit in. Counting per daypart gave a show listed in two blocks two
+    # different strides, which advanced two colliding rotation tracks and brought
+    # episodes back long before the ring was walked -- 2119 premature repeats over
+    # 60 days on the shipped day files.
+    totals: dict[str, int] = {}
+    for _, show_id in placed:
+        totals[show_id] = totals.get(show_id, 0) + 1
+
+    seen: dict[str, int] = {}
+    for slot, show_id in placed:
+        position = seen.get(show_id, 0)
+        seen[show_id] = position + 1
+        report.slots.append(
+            AssignedSlot(
+                slot=slot,
+                show_id=show_id,
+                slot_in_day=position,
+                of_same_show=totals[show_id],
             )
-            show_use[show_id] = show_use.get(show_id, 0) + 1
+        )
 
     report.slots.sort(key=lambda assigned: assigned.slot.start_ms)
     return report
@@ -148,12 +167,6 @@ def _resolve_part(
 
 def _label_finish(part: Daypart) -> str:
     return f"{part.end:%H:%M}" if part.end else "end"
-
-
-def _count_in_day(rotation: list[str], group: list[Slot], show_id: str) -> int:
-    if not rotation:
-        return 1
-    return sum(1 for index in range(len(group)) if rotation[index % len(rotation)] == show_id)
 
 
 def _rotation_order(
@@ -191,6 +204,86 @@ def rotation_span(assigned: AssignedSlot) -> int:
     return max(1, assigned.of_same_show)
 
 
+class PlayCounts:
+    """How many times each show airs on a given day, from the day files.
+
+    The rotation ordinal is a running total of plays, so it needs the show's real
+    count for every day between the anchor and the day being planned -- not just
+    for the day in hand. Weekday and weekend files give a show different counts, so
+    assuming a constant stride makes the rotation jump at every weekend boundary.
+
+    Counts are cached per *date*, not per weekday: a show's airing window can open
+    or close mid-week, so two Mondays a year apart need not play it the same number
+    of times. Each date is resolved with a single ``assign_day`` call covering every
+    show at once.
+
+    Derived from the day files alone, so it stays pure: previewing a day cannot
+    change what any other day plays.
+    """
+
+    def __init__(self, root: RootConfig) -> None:
+        self._root = root
+        self._by_day: dict[date, dict[str, int]] = {}
+        self._cursor: date | None = None
+        self._running: dict[str, int] = {}
+
+    def for_show(self, show_id: str) -> Callable[[date], int]:
+        """A function giving *show_id*'s play count for any day."""
+        return lambda day: self._counts(day).get(show_id, 0)
+
+    def plays_before(self, show_id: str, anchor: date) -> Callable[[date], int]:
+        """A function giving *show_id*'s total plays on every day before *day*.
+
+        This is the rotation ordinal's base. It is memoised as a running total so
+        planning a day costs one step, not one step per day since the anchor.
+        """
+        return lambda day: self._total_before(show_id, day, anchor)
+
+    def _total_before(self, show_id: str, day: date, anchor: date) -> int:
+        if day <= anchor:
+            return 0
+        if self._cursor is None or self._cursor < anchor:
+            self._cursor = anchor
+            self._running = {}
+        if day < self._cursor:
+            # Planning normally moves forward, so this only happens when a caller
+            # asks for an earlier day after a later one. Re-summing from the anchor
+            # is cheap because every day's counts are already cached.
+            total = 0
+            cursor = anchor
+            while cursor < day:
+                total += self._counts(cursor).get(show_id, 0)
+                cursor += timedelta(days=1)
+            return total
+        while self._cursor < day:
+            for key, count in self._counts(self._cursor).items():
+                self._running[key] = self._running.get(key, 0) + count
+            self._cursor += timedelta(days=1)
+        return self._running.get(show_id, 0)
+
+    def _counts(self, day: date) -> dict[str, int]:
+        counts = self._by_day.get(day)
+        if counts is None:
+            counts = self._by_day[day] = _plays_on_day(self._root, day)
+        return counts
+
+
+def _plays_on_day(root: RootConfig, day: date) -> dict[str, int]:
+    """How many slots each show fills on *day*, from the day files."""
+    from .grid import build_day
+    from .pipeline import day_config_for
+
+    try:
+        day_config = day_config_for(root, day)
+        slots = build_day(day, day_config, root.channel.grid)
+    except (ValueError, KeyError):
+        return {}
+    counts: dict[str, int] = {}
+    for assigned in assign_day(slots, day_config, root, day).slots:
+        counts[assigned.show_id] = counts.get(assigned.show_id, 0) + 1
+    return counts
+
+
 def interleave(show_ids: list[str], count: int, *, seed_parts: tuple = ()) -> list[str]:
     """Round-robin a show list to *count* slots, preserving order determinism."""
     if not show_ids:
@@ -207,5 +300,6 @@ __all__ = [
     "assign_day",
     "interleave",
     "is_eligible",
+    "PlayCounts",
     "rotation_span",
 ]

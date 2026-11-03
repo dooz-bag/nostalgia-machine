@@ -17,8 +17,8 @@ which is what lets the plan be regenerated from scratch every time.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
-from typing import Iterable, Mapping, Sequence
+from datetime import date, timedelta
+from typing import Callable, Iterable, Mapping, Sequence
 
 from .rng import rng_for
 
@@ -83,6 +83,38 @@ def episodes_per_day(slot_count: int) -> int:
     return max(1, slot_count)
 
 
+def plays_before(
+    show_id: str,
+    *,
+    day: date,
+    anchor: date,
+    plays_on: Callable[[date], int],
+) -> int:
+    """How many times *show_id* has aired on every day before *day*.
+
+    This is the fix for "the same episodes keep coming back" in day-file mode.
+    The ordinal used to be ``day_index * plays_today``, which is only correct when
+    every day plays the show the same number of times. It does not: the weekday and
+    weekend files give a show different slot counts, so the stride changed at every
+    weekend boundary and the rotation jumped -- 1707 premature repeats over 60 days
+    even after the per-daypart count was corrected.
+
+    Summing the actual per-day counts makes the ordinal a true running total, so
+    the ring is walked in order no matter how the day files are shaped. It stays
+    pure: the count comes from the day files, not from what has aired.
+
+    ``plays_on`` must be the show's count for a *single* day. Callers that already
+    hold a running total should pass it to ``ordinal_for`` as ``plays_before``
+    instead, which skips this walk entirely.
+    """
+    if day <= anchor:
+        return 0
+    return sum(
+        plays_on(anchor + timedelta(days=offset))
+        for offset in range((day - anchor).days)
+    )
+
+
 def ordinal_for(
     show_id: str,
     *,
@@ -90,10 +122,25 @@ def ordinal_for(
     anchor: date,
     slots_per_day: int,
     slot_in_day: int = 0,
+    plays_on: Callable[[date], int] | None = None,
+    cumulative: Callable[[date], int] | None = None,
 ) -> int:
-    """Absolute play index for a show at a given day and intra-day position."""
-    day_index = (day - anchor).days
-    return day_index * episodes_per_day(slots_per_day) + slot_in_day
+    """Absolute play index for a show at a given day and intra-day position.
+
+    ``cumulative`` is the show's total plays on every day before the one asked for,
+    which is what makes the ordinal a running total across days of differing shape.
+    ``plays_on`` is the per-day count and is summed here instead; prefer
+    ``cumulative`` when the caller already memoises the running total.
+
+    Without either, the count is assumed constant at ``slots_per_day``, which is
+    only right for a channel whose every day is identical.
+    """
+    if cumulative is not None:
+        return cumulative(day) + slot_in_day
+    if plays_on is None:
+        day_index = (day - anchor).days
+        return day_index * episodes_per_day(slots_per_day) + slot_in_day
+    return plays_before(show_id, day=day, anchor=anchor, plays_on=plays_on) + slot_in_day
 
 
 def select(
@@ -103,12 +150,20 @@ def select(
     anchor: date,
     slots_per_day: int,
     slot_in_day: int = 0,
+    plays_on: Callable[[date], int] | None = None,
+    cumulative: Callable[[date], int] | None = None,
 ) -> EpisodeRef:
     """The episode a show airs at a given day/position. Pure and repeatable."""
     if not ring.episodes:
         raise NoEpisodesError(f"{ring.show_id}: no episodes")
     ordinal = ordinal_for(
-        ring.show_id, day=day, anchor=anchor, slots_per_day=slots_per_day, slot_in_day=slot_in_day
+        ring.show_id,
+        day=day,
+        anchor=anchor,
+        slots_per_day=slots_per_day,
+        slot_in_day=slot_in_day,
+        plays_on=plays_on,
+        cumulative=cumulative,
     )
     return ring.at(ordinal)
 
@@ -194,5 +249,6 @@ __all__ = [
     "episodes_per_day",
     "order_episodes",
     "ordinal_for",
+    "plays_before",
     "select",
 ]
