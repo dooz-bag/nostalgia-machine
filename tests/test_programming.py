@@ -209,11 +209,14 @@ def test_lineup_random_ignores_configured_start(config, catalog):
         root, catalog.episodes(), slots_per_day=6, day=DAY
     )
     rings = programming.rings_for(root, catalog.episodes())
-    expected = [
-        programming.pick_episode(rings["futurama"], "random", i, seed_parts=(DAY.isoformat(),))
-        for i in range(6)
-    ]
+    walk = programming.walk_order(rings["futurama"], "random")
+    start = DAY.toordinal() * 6
+    expected = [walk[(start + i) % len(walk)] for i in range(6)]
     assert [slot.episode for slot in report.slots] == expected
+    # The configured start is a `sequential` concept; `random` must ignore it.
+    assert report.slots[0].episode != programming.find_episode(
+        rings["futurama"], 1, 3
+    )
 
 
 def test_sequential_continues_after_last_aired_episode(config, catalog):

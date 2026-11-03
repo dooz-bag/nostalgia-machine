@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from datetime import date
+from functools import lru_cache
 from typing import Mapping, Sequence
 
 from .config import ProgrammingConfig, ProgrammingEntry, RootConfig
@@ -86,6 +87,60 @@ def find_episode(ring: RotationRing, season: int, episode: int) -> EpisodeRef | 
     return None
 
 
+@lru_cache(maxsize=256)
+def walk_order(
+    ring: RotationRing,
+    order: str,
+    seed_parts: tuple[object, ...] = (),
+) -> tuple[EpisodeRef, ...]:
+    """The order a show's episodes are walked in, so one pass never repeats.
+
+    This is the fix for "the same episodes keep coming back". The random modes
+    used to hash ``(show, position, day)`` into an index, which is a fresh uniform
+    draw *with replacement* every day: the ring was never walked, so episodes
+    collided within a day and some never aired at all. A stable permutation walked
+    by position instead guarantees every episode airs once before any repeats.
+
+    The permutation is seeded on the show alone -- never the date -- because a
+    date-seeded order would reshuffle daily and reintroduce the collisions. What
+    carries the walk across days is the position, which the callers continue from
+    the last aired episode.
+
+    ``by_season`` keeps its equal-season weighting by interleaving the seasons
+    round-robin, so a show with one long season and nine short ones still spends
+    the same airtime in each.
+    """
+    episodes = ring.episodes
+    if not episodes:
+        raise ProgrammingError(f"{ring.show_id}: no episodes")
+
+    if order == "sequential":
+        return tuple(episodes)
+
+    if order == "by_season":
+        seasons: dict[int, list[EpisodeRef]] = {}
+        for episode in episodes:
+            seasons.setdefault(episode.season, []).append(episode)
+        keys = sorted(seasons)
+        rng = rng_for("pick-season-order", ring.show_id, *seed_parts)
+        rng.shuffle(keys)
+        queues: list[list[EpisodeRef]] = []
+        for season in keys:
+            pool = list(seasons[season])
+            rng_for("pick-episode-order", ring.show_id, season, *seed_parts).shuffle(pool)
+            queues.append(pool)
+        interleaved: list[EpisodeRef] = []
+        while any(queues):
+            for queue in queues:
+                if queue:
+                    interleaved.append(queue.pop(0))
+        return tuple(interleaved)
+
+    pool = list(episodes)
+    rng_for("pick-order", ring.show_id, *seed_parts).shuffle(pool)
+    return tuple(pool)
+
+
 def pick_episode(
     ring: RotationRing,
     order: str,
@@ -95,38 +150,35 @@ def pick_episode(
 ) -> EpisodeRef:
     """The episode for a given play position in a ring.
 
-    ``sequential`` walks the ring in order, so a rebuild reproduces it and the
-    viewer sees a show progress. The two random modes hash ``position`` into a
-    stable index instead, which means they never need state: episode *n* of a show
-    is always the same episode, and the sequence still looks random.
-
-    ``by_season`` weighs seasons equally rather than episodes, so a show with one
-    long season and nine short ones does not spend 40% of its airtime in the long
-    one -- which is what uniform-over-episodes does, and what a viewer notices.
+    Every mode walks :func:`walk_order`, so a full pass plays each episode once
+    before repeating. ``position`` is an absolute play index for the show, not a
+    within-day one: callers continue it from the last aired episode so the walk
+    carries across days instead of restarting at midnight.
     """
-    episodes = ring.episodes
-    if not episodes:
-        raise ProgrammingError(f"{ring.show_id}: no episodes")
+    walk = walk_order(ring, order, tuple(seed_parts))
+    return walk[position % len(walk)]
 
-    if order == "sequential":
-        return episodes[position % len(episodes)]
 
-    if order == "by_season":
-        seasons: dict[int, list[EpisodeRef]] = {}
-        for episode in episodes:
-            seasons.setdefault(episode.season, []).append(episode)
-        keys = sorted(seasons)
-        rng = rng_for("pick-season", ring.show_id, position, *seed_parts)
-        season = keys[rng.randrange(len(keys))]
-        pool = seasons[season]
-        rng = rng_for("pick-episode", ring.show_id, position, *seed_parts)
-        return pool[rng.randrange(len(pool))]
+def _plays_per_show(slots_per_day: int, entry_count: int, index: int) -> int:
+    """How many times the show at *index* in the cycle airs in one day.
 
-    # `random`, but *stable*: the same position always yields the same episode, so
-    # a plan can be rebuilt from nothing. A real RNG here would make the channel
-    # unreproducible, which is the one thing this project will not do.
-    rng = rng_for("pick-random", ring.show_id, position, *seed_parts)
-    return episodes[rng.randrange(len(episodes))]
+    Not simply ``slots_per_day // entry_count``: when the day does not divide
+    evenly the earlier entries get one extra play, and using the floor for all of
+    them makes the date-derived position drift by a play a day -- which is exactly
+    the kind of slow desync that brings episodes back early.
+    """
+    if entry_count <= 0:
+        return 0
+    total = max(0, slots_per_day)
+    return len(range(index, total, entry_count))
+
+
+def _walk_position(walk: Sequence[EpisodeRef], key: str) -> int | None:
+    """Where *key* sits in a show's walk order, or ``None`` if it is not there."""
+    for index, episode in enumerate(walk):
+        if episode.key == key:
+            return index
+    return None
 
 
 def _start_index(
@@ -194,35 +246,15 @@ def build_lineup(
     config = config or root.programming
     report = LineupReport()
     rings = rings_for(root, episodes)
-    configured_starts: dict[str, int] = {}
+
+    # Each show's walk order, so one pass plays every episode once before any
+    # repeat. Seeded on the show alone, never the date: a date-seeded order would
+    # reshuffle daily and reintroduce the collisions this exists to prevent.
+    walks: dict[str, tuple[EpisodeRef, ...]] = {}
     for entry in config.lineup:
         ring = rings.get(entry.show_id)
-        if (
-            ring is not None
-            and ring.episodes
-            and entry.order == "sequential"
-            and entry.start_season is not None
-        ):
-            configured_starts.setdefault(
-                entry.show_id, _start_index(ring, entry, report)
-            )
-
-    history_starts: dict[str, int] = {}
-    for show_id, key in (last_episodes or {}).items():
-        ring = rings.get(show_id)
-        if ring is None:
-            continue
-        index = next(
-            (i for i, episode in enumerate(ring.episodes) if episode.key == key),
-            None,
-        )
-        if index is None:
-            report.warnings.append(
-                f"lineup: prior episode {key} for {show_id} is not in the library; "
-                "starting at the beginning"
-            )
-        else:
-            history_starts[show_id] = (index + 1) % len(ring.episodes)
+        if ring is not None and ring.episodes:
+            walks.setdefault(entry.show_id, walk_order(ring, entry.order))
 
     entries: list[tuple[str, str | None]] = []
     for entry in config.lineup:
@@ -253,13 +285,51 @@ def build_lineup(
             continue
         entries.append((show_id, key))
 
+    # Where each show's walk resumes.
+    #
+    # Two sources, in order of authority. A recorded last-aired episode is the
+    # truth about what actually played, so it wins. Without one -- a fresh
+    # install, or a preview of a day nothing has aired yet -- the position is
+    # derived from the date instead, so consecutive days continue the walk rather
+    # than replaying it from the top. Both are pure functions of their inputs, so
+    # previewing tomorrow still cannot consume tomorrow's episodes.
+    starts: dict[str, int] = {}
+    for position_in_cycle, entry in enumerate(config.lineup):
+        walk = walks.get(entry.show_id)
+        if walk is None:
+            continue
+        key = (last_episodes or {}).get(entry.show_id)
+        if key is not None:
+            position = _walk_position(walk, key)
+            if position is None:
+                report.warnings.append(
+                    f"lineup: prior episode {key} for {entry.show_id} is not in the "
+                    "library; starting at the beginning"
+                )
+            else:
+                starts[entry.show_id] = position + 1
+            continue
+        if day is not None:
+            stride = _plays_per_show(slots_per_day, len(entries), position_in_cycle)
+            # A configured start is an *anchor*, not a fixed offset: it says where
+            # the walk was on `start_date`, so the walk keeps advancing from there
+            # instead of replaying the same episodes every day. Without a
+            # start_date the anchor is the epoch, which is the same idea.
+            anchor = entry.start_date.toordinal() if entry.start_date else 0
+            starts[entry.show_id] = (day.toordinal() - anchor) * stride
+        # A configured start only applies to `sequential`. The random modes are
+        # deliberately unordered, so honouring it would just be a hidden offset.
+        if entry.order == "sequential" and entry.start_season is not None:
+            starts[entry.show_id] += _start_index(rings[entry.show_id], entry, report)
+
     if not entries:
         raise ProgrammingError(
             "the lineup is empty: add a show or a pinned episode on the web page"
         )
 
-    # How many times each show has already been placed, so a show that appears
-    # twice in the lineup walks its ring independently at each position.
+    # How many times each show has already been placed today. Added to the
+    # resumed position so a show appearing twice in the lineup keeps walking
+    # forward instead of replaying the same episode at each appearance.
     placed: dict[str, int] = {}
     for index in range(max(0, slots_per_day)):
         show_id, pinned_key = entries[index % len(entries)]
@@ -275,14 +345,10 @@ def build_lineup(
                 "random",
             )
             position = placed.get(show_id, 0)
-            start_index = history_starts.get(
-                show_id, configured_starts.get(show_id, 0)
-            )
             episode = pick_episode(
                 ring,
                 order,
-                position + (start_index if order == "sequential" else 0),
-                seed_parts=(day.isoformat() if day else "",),
+                starts.get(show_id, 0) + position,
             )
             placed[show_id] = position + 1
         report.slots.append(
@@ -332,34 +398,31 @@ def build_shuffle(
 
     placed: dict[str, int] = {}
     start_positions: dict[str, int] = {}
-    for show_id, key in (last_episodes or {}).items():
-        ring = rings.get(show_id)
-        if ring is None:
+    for position_in_cycle, show_id in enumerate(active):
+        walk = walk_order(rings[show_id], config.shuffle_order)
+        key = (last_episodes or {}).get(show_id)
+        if key is None:
+            # Nothing has aired yet, so derive the position from the date. Without
+            # this every day would replay the walk from the top.
+            if day is not None:
+                stride = _plays_per_show(slots_per_day, len(active), position_in_cycle)
+                start_positions[show_id] = day.toordinal() * stride
             continue
-        index = next(
-            (i for i, episode in enumerate(ring.episodes) if episode.key == key),
-            None,
-        )
-        if index is None:
+        position = _walk_position(walk, key)
+        if position is None:
             report.warnings.append(
                 f"shuffle: prior episode {key} for {show_id} is not in the library; "
                 "starting at the beginning"
             )
         else:
-            start_positions[show_id] = (index + 1) % len(ring.episodes)
+            start_positions[show_id] = position + 1
     for index in range(max(0, slots_per_day)):
         show_id = active[index % len(active)]
         position = placed.get(show_id, 0)
         episode = pick_episode(
             rings[show_id],
             config.shuffle_order,
-            position
-            + (
-                start_positions.get(show_id, 0)
-                if config.shuffle_order == "sequential"
-                else 0
-            ),
-            seed_parts=(day.isoformat() if day else "",),
+            start_positions.get(show_id, 0) + position,
         )
         placed[show_id] = position + 1
         report.slots.append(

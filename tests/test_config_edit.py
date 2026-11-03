@@ -115,7 +115,7 @@ def test_values_come_from_the_file_not_the_defaults(config_dir: Path) -> None:
 def test_dotted_keys_reach_nested_mappings(config_dir: Path) -> None:
     values = read_values(BY_SLUG["bumps"], config_dir)
     assert values["generated.enabled"] is True
-    assert values["generated.max_share"] == 0.25
+    assert values["generated.max_share"] == 0.15
 
 
 # -- validation ------------------------------------------------------------
