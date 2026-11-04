@@ -2121,7 +2121,7 @@ def _activate_staged(
     roots = _request_deploy_paths(paths)
     if progress is not None:
         progress("Checking the staged media files")
-    gone = missing_inputs(roots)
+    gone = missing_inputs(roots, fresh=True)
     if gone:
         raise LookupError(f"{len(gone)} file(s) the staged schedule needs are missing; press Replan")
     if progress is not None:

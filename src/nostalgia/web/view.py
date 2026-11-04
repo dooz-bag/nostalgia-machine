@@ -146,17 +146,14 @@ def plan_for_day(config: RootConfig, catalog: Catalog, paths: Paths, day: date) 
 def _catalog_stamp(catalog: Catalog) -> object:
     """Cheap signal that the library changed, so a rescan invalidates the cache.
 
-    There is no scan counter in the database to read, so this hashes the file
-    mtimes. A ``scan`` rewrites the rows and therefore touches the file, while
-    the scheduler's six-hourly ``emit`` commits too -- neither should serve a
-    stale lineup, and both are far cheaper to detect than a rebuild.
+    Deliberately *not* the catalog file's mtime: playback telemetry writes that
+    file every few seconds, so an mtime key changed on every request and the plan
+    cache never hit -- every page load rebuilt the whole day, ~19s instead of
+    instant. ``Catalog.plan_stamp`` reads only the tables a plan is built from.
     """
-    import os
-
     try:
-        info = os.stat(catalog.path)
-        return (info.st_mtime_ns, info.st_size)
-    except OSError:
+        return catalog.plan_stamp()
+    except Exception:  # noqa: BLE001 - a stamp must never fail a page
         return None
 
 

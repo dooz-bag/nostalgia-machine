@@ -352,7 +352,7 @@ def test_a_launch_that_cannot_work_changes_nothing_and_says_why(paths, config):
         patch.setattr(
             deploy_mod,
             "missing_inputs",
-            lambda roots: [str(paths.root / "media" / "gone.mkv")],
+            lambda roots, **_kwargs: [str(paths.root / "media" / "gone.mkv")],
         )
         patch.setattr(web_pkg.app, "_launch", web_pkg.app._launch)
         response = _client(paths, config).post("/schedule/launch")

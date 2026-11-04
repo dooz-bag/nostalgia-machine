@@ -39,7 +39,38 @@ from .sidecars import (
 )
 from .sidecars import read as read_tags
 
-def _conformed_playback(row) -> tuple[str | None, int]:
+
+class _DirIndex:
+    """Which files exist, answered by listing each directory once.
+
+    ``assets()`` used to ask ``Path.is_file()`` twice per row -- once for the
+    sidecar, once for the conformed copy. On a bind-mounted media tree each of
+    those is a ``stat`` that costs about a millisecond, so the commercials page
+    spent 2.2s of its 2.4s in 2196 of them.
+
+    The rows span only a handful of directories (14 for the ad library, one for
+    the conformed copies), so listing each directory once with ``scandir`` answers
+    every question for the price of a few reads. A directory that cannot be listed
+    is treated as empty, which is the same answer ``is_file()`` would have given.
+    """
+
+    def __init__(self) -> None:
+        self._names: dict[str, frozenset[str]] = {}
+
+    def has(self, path: Path) -> bool:
+        directory = str(path.parent)
+        names = self._names.get(directory)
+        if names is None:
+            try:
+                with os.scandir(directory) as entries:
+                    names = frozenset(entry.name for entry in entries)
+            except OSError:
+                names = frozenset()
+            self._names[directory] = names
+        return path.name in names
+
+
+def _conformed_playback(row, index: _DirIndex | None = None) -> tuple[str | None, int]:
     """``(path, duration_ms)`` of what actually airs for this row.
 
     Falls back to the original unless the conformed copy is recorded *and* still on
@@ -51,8 +82,10 @@ def _conformed_playback(row) -> tuple[str | None, int]:
         length = row["conformed_duration_ms"]
     except (IndexError, KeyError):
         return None, row["duration_ms"]
-    if conformed and length and Path(conformed).is_file():
-        return str(conformed), int(length)
+    if conformed and length:
+        exists = index.has(Path(conformed)) if index else Path(conformed).is_file()
+        if exists:
+            return str(conformed), int(length)
     return None, row["duration_ms"]
 
 
@@ -106,23 +139,27 @@ def _migrate(connection: sqlite3.Connection) -> None:
     columns = {
         row["name"] for row in connection.execute("PRAGMA table_info(media)")
     }
+    changed = False
     if "burned_in_mark" not in columns:
         connection.execute("ALTER TABLE media ADD COLUMN burned_in_mark INTEGER")
         # Deliberately left NULL for existing rows: "not examined" must not be
         # confused with "examined and absent", or every episode in a catalog that
         # predates this column would be treated as needing a mark.
+        changed = True
     if "disabled" not in columns:
         # DEFAULT 0, not NULL: an existing library has nothing disabled, and a
         # NULL would have to be handled at every read site.
         connection.execute(
             "ALTER TABLE media ADD COLUMN disabled INTEGER NOT NULL DEFAULT 0"
         )
+        changed = True
     if "contains_multiple_spots" not in columns:
         # NULL for existing rows: "not examined", so a catalog that predates the
         # check keeps airing everything until `nostalgia scan --detect-spots` runs.
         connection.execute(
             "ALTER TABLE media ADD COLUMN contains_multiple_spots INTEGER"
         )
+        changed = True
     for name, ddl in (
         ("conformed_path", "TEXT"),
         ("conformed_duration_ms", "INTEGER"),
@@ -132,11 +169,22 @@ def _migrate(connection: sqlite3.Connection) -> None:
         # airs exactly as before until `nostalgia conform` runs.
         if name not in columns:
             connection.execute(f"ALTER TABLE media ADD COLUMN {name} {ddl}")
-    connection.execute(
-        "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
-        (str(SCHEMA_VERSION),),
-    )
-    connection.commit()
+            changed = True
+
+    # Only write the version when it actually differs. `INSERT OR REPLACE` writes
+    # even when the value is unchanged, and this runs on *every* connection -- so
+    # it bumped the file's mtime on every open. The web page keys its plan cache on
+    # that mtime, so the cache never hit and every request rebuilt the whole day's
+    # plan: ~19s per page load instead of instant.
+    row = connection.execute(
+        "SELECT value FROM meta WHERE key = 'schema_version'"
+    ).fetchone()
+    if changed or row is None or row["value"] != str(SCHEMA_VERSION):
+        connection.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema_version', ?)",
+            (str(SCHEMA_VERSION),),
+        )
+        connection.commit()
 
 
 SCHEMA_VERSION = 4
@@ -933,8 +981,9 @@ class Catalog:
             ORDER BY m.kind, m.key
         """
         out: list[Asset] = []
+        index = _DirIndex()
         for row in self.connect().execute(query, tuple(kinds)):
-            asset = self._asset_from_row(row)
+            asset = self._asset_from_row(row, index)
             if asset is None:
                 continue
             if asset.disabled and not include_disabled:
@@ -1034,10 +1083,12 @@ class Catalog:
             )
         return cursor.rowcount > 0
 
-    def _asset_from_row(self, row: sqlite3.Row) -> Asset | None:
+    def _asset_from_row(
+        self, row: sqlite3.Row, index: _DirIndex | None = None
+    ) -> Asset | None:
         path = Path(row["path"])
         try:
-            sidecar = read_tags(path)
+            sidecar = read_tags(path, index=index)
         except SidecarError as exc:
             self._note_issue(path, str(exc))
             sidecar = None
@@ -1074,7 +1125,7 @@ class Catalog:
             brand = None
 
         get = row.__getitem__ if not hasattr(row, "get") else row.get
-        air_path, duration_ms = _conformed_playback(row)
+        air_path, duration_ms = _conformed_playback(row, index)
         return Asset(
             key=row["key"],
             path=str(path),
@@ -1498,6 +1549,40 @@ class Catalog:
 
     def set_json_state(self, key: str, value: object) -> None:
         self.set_state(key, json.dumps(value, sort_keys=True))
+
+    def plan_stamp(self) -> tuple:
+        """A cheap fingerprint of everything that can change a *plan*.
+
+        The web page caches a day's plan and needs to know when to throw it away.
+        Hashing the catalog file's mtime was the obvious signal, but the file is
+        also written by playback telemetry every few seconds, so the cache never
+        hit and every page load rebuilt the whole day: ~19s instead of instant.
+
+        This reads the tables a plan is actually built from -- the library, its
+        tags, and the airing history that seeds cooldowns -- and ignores the ones
+        that only record what happened (``playback_events``, ``state``,
+        ``scan_issues``). It is a handful of aggregate queries, far cheaper than
+        the rebuild it avoids.
+        """
+        connection = self.connect()
+        # `SUM(mtime_ns)` overflows a 64-bit integer on a library this size, so the
+        # mtime contributes as a max plus a bounded residue sum: together they
+        # change when any file is re-probed, without the overflow.
+        media = connection.execute(
+            "SELECT COUNT(*), COALESCE(MAX(mtime_ns), 0), "
+            "COALESCE(SUM(mtime_ns % 1000003), 0), "
+            "COALESCE(SUM(size_bytes), 0), COALESCE(SUM(disabled), 0), "
+            "COALESCE(SUM(contains_multiple_spots), 0), "
+            "COALESCE(SUM(LENGTH(conformed_sig)), 0) FROM media"
+        ).fetchone()
+        tags = connection.execute(
+            "SELECT COUNT(*), COALESCE(SUM(LENGTH(subject)), 0), "
+            "COALESCE(SUM(LENGTH(position)), 0) FROM asset_tags"
+        ).fetchone()
+        airings = connection.execute(
+            "SELECT COUNT(*), COALESCE(MAX(start_ms), 0) FROM airings"
+        ).fetchone()
+        return (tuple(media), tuple(tags), tuple(airings))
 
 
 BUMP_POSITION_RE = re.compile(

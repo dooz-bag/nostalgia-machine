@@ -271,6 +271,53 @@ def test_the_request_file_is_not_a_day(tmp_path):
     assert [path.name for path in D.staged_playouts(roots)] == ["20261030T000000.json"]
 
 
+def test_a_missing_file_is_reported_once_per_file(tmp_path):
+    """A staged day names the same file many times; the count must be of files.
+
+    The page says "N file(s) the staged schedule needs are missing", so counting
+    item references rather than distinct files overstated it -- 1784 instead of
+    1144 on a real three-day stage.
+    """
+    roots = _roots(tmp_path)
+    gone = str(tmp_path / "media" / "gone.mkv")
+    item = {
+        "id": "20261030-0001-ad",
+        "start": "2026-10-30T21:00:00+09:00",
+        "finish": "2026-10-30T21:00:30+09:00",
+        "source": {"source_type": "local", "path": gone},
+    }
+    _write(roots.pending.playout_dir / "20261030T000000.json", {"items": [item, item, item]})
+    assert D.missing_inputs(roots) == [gone]
+
+
+def test_missing_inputs_is_cached_until_the_stage_changes(tmp_path):
+    """The check stats every staged file, so the page must not repeat it."""
+    roots = _roots(tmp_path)
+    gone = str(tmp_path / "media" / "gone.mkv")
+    _write(
+        roots.pending.playout_dir / "20261030T000000.json",
+        {
+            "items": [
+                {
+                    "id": "20261030-0001-ad",
+                    "start": "2026-10-30T21:00:00+09:00",
+                    "finish": "2026-10-30T21:00:30+09:00",
+                    "source": {"source_type": "local", "path": gone},
+                }
+            ]
+        },
+    )
+    assert D.missing_inputs(roots) == [gone]
+
+    # The file appears, but the cached answer stands until the stage is rewritten.
+    (tmp_path / "media").mkdir(exist_ok=True)
+    (tmp_path / "media" / "gone.mkv").write_bytes(b"")
+    assert D.missing_inputs(roots) == [gone]
+
+    # `fresh=True` is the interlock path, and must always re-check.
+    assert D.missing_inputs(roots, fresh=True) == []
+
+
 def test_a_deploy_survives_a_round_trip(tmp_path):
     roots = _roots(tmp_path)
     deploy = D.Deploy(staged_at_ms=5, switch_at_ms=9, days=("2026-10-30",), fingerprint="abc123")

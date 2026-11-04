@@ -161,14 +161,28 @@ def fingerprint(config) -> str:
     return hashlib.sha256(config.model_dump_json().encode("utf-8")).hexdigest()[:16]
 
 
-def missing_inputs(roots: Roots) -> list[str]:
+def missing_inputs(roots: Roots, *, fresh: bool = False) -> list[str]:
     """Local files a staged document names that are no longer on disk.
 
     The case this catches: a merged break built by the stage was pruned by a later
     live build, so launching would hand the streamer a path to nothing. Better to
     rebuild the stage than to air a black rectangle.
+
+    Each distinct path is checked once and reported once. A staged day names ~1800
+    items but only ~1100 distinct files, and every check is a ``stat`` -- slow
+    enough over a bind-mounted media tree that the web page spent most of its load
+    time here. The result is cached against the staged files' identity, because
+    this drives a warning banner; ``launch`` passes ``fresh=True`` so the actual
+    interlock always re-checks.
     """
+    stamp = _staged_stamp(roots)
+    if not fresh:
+        cached = _MISSING_CACHE.get(stamp)
+        if cached is not None:
+            return list(cached)
+
     gone: list[str] = []
+    checked: dict[str, bool] = {}
     for path in staged_playouts(roots):
         try:
             document = json.loads(path.read_text(encoding="utf-8"))
@@ -178,9 +192,34 @@ def missing_inputs(roots: Roots) -> list[str]:
         for entry in document.get("items", ()):
             source = entry.get("source") or {}
             location = source.get("path")
-            if source.get("source_type") == "local" and location and not Path(location).is_file():
+            if source.get("source_type") != "local" or not location:
+                continue
+            present = checked.get(location)
+            if present is None:
+                present = checked[location] = Path(location).is_file()
+            if not present and location not in gone:
                 gone.append(str(location))
+
+    _MISSING_CACHE.clear()
+    _MISSING_CACHE[stamp] = tuple(gone)
     return gone
+
+
+_MISSING_CACHE: dict[tuple, tuple[str, ...]] = {}
+"""Last ``missing_inputs`` result, keyed by the staged files' identity."""
+
+
+def _staged_stamp(roots: Roots) -> tuple:
+    """Cheap identity for the staged playouts: names, sizes and mtimes."""
+    stamp: list[tuple] = []
+    for path in staged_playouts(roots):
+        try:
+            info = path.stat()
+        except OSError:
+            stamp.append((path.name, None, None))
+            continue
+        stamp.append((path.name, info.st_size, info.st_mtime_ns))
+    return tuple(stamp)
 
 
 def request_path(roots: Roots) -> Path:
