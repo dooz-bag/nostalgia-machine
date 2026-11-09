@@ -17,11 +17,12 @@ Two design rules keep this honest:
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Sequence
+from typing import TYPE_CHECKING, Iterator, Sequence
 
 import yaml
 
@@ -252,6 +253,151 @@ def _slug(text: str) -> str:
     return "".join(char if char.isalnum() else "-" for char in text.lower()).strip("-")
 
 
+#: How many beds to try before accepting a silent card. Enough to step past a
+#: quiet intro or a gap in a track without turning one card into a long search.
+BED_ATTEMPTS = 4
+
+
+def _bed_attempts(
+    spec: BumpSpec,
+    music: "MusicLibrary | None",
+    duration_ms: int,
+    ffmpeg: str | None,
+) -> Iterator[tuple[BumpSpec, str | None]]:
+    """The card, with each bed it could use, in the order to try them.
+
+    The first entry whose filter is not ``None`` is the one rendered. A silent
+    stretch is common enough -- a spare mid-section of a track, the tail of a card
+    -- that giving up on the first one is how a bed quietly becomes silence.
+
+    A bed the spec already names is tried first and exactly: whoever chose it gets
+    what they asked for whenever it has sound. Only when it is silent does the
+    library offer its next choice, which is recorded in the new ``music_id`` so the
+    card still says what it contains.
+
+    Lazy on purpose: measuring a bed costs an ffmpeg pass, and the caller stops at
+    the first one with sound, so the usual card is measured once rather than four
+    times.
+    """
+    from .music import segment_filter
+
+    length = duration_ms / 1000
+    seen: set[str] = set()
+
+    def attempt(candidate: BumpSpec) -> tuple[BumpSpec, str | None]:
+        sound = (
+            segment_filter(
+                Path(candidate.music_path or ""),
+                candidate.music_offset,
+                length,
+                ffmpeg,
+            )
+            if candidate.music_path and ffmpeg
+            else None
+        )
+        return candidate, sound
+
+    if spec.music_path:
+        seen.add(str(spec.music_path))
+        yield attempt(spec)
+    if music is not None and music:
+        identity = (spec.subject, spec.position, spec.text or "")
+        offered = 0
+        for _tier, bed in music.candidates(
+            year=spec.year, seed_parts=identity, subject=spec.subject
+        ):
+            if offered >= BED_ATTEMPTS:
+                break
+            if str(bed.path) in seen:
+                continue
+            seen.add(str(bed.path))
+            offered += 1
+            offset = music.offset_for(bed, length, identity)
+            yield attempt(
+                replace(
+                    spec,
+                    music_path=str(bed.path),
+                    music_offset=offset,
+                    music_id=f"{bed.path.name}@{offset:g}",
+                )
+            )
+
+#: A card whose loudest sample is below this is silent. Measured on real cards and
+#: re-encodes: an audible bed lands around -6 to -10 dBFS peak, and the silent
+#: fallback sits near -91.
+AUDIBLE_PEAK_DB = -60.0
+
+
+def _has_audible_audio(path: Path, ffmpeg: str | None) -> bool:
+    """Whether *path* actually has sound on it.
+
+    Deliberately a peak measurement rather than "is there an audio stream": every
+    card has one (a silent track is what makes a break joinable), so the presence
+    of a stream says nothing about whether anything is on it.
+    """
+    if ffmpeg is None:
+        return True  # cannot tell; assume the file is what its name says
+    try:
+        result = subprocess.run(
+            [ffmpeg, "-hide_banner", "-nostats", "-i", str(path),
+             "-map", "0:a:0?", "-af", "volumedetect", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=60, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    match = re.search(r"max_volume:\s*(-?[\d.]+|-inf) dB", result.stderr)
+    if not match:
+        return False
+    return match.group(1) != "-inf" and float(match.group(1)) > AUDIBLE_PEAK_DB
+
+
+def generated_sidecar_is_ours(path: Path) -> bool:
+    """Whether *path* is a card this renderer wrote.
+
+    The prune is destructive, so it must never touch a file the user put in the
+    folder by hand or pointed ``--out`` at. The sidecar is the proof: every rendered
+    card gets one that says ``source: generated``, and nothing else does.
+    """
+    from .sidecars import read as read_tags
+
+    try:
+        tag = read_tags(path)
+    except Exception:  # noqa: BLE001 - an unreadable sidecar is not proof of anything
+        return False
+    return tag is not None and tag.source == "generated"
+
+
+def prune_generated(out_dir: Path, keep: set[str]) -> list[Path]:
+    """Delete rendered cards whose cache key is no longer wanted.
+
+    Cards accumulate: changing a line, a bed or a style leaves the old render
+    behind, and it stays catalogued and therefore airs. Pruning by key is what
+    keeps the folder equal to the current spec set, which is also what makes the
+    audio check on reuse meaningful -- a card that is no longer rendered cannot be
+    a stale silent one either.
+
+    Only files carrying a generated sidecar are candidates, so this can never
+    remove a real bump that happens to sit in an ``--out`` folder.
+    """
+    if not out_dir.is_dir():
+        return []
+    kept = {value.split(":", 1)[-1] for value in keep}
+    removed: list[Path] = []
+    for path in sorted(out_dir.glob("*.mp4")):
+        stem = path.stem
+        if stem in kept:
+            continue
+        if not generated_sidecar_is_ours(path):
+            continue
+        try:
+            path.unlink()
+        except OSError:
+            continue
+        path.with_name(path.name + ".tags.json").unlink(missing_ok=True)
+        removed.append(path)
+    return removed
+
+
 def render(
     spec: BumpSpec,
     *,
@@ -261,36 +407,79 @@ def render(
     height: int = 720,
     ffmpeg: str | None = None,
     force: bool = False,
+    music: "MusicLibrary | None" = None,
 ) -> Asset:
-    """Render (or reuse) one bump card and return it as a pool asset."""
-    style = pack.style_for(spec.year)
-    key = cache_key(spec, style, width, height)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    target = out_dir / f"{key.split(':', 1)[1]}.mp4"
+    """Render (or reuse) one bump card and return it as a pool asset.
 
+    *music* is consulted when the spec carries no bed of its own, so a caller that
+    only knows what the card should *say* still gets one that sounds like the
+    channel. A cached card is verified on reuse: a card rendered before beds
+    existed is silent on disk, and without the check it would stay that way
+    forever.
+    """
+    style = pack.style_for(spec.year)
     duration_ms = style.hold_ms
     if spec.max_seconds is not None:
         duration_ms = min(duration_ms, int(spec.max_seconds * 1000) - 1)
 
-    if not target.exists() or force:
-        binary = ffmpeg or _find_ffmpeg()
-        if binary is None:
-            raise BumpGenError(
-                "ffmpeg is required to render bumps; install it or set ffmpeg_path"
-            )
-        audio_filter = None
-        if spec.music_path:
-            from .music import segment_filter
-
-            # None when the bed is silent in this stretch: no bed beats hiss.
-            audio_filter = segment_filter(
-                Path(spec.music_path), spec.music_offset, duration_ms / 1000, binary
-            )
-        command = _build_command(
-            spec, style, pack, width=width, height=height, duration_ms=duration_ms,
-            audio_filter=audio_filter,
+    binary = ffmpeg or _find_ffmpeg()
+    if binary is None and (force or music is not None):
+        raise BumpGenError(
+            "ffmpeg is required to render bumps; install it or set ffmpeg_path"
         )
-        _run(binary, command, target)
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    def target_for(candidate: BumpSpec) -> tuple[str, Path]:
+        key = cache_key(candidate, style, width, height)
+        return key, out_dir / f"{key.split(':', 1)[1]}.mp4"
+
+    def reusable(path: Path, candidate: BumpSpec) -> bool:
+        """Whether the card on disk is the card we would render now.
+
+        The key says what the card should contain; the peak says whether it does.
+        A card rendered before beds existed matches its key and is silent, which
+        without the check would stay that way forever.
+
+        A card with no bed in its key is only final when there is no bed to be had:
+        if the library has one now, the keyless file is what an earlier, bed-less
+        run left behind and the card should be rendered again with sound.
+        """
+        if force or not path.exists():
+            return False
+        if candidate.music_id:
+            return _has_audible_audio(path, binary)
+        return music is None
+
+    # The bed is chosen before the key is built, because the key names the bed: two
+    # cards that say the same thing over different music are different files, and a
+    # fallback bed has to keep the same name on the next run or the cache misses.
+    # A card already on disk needs no search, though -- its own bed is in its key --
+    # so the common case costs one peak measurement rather than a bed hunt.
+    audio_filter = None
+    key, target = target_for(spec)
+    if not reusable(target, spec):
+        chosen = next(
+            ((candidate, sound) for candidate, sound in
+             _bed_attempts(spec, music, duration_ms, binary) if sound is not None),
+            None,
+        )
+        if chosen is not None:
+            spec, audio_filter = chosen
+            key, target = target_for(spec)
+        # With no bed that has sound, the card on disk is already the best this
+        # channel can do: re-rendering it would produce the same silent file on
+        # every run, which is a slow way to change nothing.
+        if not reusable(target, spec) and (chosen is not None or not target.exists()):
+            if binary is None:
+                raise BumpGenError(
+                    "ffmpeg is required to render bumps; install it or set ffmpeg_path"
+                )
+            command = _build_command(
+                spec, style, pack, width=width, height=height, duration_ms=duration_ms,
+                audio_filter=audio_filter,
+            )
+            _run(binary, command, target)
 
     # The sidecar is what makes the card legible to the catalog: a generated
     # folder is not a show, so folder inference would tag every card "generated".
@@ -329,7 +518,14 @@ def render_pool(
     height: int = 720,
     ffmpeg: str | None = None,
     force: bool = False,
+    music: "MusicLibrary | None" = None,
+    prune: bool = True,
 ) -> list[Asset]:
+    """Render every card in *specs*, and (by default) drop the ones no longer in it.
+
+    ``prune`` is off when rendering into a folder somebody else owns: the caller
+    asked for cards, not for a cleanup of a directory it may share with real media.
+    """
     assets: list[Asset] = []
     for spec in specs:
         try:
@@ -342,10 +538,13 @@ def render_pool(
                     height=height,
                     ffmpeg=ffmpeg,
                     force=force,
+                    music=music,
                 )
             )
         except BumpGenError:
             raise
+    if prune:
+        prune_generated(out_dir, {asset.key for asset in assets})
     return assets
 
 
@@ -716,7 +915,7 @@ def _pick_distinct(pool: Sequence[str], count: int, seed: Sequence[object]) -> l
 def _with_music(spec: BumpSpec, music: "MusicLibrary", year: int | None, hold_s: float) -> BumpSpec:
     """Choose the bed for one card, deterministically from what the card is."""
     identity = (spec.subject, spec.position, spec.text or "")
-    bed = music.pick(year=year, seed_parts=identity)
+    bed = music.pick(year=year, seed_parts=identity, subject=spec.subject)
     if bed is None:
         return spec
     offset = music.offset_for(bed, hold_s, identity)
@@ -727,12 +926,16 @@ def _with_music(spec: BumpSpec, music: "MusicLibrary", year: int | None, hold_s:
 
 
 __all__ = [
+    "AUDIBLE_PEAK_DB",
+    "BED_ATTEMPTS",
     "BumpGenError",
     "BumpSpec",
     "EraPack",
     "StylePack",
     "cache_key",
+    "generated_sidecar_is_ours",
     "load_era_packs",
+    "prune_generated",
     "render",
     "render_pool",
     "specs_for_schedule",

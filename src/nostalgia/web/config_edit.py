@@ -528,6 +528,15 @@ SETTINGS: tuple[SettingsFile, ...] = (
                         "there, cards are silent.",
                         default=True,
                     ),
+                    Field(
+                        "generated.music_from_bumps",
+                        "Borrow audio from your own bumps",
+                        BOOL,
+                        help="Use the real bumps as beds: a card about a show is scored with a "
+                        "bump about that show, anything else with a neutral card. A bump about "
+                        "a different show is never used, so no voice names the wrong programme.",
+                        default=True,
+                    ),
                 ),
             ),
             Section(

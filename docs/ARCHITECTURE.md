@@ -371,11 +371,21 @@ or what is next. A line that names a show other than its own is refused outright
 This is a structural check, not a language model's judgement, so it runs the same
 way on seed lines, proposals and at plan time.
 
-Music follows the same rule. Beds come from the user's own files or are harvested
-from their own text-on-black bumps; a bed is chosen deterministically from its
-position and era and levelled over the segment that will be heard. A bed that is
-near-silent is dropped rather than boosted, because normalising it makes the hiss
-the music.
+Music follows the same rule. Beds come from the user's own files, from their own
+text-on-black bumps, or — with `generated.music_from_bumps` — from the audio of
+their archive bumps read straight out of the bump files. A bed is chosen
+deterministically from its position and era and levelled over the segment that
+will be heard. A bed that is near-silent is dropped rather than boosted, because
+normalising it makes the hiss the music.
+
+Beds taken from bumps are ranked by subject, because a card that says *Aqua Teen*
+should not be bedded with the music of *Futurama*: a card uses a bump of its own
+show first, then a bump that names no show, and never a bump of another show. The
+renderer also verifies what it cached. A card is keyed by its content, so a card
+rendered before beds existed would otherwise stay silent forever; instead the
+renderer measures the peak of a cached card, re-renders it when it is silent, and
+prunes generated cards that no longer belong to the plan. A card with no bed at
+all still gets a silent audio track, so breaks stay stream-copy joinable.
 
 ## A generated card must not pass for an archive card
 

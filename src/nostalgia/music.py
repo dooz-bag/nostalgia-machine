@@ -5,14 +5,19 @@ electronic, odd -- under the text. A silent generated card is the biggest tell t
 it is not the real thing.
 
 This project does not ship music and will not fetch any: the tracks on those cards
-are other people's work, and the repository is meant to be shared. There are two
-sources, both of them yours and both kept under ``media/`` (which is never
+are other people's work, and the repository is meant to be shared. There are three
+sources, all of them yours and all kept under ``media/`` (which is never
 committed):
 
 * **Harvested.** The real bumps in your own archive are mostly show footage, but a
   minority are text on black with a music bed and nothing else. :func:`harvest`
   finds those and extracts just the audio. They are, by construction, the sound the
   real thing used.
+* **The bumps themselves.** :func:`load_bump_beds` reads the audio straight out of
+  the archive bumps, so a card can be bedded even when nothing was harvested. This
+  is the widest source: harvesting only ever found beds in text-on-black cards,
+  while every bump has audio. Beds carry the show they came from, and a card only
+  borrows from its own show or from a bump that names no show.
 * **Dropped in.** Anything you put in ``media/music/`` -- a track you own, a library
   loop -- is used as is.
 
@@ -59,6 +64,14 @@ class Bed:
     duration_s: float
     era: int | None = None
     source: str = "folder"
+    subject: str | None = None
+    """The show this bed came from, when it came from a real bump.
+
+    A card may borrow the sound of a bump about its *own* show, or of a neutral
+    one. A bed from a different show is never used: those bumps are mostly a
+    character talking, and a voice naming another programme under a card about
+    this one is a worse lie than silence. ``None`` means "fits any card".
+    """
 
 
 @dataclass
@@ -69,21 +82,83 @@ class MusicLibrary:
     def __bool__(self) -> bool:
         return bool(self.beds)
 
-    def pick(self, *, year: int | None, seed_parts: Sequence[object] = ()) -> Bed | None:
+    def pick(
+        self,
+        *,
+        year: int | None,
+        seed_parts: Sequence[object] = (),
+        subject: str | None = None,
+        allow_other: bool = False,
+    ) -> Bed | None:
         """A bed for one card. Same inputs, same bed -- always.
 
-        A bed tagged with an era is preferred when it is near the card's year, so a
-        2003 card sounds like 2003; untagged beds (anything you dropped in) fit
-        anywhere. If nothing is near, any bed is better than silence.
+        Preference order: a bed from the card's own show, then a neutral bed, then
+        (only with *allow_other*) anything. Within a tier an era match wins, so a
+        2003 card sounds like 2003, and untagged beds fit anywhere.
+
+        Only the *best non-empty* tier is drawn from, and any bed in it is equally
+        likely. Falling through the tiers per card would mean a channel with show
+        bumps never used a neutral one, and neutral beds are what a real break
+        mostly sounded like anyway.
+
+        ``None`` when nothing is eligible: a card about a show with no bumps of its
+        own and no neutral beds falls back to silence rather than borrowing a
+        different show's dialogue.
+        """
+        candidates = self.candidates(
+            year=year, seed_parts=seed_parts, subject=subject, allow_other=allow_other
+        )
+        if not candidates:
+            return None
+        tier = candidates[0][0]
+        pool = [bed for tier_of, bed in candidates if tier_of == tier]
+        return rng_for("bed", year or 0, *seed_parts, "tier", tier).choice(pool)
+
+    def candidates(
+        self,
+        *,
+        year: int | None,
+        seed_parts: Sequence[object] = (),
+        subject: str | None = None,
+        allow_other: bool = False,
+    ) -> list[tuple[str, Bed]]:
+        """Every eligible bed for a card as ``(tier, bed)``, best first.
+
+        The list is what a re-render walks when the first bed turns out to be silent
+        in the stretch it would need: the order is deterministic, so the fallback is
+        reproducible rather than a different card on every run.
         """
         usable = [bed for bed in self.beds if bed.duration_s >= MIN_BED_SECONDS]
         if not usable:
-            return None
+            return []
         if year is not None:
             near = [b for b in usable if b.era is None or abs(b.era - year) <= 2]
             usable = near or usable
-        ordered = sorted(usable, key=lambda bed: str(bed.path))
-        return rng_for("bed", year or 0, *seed_parts).choice(ordered)
+
+        tiers: list[tuple[str, list[Bed]]] = []
+        if subject:
+            tiers.append(("show", [b for b in usable if b.subject == subject]))
+        tiers.append(("neutral", [b for b in usable if b.subject is None]))
+        if allow_other:
+            tiers.append(
+                (
+                    "other",
+                    [
+                        b
+                        for b in usable
+                        if b.subject is not None and b.subject != subject
+                    ],
+                )
+            )
+
+        ordered: list[tuple[str, Bed]] = []
+        for name, tier in tiers:
+            if not tier:
+                continue
+            pool = sorted(tier, key=lambda bed: str(bed.path))
+            rng_for("bed-order", name, year or 0, *seed_parts).shuffle(pool)
+            ordered.extend((name, bed) for bed in pool)
+        return ordered
 
     def offset_for(self, bed: Bed, length_s: float, seed_parts: Sequence[object] = ()) -> float:
         """Where in the bed to start, so two cards on one track do not match."""
@@ -130,6 +205,78 @@ def music_roots(media_root: Path) -> list[Path]:
     return [media_root / "music", media_root / "derived" / "music"]
 
 
+def _subject_from_source(source: object, path: Path, root: Path) -> str | None:
+    """Which show a bed came from, if any.
+
+    A harvest records the bump it was taken from (``harvested:bump:<show>/<file>``),
+    which is the only reliable record: the bed itself is written flat into
+    ``harvested/`` so its own folder says nothing. Files you drop in have no
+    subject unless you put them in a folder named after a show.
+    """
+    from .sidecars import subject_from_folder
+
+    text = str(source or "")
+    if text.startswith("harvested:"):
+        key = text.split("harvested:", 1)[1]
+        _, separator, rest = key.partition(":")  # "bump" then the relative path
+        if separator:
+            head = rest.split("/", 1)[0]
+            return subject_from_folder(head)
+    try:
+        head = path.relative_to(root).parts[0]
+    except (ValueError, IndexError):
+        return None
+    return subject_from_folder(head) if head != path.name else None
+
+
+def load_bump_beds(
+    assets: Iterable, *, min_seconds: float = MIN_BED_SECONDS
+) -> list[Bed]:
+    """Beds taken from the real bumps themselves.
+
+    The archive bumps *are* the sound the channel is trying to reproduce, and using
+    the files directly needs no extraction step and no second index to go stale:
+    ffmpeg reads the audio of a video input as readily as of an ``.m4a``.
+
+    Only real cards are considered (a generated card has nothing of its own to
+    borrow) and only ones long enough to cover a card. Each bed remembers the show
+    it came from, so a card about a show is never scored with another show's
+    dialogue.
+    """
+    beds: list[Bed] = []
+    seen: set[Path] = set()
+    for asset in assets:
+        if getattr(asset, "is_generated", False):
+            continue
+        path = Path(str(getattr(asset, "path", "") or ""))
+        if not path.is_file() or path in seen:
+            continue
+        seconds = float(getattr(asset, "duration_ms", 0) or 0) / 1000.0
+        if seconds < min_seconds:
+            continue
+        seen.add(path)
+        beds.append(
+            Bed(
+                path=path,
+                duration_s=seconds,
+                era=getattr(asset, "era_from", None),
+                source=f"bump:{getattr(asset, 'key', path.name)}",
+                # A neutral bump is stored with the literal subject "neutral", which
+                # is a *category*, not a show: it fits any card.
+                subject=_show_of(asset),
+            )
+        )
+    return beds
+
+
+def _show_of(asset: object) -> str | None:
+    """The show a bump belongs to, or ``None`` when it names no show."""
+    subject = getattr(asset, "subject", None)
+    if not subject or str(subject).lower() in ("neutral", "none", "null", "-"):
+        return None
+    return str(subject)
+
+
 def load_library(
     root: Path | Sequence[Path] | None, *, ffprobe: str | None = None
 ) -> MusicLibrary:
@@ -164,7 +311,8 @@ def _load_root(root: Path, ffprobe: str | None) -> list[Bed]:
             continue
         beds.append(
             Bed(path=path, duration_s=float(entry["duration"]), era=entry.get("era"),
-                source=entry.get("source", "folder"))
+                source=entry.get("source", "folder"),
+                subject=_subject_from_source(entry.get("source"), path, root))
         )
     if changed:
         try:
@@ -338,6 +486,7 @@ __all__ = [
     "MusicLibrary",
     "analyse_bump",
     "harvest",
+    "load_bump_beds",
     "load_library",
     "music_roots",
     "segment_filter",

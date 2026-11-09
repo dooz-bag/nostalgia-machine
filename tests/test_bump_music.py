@@ -177,8 +177,9 @@ def test_only_dark_cards_with_a_real_bed_qualify():
 
 
 class _Asset:
-    def __init__(self, path: Path, key: str, era=2003, generated=False):
+    def __init__(self, path: Path, key: str, era=2003, generated=False, subject="athf", ms=15_000):
         self.path, self.key, self.era_from, self.is_generated = str(path), key, era, generated
+        self.subject, self.duration_ms = subject, ms
 
 
 def test_harvest_takes_text_cards_and_leaves_show_footage_alone(tmp_path: Path, monkeypatch):
@@ -381,3 +382,235 @@ def test_a_plain_card_still_prints_the_position_word_and_title(pack):
     vf = _command(pack, G.BumpSpec(subject="athf", position="NEXT", year=2003, show_title="Futurama"))
     text = " ".join(vf)
     assert "FUTURAMA" in text.upper()
+
+
+# -- borrowing the audio of the real bumps ------------------------------------------------
+
+
+def _bump(name: str, subject: str | None = "athf", era: int | None = 2003, ms: int = 15_000):
+    return _Asset(Path("/b") / name, f"bump:{subject or 'neutral'}/{name}", era=era, subject=subject, ms=ms)
+
+
+def test_a_card_prefers_a_bed_from_its_own_show_then_a_neutral_one():
+    library = _library(
+        M.Bed(path=Path("/m/other.m4a"), duration_s=12, subject="futurama"),
+        M.Bed(path=Path("/m/athf.m4a"), duration_s=12, subject="athf"),
+        M.Bed(path=Path("/m/any.m4a"), duration_s=12, subject=None),
+    )
+    chosen = {library.pick(year=2003, seed_parts=(i,), subject="athf").path.name for i in range(40)}
+    assert chosen == {"athf.m4a"}, "another show's dialogue is never laid under this card"
+    with_neutral_only = _library(
+        M.Bed(path=Path("/m/other.m4a"), duration_s=12, subject="futurama"),
+        M.Bed(path=Path("/m/any.m4a"), duration_s=12, subject=None),
+    )
+    assert {
+        with_neutral_only.pick(year=2003, seed_parts=(i,), subject="athf").path.name
+        for i in range(40)
+    } == {"any.m4a"}
+
+
+def test_a_show_with_no_beds_of_its_own_still_gets_a_neutral_one():
+    library = _library(
+        M.Bed(path=Path("/m/other.m4a"), duration_s=12, subject="futurama"),
+        M.Bed(path=Path("/m/any.m4a"), duration_s=12, subject=None),
+    )
+    assert library.pick(year=2003, subject="sealab").path.name == "any.m4a"
+
+
+def test_with_no_neutral_bed_a_foreign_show_is_still_refused():
+    """Silence is better than a voice naming the wrong programme."""
+    library = _library(M.Bed(path=Path("/m/other.m4a"), duration_s=12, subject="futurama"))
+    assert library.pick(year=2003, subject="sealab") is None
+    assert library.pick(year=2003, subject="sealab", allow_other=True).path.name == "other.m4a"
+
+
+def test_the_alternates_are_ordered_so_a_retry_is_reproducible():
+    library = _library(*(_bed(f"{i}.m4a") for i in range(6)))
+    first = [bed.path.name for _tier, bed in library.candidates(year=2003, seed_parts=("x", "NEXT"))]
+    again = [bed.path.name for _tier, bed in library.candidates(year=2003, seed_parts=("x", "NEXT"))]
+    assert first == again and len(set(first)) == 6, "every bed offered once, same order each run"
+
+
+def test_a_bed_remembers_the_show_of_the_bump_it_came_from(tmp_path: Path, monkeypatch):
+    harvested = tmp_path / "derived" / "music" / "harvested"
+    harvested.mkdir(parents=True)
+    (harvested / "card.m4a").write_bytes(b"x")
+    (tmp_path / "derived" / "music" / "index.json").write_text(
+        '{"files": {"harvested/card.m4a": {"size": 1, "duration": 12.0,'
+        ' "source": "harvested:bump:sealab-2021/card.mp4"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(M, "_duration", lambda path, ffprobe: 12.0)
+    (bed,) = M.load_library(tmp_path / "derived" / "music", ffprobe="ffprobe").beds
+    assert bed.subject == "sealab-2021", "the harvest already recorded the show; use it"
+
+
+def test_a_bed_harvested_from_a_neutral_bump_has_no_subject(tmp_path: Path, monkeypatch):
+    harvested = tmp_path / "derived" / "music" / "harvested"
+    harvested.mkdir(parents=True)
+    (harvested / "card.m4a").write_bytes(b"x")
+    (tmp_path / "derived" / "music" / "index.json").write_text(
+        '{"files": {"harvested/card.m4a": {"size": 1, "duration": 12.0,'
+        ' "source": "harvested:bump:neutral/card.mp4"}}}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(M, "_duration", lambda path, ffprobe: 12.0)
+    (bed,) = M.load_library(tmp_path / "derived" / "music", ffprobe="ffprobe").beds
+    assert bed.subject is None, "a neutral card fits any show"
+
+
+def test_real_bumps_become_beds_and_generated_cards_are_never_a_source(tmp_path: Path):
+    real = tmp_path / "real.mp4"
+    card = tmp_path / "gen.mp4"
+    real.write_bytes(b"x")
+    card.write_bytes(b"x")
+    beds = M.load_bump_beds([
+        _Asset(real, "bump:real.mp4"),
+        _Asset(card, "bump:gen", generated=True),
+    ])
+    assert [bed.path for bed in beds] == [real]
+    assert beds[0].subject == "athf" and beds[0].era == 2003
+
+
+def test_a_bump_too_short_to_cover_a_card_is_not_a_bed(tmp_path: Path):
+    short = tmp_path / "short.mp4"
+    short.write_bytes(b"x")
+    assert M.load_bump_beds([_Asset(short, "bump:short", ms=1_000)]) == []
+
+
+def test_a_neutral_bump_is_a_bed_for_any_show(tmp_path: Path):
+    """The catalog stores a neutral bump's subject as the literal "neutral".
+
+    That is a category, not a show: read as a show it would make every neutral
+    bump a foreign one, and a card for a show with no bumps of its own would fall
+    back to silence even though hundreds of neutral beds were sitting right there.
+    """
+    neutral = tmp_path / "neutral.mp4"
+    neutral.write_bytes(b"x")
+    (bed,) = M.load_bump_beds([_Asset(neutral, "bump:neutral", subject="neutral")])
+    assert bed.subject is None
+    library = _library(bed)
+    assert library.pick(year=2003, subject="the-brak-show").path == neutral
+
+
+def test_the_renderer_steps_past_a_bed_that_is_silent_there(pack, monkeypatch):
+    """The first choice being quiet is ordinary; giving up on it is how a card goes silent."""
+    library = _library(*(_bed(f"{i}.m4a") for i in range(3)))
+    calls = []
+
+    def fake(path, offset, length, ffmpeg, **kwargs):
+        calls.append(Path(path).name)
+        return "loudnorm=I=-18" if len(calls) > 1 else None
+
+    monkeypatch.setattr(M, "segment_filter", fake)
+    attempts = list(G._bed_attempts(
+        G.BumpSpec(subject="athf", position="NEXT", year=2003, show_title="ATHF",
+                   text="next: ATHF."),
+        library, 4200, "ffmpeg",
+    ))
+    assert not attempts[0][1] and attempts[1][1], "the second bed is the one rendered"
+    assert attempts[1][0].music_id, "the card still records which bed it actually got"
+
+
+def test_a_bed_the_spec_names_is_tried_first_and_exactly(pack, monkeypatch):
+    library = _library(*(_bed(f"{i}.m4a") for i in range(3)))
+    monkeypatch.setattr(M, "segment_filter", lambda *a, **k: "loudnorm=I=-18")
+    named = G.BumpSpec(subject="athf", position="NEXT", year=2003,
+                       music_path="/m/wanted.m4a", music_offset=2.0, music_id="wanted.m4a@2")
+    attempts = list(G._bed_attempts(named, library, 4200, "ffmpeg"))
+    assert attempts[0][0].music_path == "/m/wanted.m4a" and attempts[0][1]
+
+
+def test_a_card_is_re_rendered_when_the_cached_file_has_no_audio(pack, tmp_path: Path, monkeypatch):
+    """A card written before beds existed must not air silent forever."""
+    rendered = []
+
+    monkeypatch.setattr(G, "_has_audible_audio", lambda path, ffmpeg: False)
+    monkeypatch.setattr(M, "segment_filter", lambda *a, **k: "loudnorm=I=-18")
+    monkeypatch.setattr(G, "_run", lambda binary, command, target: rendered.append(target))
+    monkeypatch.setattr(G, "_actual_duration", lambda path, fallback: fallback)
+    monkeypatch.setattr(G, "_find_ffmpeg", lambda explicit=None: "ffmpeg")
+
+    spec = G.BumpSpec(subject="athf", position="NEXT", year=2003, show_title="ATHF",
+                      music_path="/m/b.m4a", music_offset=1.0, music_id="b.m4a@1")
+    style = pack.style_for(2003)
+    key = G.cache_key(spec, style, 1280, 720)
+    cached = tmp_path / f"{key.split(':', 1)[1]}.mp4"
+    cached.write_bytes(b"x")
+
+    G.render(spec, pack=pack, out_dir=tmp_path, ffmpeg="ffmpeg")
+    assert rendered, "a card with a bed in its key but no sound on disk is rendered again"
+
+
+def test_a_bed_less_cached_card_is_rendered_again_once_a_bed_exists(pack, tmp_path: Path, monkeypatch):
+    """The card that was silent because there was no music at all, not because of a bug."""
+    rendered = []
+    monkeypatch.setattr(G, "_has_audible_audio", lambda path, ffmpeg: True)
+    monkeypatch.setattr(G, "_find_ffmpeg", lambda explicit=None: "ffmpeg")
+    monkeypatch.setattr(G, "_run", lambda binary, command, target: rendered.append(target))
+    monkeypatch.setattr(G, "_actual_duration", lambda path, fallback: fallback)
+    monkeypatch.setattr(M, "segment_filter", lambda *a, **k: "loudnorm=I=-18")
+
+    plain = G.BumpSpec(subject="athf", position="NEXT", year=2003, show_title="ATHF")
+    style = pack.style_for(2003)
+    key = G.cache_key(plain, style, 1280, 720)
+    (tmp_path / f"{key.split(':', 1)[1]}.mp4").write_bytes(b"x")
+
+    library = _library(_bed("athf.m4a"))
+    G.render(plain, pack=pack, out_dir=tmp_path, ffmpeg="ffmpeg", music=library)
+    assert rendered, "a card with no bed in its key is stale once a bed is available"
+    assert rendered[0].name != f"{key.split(':', 1)[1]}.mp4", "the bedded card is a new file"
+
+
+def test_a_card_with_no_audible_bed_is_not_re_rendered_on_every_run(pack, tmp_path: Path, monkeypatch):
+    """Every candidate silent is a fact about the library, not a stale cache."""
+    rendered = []
+    monkeypatch.setattr(G, "_has_audible_audio", lambda path, ffmpeg: False)
+    monkeypatch.setattr(G, "_find_ffmpeg", lambda explicit=None: "ffmpeg")
+    monkeypatch.setattr(G, "_run", lambda binary, command, target: rendered.append(target))
+    monkeypatch.setattr(G, "_actual_duration", lambda path, fallback: fallback)
+    monkeypatch.setattr(M, "segment_filter", lambda *a, **k: None)
+
+    spec = G.BumpSpec(subject="athf", position="NEXT", year=2003, show_title="ATHF")
+    style = pack.style_for(2003)
+    key = G.cache_key(spec, style, 1280, 720)
+    (tmp_path / f"{key.split(':', 1)[1]}.mp4").write_bytes(b"x")
+
+    G.render(spec, pack=pack, out_dir=tmp_path, ffmpeg="ffmpeg", music=_library(_bed("a.m4a")))
+    assert not rendered, "a silent library would otherwise re-render this card forever"
+
+
+def test_a_cached_card_with_sound_is_reused(pack, tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(G, "_has_audible_audio", lambda path, ffmpeg: True)
+    monkeypatch.setattr(G, "_find_ffmpeg", lambda explicit=None: "ffmpeg")
+    monkeypatch.setattr(G, "_run", lambda *a, **k: pytest.fail("a good cache must be reused"))
+    monkeypatch.setattr(G, "_actual_duration", lambda path, fallback: fallback)
+    monkeypatch.setattr(M, "segment_filter", lambda *a, **k: "loudnorm=I=-18")
+    monkeypatch.setattr(
+        G, "_bed_attempts", lambda *a, **k: pytest.fail("a cached card needs no bed hunt")
+    )
+
+    spec = G.BumpSpec(subject="athf", position="NEXT", year=2003, show_title="ATHF",
+                      music_path="/m/b.m4a", music_offset=1.0, music_id="b.m4a@1")
+    style = pack.style_for(2003)
+    key = G.cache_key(spec, style, 1280, 720)
+    (tmp_path / f"{key.split(':', 1)[1]}.mp4").write_bytes(b"x")
+    G.render(spec, pack=pack, out_dir=tmp_path, ffmpeg="ffmpeg")
+
+
+def test_pruning_removes_only_cards_this_renderer_wrote(pack, tmp_path: Path):
+    from nostalgia.sidecars import BumpTag, write as write_tag
+
+    wanted, stale, real = (tmp_path / name for name in ("wanted.mp4", "stale.mp4", "real.mp4"))
+    for path in (wanted, stale, real):
+        path.write_bytes(b"x")
+    for path in (wanted, stale):
+        write_tag(path, BumpTag(source="generated", confirmed=True))
+    write_tag(real, BumpTag(subject="futurama", source="manual", confirmed=True))
+
+    removed = G.prune_generated(tmp_path, {"gen:wanted"})
+    assert [path.name for path in removed] == ["stale.mp4"]
+    assert wanted.is_file(), "a card still in the spec set is kept"
+    assert real.is_file(), "a hand-supplied bump in the same folder is never deleted"
+    assert not (tmp_path / "stale.mp4.tags.json").exists(), "the sidecar goes with the card"
+

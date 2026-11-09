@@ -357,6 +357,13 @@ sidecar. Generated cards **only fill gaps**: a real asset naming the show always
 wins, `bumps.generated.max_share` caps how much of the channel is synthetic, and
 `nostalgia emit --no-generated` gives you a pure-real channel instantly.
 
+Cards are not silent. With `bumps.generated.music` the renderer lays a bed under
+the card, and with `music_from_bumps` (the default) it borrows the audio of your
+own archive bumps — a card for *Aqua Teen* is bedded with the music of a real
+*Aqua Teen* bump, falling back to a bump that names no show. A cached card that
+turned out silent is re-rendered on the next `nostalgia bumps`, and generated
+cards that no longer belong to the plan are pruned.
+
 `config/bumps-era.yaml` carries four looks (2001 / 2003 / 2005 / 2007) with font,
 tracking, margins, letterboxing, vignette and grain. Because they're constants,
 generated bumps obey the same reproducibility guarantee as the rest of the plan.

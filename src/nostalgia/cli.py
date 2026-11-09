@@ -512,7 +512,7 @@ def _cmd_lines(args, config, paths: Paths) -> int:
 
 def _cmd_music(args, config, paths: Paths) -> int:
     from .conform import find_tools
-    from .music import harvest, load_library, music_roots
+    from .music import harvest, load_bump_beds, load_library, music_roots
 
     media_root = paths.media()
     roots = music_roots(media_root)
@@ -521,7 +521,11 @@ def _cmd_music(args, config, paths: Paths) -> int:
 
     if args.music_command == "list":
         library = load_library(roots, ffprobe=ffprobe)
-        if not library:
+        borrowed: list = []
+        if config.bumps.generated.music_from_bumps:
+            with Catalog(paths.catalog) as catalog:
+                borrowed = load_bump_beds(catalog.assets(("bump",)))
+        if not library and not borrowed:
             print(f"no beds in {roots[0]}\n  drop audio files there, or run `nostalgia music harvest`")
             return 0
         print(f"{len(library.beds)} bed(s)")
@@ -529,6 +533,13 @@ def _cmd_music(args, config, paths: Paths) -> int:
             era = f" [{bed.era}]" if bed.era else ""
             where = next((r for r in roots if r in bed.path.parents), bed.path.parent)
             print(f"  {bed.duration_s:5.1f}s{era:<8} {bed.path.relative_to(where).as_posix()}")
+        if borrowed:
+            # These are not files of their own: the audio is read out of the bump.
+            print(f"{len(borrowed)} bed(s) borrowed from your own bumps")
+            for bed in borrowed:
+                era = f" [{bed.era}]" if bed.era else ""
+                show = bed.subject or "neutral"
+                print(f"  {bed.duration_s:5.1f}s{era:<8} {show:<28} {bed.path.name}")
         return 0
 
     if not ffmpeg:

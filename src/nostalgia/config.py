@@ -81,6 +81,17 @@ class BumpGeneratedConfig(_Model):
     """Lay a music bed under each card, from ``media/music/``. With nothing in that
     folder, cards are silent exactly as before."""
 
+    music_from_bumps: bool = True
+    """Borrow the audio of the real bumps themselves.
+
+    The archive cards *are* the sound this channel is trying to reproduce, so they
+    make better beds than a dropped-in track: a card about Aqua Teen is scored with
+    a bump about Aqua Teen, and one about anything else with a neutral card. A bump
+    about a *different* show is never used -- those are mostly a character talking,
+    and a voice naming another programme under this card would be a worse lie than
+    silence.
+    """
+
     ollama_url: str = "http://host.docker.internal:11434"
     """Where a local model for *proposing* lines lives. Only the Lines page and
     ``nostalgia lines generate`` use it; rendering never does."""

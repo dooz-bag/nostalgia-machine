@@ -703,6 +703,7 @@ bumps:
     lines: true        # print a sentence from the line bank (false = the plain card)
     variants: 3        # sentences per show and position, so a card does not repeat
     music: true        # lay a music bed under the card, if the library has any
+    music_from_bumps: true   # also borrow the audio of your own archive bumps
     ollama_url: http://host.docker.internal:11434
     ollama_model: ""   # blank = the first model Ollama has installed
 ```
@@ -742,10 +743,19 @@ the repository:
   audio from show footage, since that is dialogue. Beds are levelled to one
   loudness, remember the year of the bump they came from, and are listed with
   `nostalgia music list`.
+- With `music_from_bumps: true` (the default) the audio of your own archive bumps
+  is used as a bed too, so a card can sound like the channel it sits in even when
+  `media/music/` is empty. Harvesting only ever found beds in text-on-black bumps;
+  this reads the audio straight out of the bump files themselves, which is why a
+  card for *Aqua Teen* can be bedded with the music of a real *Aqua Teen* bump.
+  `nostalgia music list` prints both kinds, the borrowed ones with the show they
+  came from.
 
 A card picks its bed deterministically (era first), starts at an offset inside the
 track, and fades in and out. A near-silent bed is dropped rather than boosted into
-hiss.
+hiss, and the renderer tries the next candidate instead of shipping a silent card.
+Beds from your bumps are ranked by subject: a card for a show uses a bump of that
+same show, then a bump that names no show, and never a bump of a different show.
 
 ### Replan, then launch
 

@@ -56,5 +56,19 @@ bumps:
     # era you are recreating, not to "now", or you will get 2020s-style cards.
     era_year: 2003
 
+    # Borrow the audio of your own bumps underneath a card.
+    #
+    # The archive bumps *are* the sound this channel is reproducing, so they make
+    # better beds than a track dropped into media/music/. A card about a show is
+    # scored with a bump about that same show; a card that is not about one show
+    # borrows a neutral card. A bump about a *different* show is never used: those
+    # are mostly a character talking, and hearing another programme's voice under
+    # this card would be a worse lie than silence.
+    #
+    # Rendering retries another bed when the chosen one is silent in that stretch,
+    # and `nostalgia bumps` re-renders any cached card that has no audible audio.
+    # That is what heals cards rendered before this existed.
+    music_from_bumps: true
+
     # Force one style pack instead of selecting by air date (e.g. "2003").
     # style_pack: "2003"

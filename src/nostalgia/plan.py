@@ -209,7 +209,11 @@ class PlanContext:
     """``config/bump-lines.yaml``: the approved sentences generated cards say."""
 
     music_dirs: tuple[Path, ...] = ()
-    """``media/music/``: the beds laid under generated cards."""
+    """``media/music/`` and ``media/derived/music/``: beds laid under generated cards.
+
+    The real bumps are a third source, read straight from the catalog by the
+    renderer, so a channel with nothing in either folder still gets beds.
+    """
 
     extras: list[Asset] = field(default_factory=list)
     """Long-form filler: music videos, DVD extras, anything that is not a spot.
@@ -689,14 +693,22 @@ def render_generated_bumps(
     # to exactly the old plain, silent card, so a channel with no bank and no music
     # renders what it always did.
     from .bumplines import load_bank
-    from .music import load_library
+    from .music import MusicLibrary, load_bump_beds, load_library
 
     bank = load_bank(context.lines_file) if generated.lines else None
     music = None
-    if generated.music and context.music_dirs:
+    if generated.music:
         from .conform import find_tools
 
-        music = load_library(context.music_dirs, ffprobe=find_tools(ffmpeg)[1]) or None
+        roots = context.music_dirs or ()
+        beds = load_library(roots, ffprobe=find_tools(ffmpeg)[1]).beds if roots else []
+        if generated.music_from_bumps:
+            # The real cards are the sound being reproduced, so they are the better
+            # source; a dropped-in track stays eligible beside them.
+            beds = beds + load_bump_beds(context.bumps)
+        library = MusicLibrary(root=roots[0] if roots else Path("."), beds=beds)
+        music = library if library else None
+
     positions = ("INTO", "AFTER", "NEXT", "OUT") if bank else ("INTO", "AFTER", "NEXT")
 
     specs = specs_for_schedule(
@@ -720,6 +732,10 @@ def render_generated_bumps(
             height=context.root.encoding.height,
             ffmpeg=ffmpeg or context.root.channel.ffmpeg_path,
             force=force,
+            music=music,
+            # A caller-supplied folder may hold real media; only the channel's own
+            # cache is safe to prune.
+            prune=out_dir is None,
         )
     except BumpGenError as exc:
         raise PlanError(str(exc)) from exc
