@@ -418,8 +418,26 @@ def channel_json(
     bitrate_kbps: int,
     audio_bitrate_kbps: int,
     fallback_seconds: int = 60,
+    accel: str | None = None,
 ) -> dict:
-    """Channel config with stream-copy-friendly 720p defaults."""
+    """Channel config with stream-copy-friendly 720p defaults.
+
+    *accel* names a hardware encoder (``qsv``, ``vaapi``, ``nvenc``, ...). The
+    schema only accepts those enum names, and omitting the key means software, so
+    it is written only when a value is given. A box with QuickSync should set it:
+    software x264 at 720p costs a full core, which is most of a low-power host.
+    """
+    video: dict = {
+        "mode": "transcode",
+        "format": "h264",
+        "bit_depth": 8,
+        "width": width,
+        "height": height,
+        "bitrate_kbps": bitrate_kbps,
+        "buffer_kbps": bitrate_kbps * 2,
+    }
+    if accel:
+        video["accel"] = accel
     return {
         "version": CHANNEL_VERSION,
         "playout": {"folder": playout_folder},
@@ -440,17 +458,7 @@ def channel_json(
                     "true_peak": -1.5,
                 },
             },
-            "video": {
-                "mode": "transcode",
-                "format": "h264",
-                "bit_depth": 8,
-                "width": width,
-                "height": height,
-                "bitrate_kbps": bitrate_kbps,
-                "buffer_kbps": bitrate_kbps * 2,
-                # No "accel" key: the schema only accepts the enum names
-                # (qsv/nvenc/vaapi/...), and omitting it means software.
-            },
+            "video": video,
             # Only "burn" and "convert" are valid; there is no "none".
             "subtitle": {"mode": "burn"},
         },
@@ -471,6 +479,7 @@ def write_ersatztv_config(
     group: str = "Nostalgia",
     port: int = 8409,
     config_dir: Path | None = None,
+    accel: str | None = None,
 ) -> tuple[Path, Path]:
     """Write ``lineup.json`` and ``channels/<n>/channel.json``.
 
@@ -498,6 +507,7 @@ def write_ersatztv_config(
                 height=height,
                 bitrate_kbps=bitrate_kbps,
                 audio_bitrate_kbps=audio_bitrate_kbps,
+                accel=accel,
             ),
             indent=2,
         )

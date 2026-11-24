@@ -44,6 +44,11 @@ encoding:
   height: 720
   bitrate_kbps: 2500
   audio_bitrate_kbps: 160
+  # Hardware encoder for the streamer. `qsv` is Intel QuickSync, which the
+  # Proxmox host has; software x264 costs about a full core at 720p, which is
+  # most of a low-power box. The streamer also needs /dev/dri passed through,
+  # which docker-compose.yml does. Set to null on a host without QuickSync.
+  accel: qsv
 
 # Where media lives, relative to the project root.
 media_root: "media"

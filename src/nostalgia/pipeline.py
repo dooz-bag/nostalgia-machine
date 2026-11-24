@@ -718,6 +718,7 @@ def build(
                 logo=config.channel.logo,
                 group=config.channel.group,
                 config_dir=paths.ersatztv_dir,
+                accel=config.encoding.accel,
             )
             result.lineup = lineup
 

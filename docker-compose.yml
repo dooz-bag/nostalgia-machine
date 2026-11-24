@@ -136,6 +136,15 @@ services:
       # The image runs as uid/gid 1000, so `hls-init` below pre-chowns it.
       - hls:/app/hls
     command: ["/app/config/lineup.json"]
+    # Intel QuickSync. The streamer's `accel: qsv` path needs the render node,
+    # and without it the channel silently falls back to software x264 -- which on
+    # a low-power box is the difference between one core and all of them. The
+    # group id is the host's `render` group; `group_add` is what lets uid 1000
+    # open a node it does not own.
+    devices:
+      - /dev/dri:/dev/dri
+    group_add:
+      - "${RENDER_GID:-993}"
     # The named volume is created root-owned; `hls-init` hands it to this uid
     # before the channel starts, so the streamer can write segments.
     user: "1000:1000"

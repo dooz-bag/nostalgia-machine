@@ -633,6 +633,13 @@ class Resolution(_Model):
     height: int = 720
     bitrate_kbps: int = 2500
     audio_bitrate_kbps: int = 160
+    accel: str | None = None
+    """Hardware encoder for the streamer: ``qsv``, ``vaapi``, ``nvenc``, ...
+
+    Unset means software x264, which costs about a full core at 720p. A host with
+    QuickSync should set ``qsv``; the streamer also needs the render node passed
+    through, which ``docker-compose.yml`` does.
+    """
 
 
 class RootConfig(_Model):
