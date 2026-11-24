@@ -1135,6 +1135,73 @@ playback.
 
 For a native install, a scheduled task running `emit` daily is enough.
 
+### Proxmox: the reference deployment
+
+A Proxmox host is the intended home for a channel that has to stay up: it boots
+the container on power loss, and the container's Docker daemon brings the stack
+back with it.
+
+The container needs three things beyond a plain LXC:
+
+| Need | Why |
+|---|---|
+| `features: nesting=1` | Docker inside LXC |
+| `/dev/dri` bind-mounted | QuickSync. Without it the streamer silently falls back to software x264 |
+| `onboot: 1` | Start the container when the host boots |
+
+`/dev/dri` is passed to the *container* by Proxmox and to the *streamer* by
+`docker-compose.yml`. Both are required: the first makes the node visible inside
+the LXC, the second makes it visible inside the streamer container. The streamer
+runs as uid 1000, so it also needs the host's `render` group, which is what
+`RENDER_GID` in `.env` is for:
+
+```bash
+getent group render          # on the Proxmox host, e.g. render:x:993:
+echo "RENDER_GID=993" >> .env
+```
+
+Then set the encoder in `config/channel.yaml`:
+
+```yaml
+encoding:
+  accel: qsv        # Intel QuickSync; vaapi/nvenc also accepted
+```
+
+Confirm it took effect by looking at the pipeline the streamer actually runs:
+
+```bash
+docker logs nostalgia-ersatztv 2>&1 | grep -o 'optimized pipeline.*' | tail -1
+# want: -init_hw_device qsv=hw -hwaccel qsv ... vpp_qsv=...
+```
+
+If that line says `-vcodec libx264` instead, the render node is not reaching the
+streamer and it is encoding in software.
+
+### Auto-deploy from git
+
+The box is the home for the project, so a push to `main` should reach the
+channel without anyone logging in. A systemd timer does that:
+
+```bash
+# /usr/local/bin/nostalgia-autosync
+cd /opt/nostalgia-machine
+git fetch --quiet origin main
+[ "$(git rev-parse HEAD)" = "$(git rev-parse origin/main)" ] && exit 0
+git merge --ff-only --quiet origin/main
+docker compose up -d --build
+```
+
+```ini
+# /etc/systemd/system/nostalgia-autosync.timer
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=5min
+Persistent=true
+```
+
+`--build` matters: `up -d` alone reuses the old image, and a config-schema change
+then crash-loops against a stale one.
+
 ### Windows host settings that break a 24/7 channel
 
 Two defaults will make the channel disappear for reasons that look like a bug:
