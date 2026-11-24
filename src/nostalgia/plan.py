@@ -781,7 +781,7 @@ def _plan_slot(
     # the pod. Letting it through took the whole day down with "timeline is
     # invalid", which named neither the show nor the fix.
     if episode.duration_ms >= slot.length_ms:
-        replacement = _fitting_episode(assigned, episode, context)
+        replacement = _fitting_episode(assigned, episode, context, plan)
         if replacement is None:
             _fill_bare_slot(plan, assigned, context, ad_tracker, mark)
             plan.warnings.append(
@@ -1258,30 +1258,85 @@ def _wants_mark(
     return True
 
 
+def _aired_today(plan: Plan, show_id: str) -> set[str]:
+    """Episode keys of *show_id* already placed in this day's plan."""
+    return {
+        item.asset_key
+        for item in plan.items
+        if item.kind == "episode" and item.show_id == show_id
+    }
+
+
+def _walk_for(assigned: AssignedSlot, context: PlanContext):
+    """The order this show's episodes actually air in, or ``None``.
+
+    The ring is sorted by ``(season, episode)``; the walk is what the lineup
+    actually plays, and ``random``/``by_season`` both permute it. Substituting
+    from the ring therefore picks an episode that is not "next" in any sense the
+    viewer would recognise.
+    """
+    from .programming import walk_order
+
+    ring = context.rings.get(assigned.show_id)
+    if ring is None or not ring.episodes:
+        return None
+    order = "episode"
+    for entry in context.root.programming.lineup:
+        if entry.show_id == assigned.show_id:
+            order = entry.order
+            break
+    else:
+        order = context.root.programming.shuffle_order
+    try:
+        return walk_order(ring, order)
+    except Exception:
+        return None
+
+
 def _fitting_episode(
-    assigned: AssignedSlot, rejected, context: PlanContext
+    assigned: AssignedSlot, rejected, context: PlanContext, plan: Plan | None = None
 ):
     """Another episode of the same show that fits this slot, or ``None``.
 
-    Deterministic: the ring is walked in order from the rejected episode, so the
-    same day always makes the same substitution. A show whose episodes are all
-    too long for its declared family gets ``None`` and the slot falls back to
-    breaks, which is visible in the warnings rather than silent.
+    Deterministic: the walk is followed from the rejected episode, so the same
+    day always makes the same substitution. A show whose episodes are all too
+    long for its declared family gets ``None`` and the slot falls back to breaks,
+    which is visible in the warnings rather than silent.
+
+    Two things this has to get right, both learned from real repeats:
+
+    * **Follow the walk, not the ring.** The ring is sorted by season/episode;
+      the walk is what actually airs, and ``random``/``by_season`` permute it.
+      Substituting from the ring picked an episode that was not next in any
+      sense the viewer would recognise.
+    * **Skip what has already aired today.** Even following the walk, the
+      episode after the rejected one may already have played -- a 45-minute
+      Venture Bros episode in a 30-minute slot substituted S04E17, which had
+      aired two and a half hours earlier.
     """
     ring = context.rings.get(assigned.show_id)
     if ring is None or not ring.episodes:
         return None
     limit = assigned.slot.length_ms
+    aired = _aired_today(plan, assigned.show_id) if plan is not None else set()
+    order = _walk_for(assigned, context) or ring.episodes
     start = 0
-    for index, candidate in enumerate(ring.episodes):
+    for index, candidate in enumerate(order):
         if candidate.key == rejected.key:
             start = index + 1
             break
-    for offset in range(len(ring.episodes)):
-        candidate = ring.episodes[(start + offset) % len(ring.episodes)]
-        if candidate.duration_ms < limit:
+    repeat: object | None = None
+    for offset in range(len(order)):
+        candidate = order[(start + offset) % len(order)]
+        if candidate.duration_ms >= limit:
+            continue
+        if candidate.key not in aired:
             return candidate
-    return None
+        if repeat is None:
+            repeat = candidate
+    # Every fitting episode has already aired today. A repeat is still better
+    # television than handing the slot to commercials, so take the first one.
+    return repeat
 
 
 def _fill_bare_slot(

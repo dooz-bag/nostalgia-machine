@@ -376,7 +376,7 @@ generated bumps obey the same reproducibility guarantee as the rest of the plan.
 | `nostalgia plan` | Build a schedule and print it (`--date`, `--days`, `--show`) |
 | `nostalgia emit` | Write playout JSON + XMLTV + ErsatzTV lineup |
 | `nostalgia doctor` | Check config, ffmpeg, library, catalog and last scheduler emit |
-| `nostalgia health` | Check that a readable live playout covers the current time |
+| `nostalgia health` | Check that a readable live playout covers the current time (`--streamer` also checks the streamer answers on its port) |
 | `nostalgia shows` | List shows and episode counts (`--verbose`) |
 | `nostalgia import` | File a download into `media/shows/<id>/Season NN/` (dry run by default, never overwrites) |
 | `nostalgia watermark` | Composite the `[adult swim]` corner bug into the media (burn mode) |

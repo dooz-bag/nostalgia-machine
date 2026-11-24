@@ -319,8 +319,16 @@ def build_lineup(
             starts[entry.show_id] = (day.toordinal() - anchor) * stride
         # A configured start only applies to `sequential`. The random modes are
         # deliberately unordered, so honouring it would just be a hidden offset.
+        #
+        # `starts` is only seeded above when a day is given, and `doctor` calls
+        # this with no day to ask "would this lineup work at all". Indexing it
+        # unconditionally crashed there with a KeyError naming the show, which
+        # made the one command that diagnoses a broken lineup the one command
+        # that could not run.
         if entry.order == "sequential" and entry.start_season is not None:
-            starts[entry.show_id] += _start_index(rings[entry.show_id], entry, report)
+            starts[entry.show_id] = starts.get(entry.show_id, 0) + _start_index(
+                rings[entry.show_id], entry, report
+            )
 
     if not entries:
         raise ProgrammingError(
@@ -460,6 +468,47 @@ def build_programming(
     return None
 
 
+def _slot_length_for(
+    root: RootConfig, entry: ProgrammeSlot, family_ms: dict[str, int], quantum: int
+) -> int:
+    """The slot length for one entry, in milliseconds.
+
+    Normally the show's declared family. An episode longer than that family -- a
+    double-length finale, a 44-minute special -- gets the smallest family it does
+    fit, so it airs in its own longer slot instead of being swapped for a
+    different episode of the same show.
+
+    Substituting was the old behaviour, and it was wrong twice over: the
+    replacement came from the ring rather than the walk, so it could land on an
+    episode that had already aired that day, and the long episode itself never
+    aired at all. Sizing the slot around the content is what this whole function
+    already does for the show's family; this extends it to the episode.
+
+    The same reasoning runs the other way for a *short* episode. A 53-second
+    Home Movies special in a 30-minute slot leaves 29 minutes of commercials,
+    which is not a programme. Such an episode gets the smallest family that still
+    holds it, so the break stays proportionate.
+
+    An episode longer than the largest family keeps the declared length and is
+    left to the planner's overrun path, which substitutes and says so.
+    """
+    declared = family_ms.get(root.shows[entry.show_id].slot, quantum)
+    duration = entry.episode.duration_ms
+    if duration < declared:
+        # Shrink towards the episode, but never below one grid quantum: a slot
+        # shorter than the grid cannot be placed on the day.
+        for family in ("short", "half"):
+            length = family_ms[family]
+            if length < declared and duration < length:
+                return max(length, quantum)
+        return declared
+    for family in ("half", "hour"):
+        length = family_ms[family]
+        if length > declared and duration < length:
+            return length
+    return declared
+
+
 def build_programmed_day(
     root: RootConfig,
     episodes: Sequence[EpisodeRef],
@@ -501,17 +550,19 @@ def build_programmed_day(
     while cursor < day_end:
         remaining = day_end - cursor
         entry = report.slots[index % len(report.slots)]
-        ideal = family_ms.get(root.shows[entry.show_id].slot, quantum)
+        ideal = _slot_length_for(root, entry, family_ms, quantum)
 
         if ideal > remaining:
             # The day ends mid-slot. Truncating this entry would put a 22-minute
             # episode into an 8-minute slot and the planner would refuse to emit,
             # so look ahead for one that actually fits the tail.
-            fitting = _fitting_tail(report.slots, index, remaining, root, family_ms)
+            fitting = _fitting_tail(
+                report.slots, index, remaining, root, family_ms, quantum
+            )
             if fitting is not None:
                 skip, entry = fitting
                 index += skip
-                ideal = family_ms.get(root.shows[entry.show_id].slot, quantum)
+                ideal = _slot_length_for(root, entry, family_ms, quantum)
             elif slots:
                 # Nothing at all fits a tail this short. Giving the minutes to the
                 # previous slot's break beats an unplayable programme.
@@ -554,16 +605,22 @@ def _fitting_tail(
     remaining: int,
     root: RootConfig,
     family_ms: dict[str, int],
+    quantum: int = 0,
 ) -> tuple[int, ProgrammeSlot] | None:
     """The nearest entry ahead whose slot and episode both fit *remaining*.
 
     Returns ``(entries_to_skip, entry)``, or ``None`` when nothing in the lineup
     fits. Only the last slot of a day can reach this, so one pass over the horizon
     is the entire cost.
+
+    The length comes from :func:`_slot_length_for`, not the declared family, so an
+    entry that would be given a longer slot for a long episode is judged by the
+    slot it would actually get.
     """
     for offset in range(1, len(entries)):
         candidate = entries[(start + offset) % len(entries)]
-        if family_ms.get(root.shows[candidate.show_id].slot, 0) > remaining:
+        length = _slot_length_for(root, candidate, family_ms, quantum)
+        if length > remaining:
             continue
         if candidate.episode.duration_ms > remaining:
             continue

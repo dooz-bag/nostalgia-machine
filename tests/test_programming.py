@@ -443,6 +443,196 @@ def test_programmed_day_refuses_without_a_programming_mode(config, catalog):
         programming.build_programmed_day(config, catalog.episodes(), day=DAY)
 
 
+def test_build_lineup_without_a_day_does_not_crash(config, catalog):
+    """`doctor` calls this with no day to ask "would this lineup work at all".
+
+    The start position is only seeded from the date when a day is given, so
+    indexing it unconditionally raised KeyError naming the show -- which made the
+    one command that diagnoses a broken lineup the one command that could not run.
+    """
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[
+            {
+                "show_id": "king-of-the-hill",
+                "order": "sequential",
+                "start_season": 1,
+                "start_episode": 1,
+                "start_date": "2003-01-01",
+            }
+        ],
+    )
+
+    report = programming.build_lineup(root, catalog.episodes(), slots_per_day=4)
+
+    assert report.slots
+    assert all(slot.show_id == "king-of-the-hill" for slot in report.slots)
+
+
+def test_doctor_survives_a_sequential_lineup(config, catalog, paths):
+    """The regression: `nostalgia doctor` crashed on the shipped config."""
+    from nostalgia.pipeline import doctor
+
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[
+            {
+                "show_id": "king-of-the-hill",
+                "order": "sequential",
+                "start_season": 1,
+                "start_episode": 1,
+                "start_date": "2003-01-01",
+            }
+        ],
+    )
+
+    findings = doctor(root, catalog, paths)
+
+    assert findings
+
+
+def test_a_short_episode_gets_a_shorter_slot(config, catalog, paths):
+    """A 53-second special in a 30-minute slot leaves 29 minutes of commercials.
+
+    The slot is sized around the content in both directions: a long episode gets a
+    longer slot, and a short one gets a shorter slot, so the break stays
+    proportionate to the programme.
+    """
+    from dataclasses import replace as dataclass_replace
+
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[{"show_id": "futurama", "order": "sequential"}],
+    )
+    slots, placed = programming.build_programmed_day(
+        root, catalog.episodes(), day=DAY
+    )
+    quantum = quantum_ms(root.channel.grid)
+    family_ms = {"short": 15 * 60_000, "half": 30 * 60_000, "hour": 60 * 60_000}
+
+    # futurama is a `half` show; make one episode a 53-second special.
+    short_episode = dataclass_replace(placed[0].episode, duration_ms=53_000)
+    entry = dataclass_replace(placed[0], episode=short_episode)
+
+    length = programming._slot_length_for(root, entry, family_ms, quantum)
+
+    assert length == 15 * 60_000
+    assert short_episode.duration_ms < length
+
+
+def test_a_slot_is_never_shorter_than_one_quantum(config, catalog):
+    """A slot below the grid quantum cannot be placed on the day."""
+    from dataclasses import replace as dataclass_replace
+
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[{"show_id": "futurama", "order": "sequential"}],
+    )
+    slots, placed = programming.build_programmed_day(
+        root, catalog.episodes(), day=DAY
+    )
+    quantum = quantum_ms(root.channel.grid)
+    family_ms = {"short": 15 * 60_000, "half": 30 * 60_000, "hour": 60 * 60_000}
+
+    tiny = dataclass_replace(placed[0].episode, duration_ms=1_000)
+    entry = dataclass_replace(placed[0], episode=tiny)
+
+    assert programming._slot_length_for(root, entry, family_ms, quantum) >= quantum
+
+
+def test_a_substitute_follows_the_walk_not_the_ring(config, catalog, paths):
+    """The ring is sorted by season/episode; the walk is what actually airs.
+
+    Substituting from the ring picked an episode that was not next in any sense
+    the viewer would recognise, which is how a 45-minute Venture Bros episode in a
+    30-minute slot substituted S04E17 -- an episode that had aired 2.5 hours
+    earlier.
+    """
+    from nostalgia.plan import _fitting_episode
+    from nostalgia.schedule import AssignedSlot
+    from nostalgia.grid import Slot
+
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[{"show_id": "aqua-teen-hunger-force", "order": "random"}],
+    )
+    context = _context(root, catalog, paths, _rings(root, catalog))
+    ring = context.rings["aqua-teen-hunger-force"]
+
+    assigned = AssignedSlot(
+        slot=Slot(
+            index=0, start_ms=0, end_ms=15 * 60_000, family="short", daypart="test"
+        ),
+        show_id="aqua-teen-hunger-force",
+        slot_in_day=0,
+        of_same_show=1,
+    )
+    rejected = ring.episodes[0]
+    replacement = _fitting_episode(assigned, rejected, context, None)
+
+    assert replacement is not None
+    # The walk is a permutation of the ring, so the replacement must be the
+    # episode that follows the rejected one *in the walk*.
+    walk = programming.walk_order(ring, "random")
+    position = next(i for i, e in enumerate(walk) if e.key == rejected.key)
+    expected = walk[(position + 1) % len(walk)]
+    assert replacement.key == expected.key
+
+    """A double-length episode should air, not be replaced by a different one.
+
+    Substituting was wrong twice over: the replacement came from the ring rather
+    than the walk, so it could land on an episode that had already aired that day,
+    and the long episode itself never aired at all.
+    """
+    from nostalgia.plan import _fitting_episode
+
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[{"show_id": "aqua-teen-hunger-force", "order": "sequential"}],
+    )
+    slots, placed = programming.build_programmed_day(
+        root, catalog.episodes(), day=DAY
+    )
+    quantum = quantum_ms(root.channel.grid)
+    short_ms = 15 * 60_000
+
+    # The fixture library is all 11-minute episodes, so nothing is overlong yet.
+    assert all(slot.length_ms == short_ms for slot in slots)
+
+    # Now make one episode double-length, as a real finale would be.
+    from dataclasses import replace as dataclass_replace
+
+    long_episode = dataclass_replace(placed[0].episode, duration_ms=23 * 60_000)
+    placed[0] = dataclass_replace(placed[0], episode=long_episode)
+
+    length = programming._slot_length_for(
+        root,
+        placed[0],
+        {"short": short_ms, "half": 30 * 60_000, "hour": 60 * 60_000},
+        quantum,
+    )
+    assert length == 30 * 60_000
+    assert long_episode.duration_ms < length
+
+
+def test_a_long_episode_is_not_substituted_by_the_planner(config, catalog, paths):
+    """End to end: the long episode airs in its own slot, so no swap is needed."""
+    root = _config(
+        config,
+        mode="lineup",
+        lineup=[{"show_id": "aqua-teen-hunger-force", "order": "sequential"}],
+    )
+    context = _context(root, catalog, paths, _rings(root, catalog))
+    plan = build_plan(DAY, config.days[0], context)
+    assert not any("cannot fit" in warning for warning in plan.warnings)
+
+
 # -- dispatch ---------------------------------------------------------------
 
 

@@ -39,6 +39,79 @@ def test_health_checks_playable_schedule_without_loading_config(
     assert cli.main(["--root", str(paths.root), "health"]) == 0
 
 
+def _write_live_playout(paths, now_ms: int) -> None:
+    zone = timezone(timedelta(hours=9))
+    start = datetime.fromtimestamp((now_ms - 60_000) / 1000, tz=zone)
+    finish = datetime.fromtimestamp((now_ms + 60_000) / 1000, tz=zone)
+    paths.playout_dir.mkdir(parents=True, exist_ok=True)
+    (paths.playout_dir / "active.json").write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "20261030-0001-ep1",
+                        "start": start.isoformat(),
+                        "finish": finish.isoformat(),
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_health_ignores_the_streamer_unless_asked(paths, monkeypatch):
+    """The scheduler's own healthcheck runs this, and the streamer waits on it.
+
+    Probing the streamer by default would make the two containers deadlock: the
+    scheduler would never report healthy, so the streamer would never start.
+    """
+    now_ms = 1_800_000_000_000
+    _write_live_playout(paths, now_ms)
+    monkeypatch.setattr(cli.time, "time", lambda: now_ms / 1000)
+    monkeypatch.setattr(
+        cli, "_streamer_problem", lambda: pytest.fail("probed the streamer")
+    )
+
+    assert cli.main(["--root", str(paths.root), "health"]) == 0
+
+
+def test_health_with_streamer_reports_a_dead_streamer(paths, monkeypatch, capsys):
+    now_ms = 1_800_000_000_000
+    _write_live_playout(paths, now_ms)
+    monkeypatch.setattr(cli.time, "time", lambda: now_ms / 1000)
+    monkeypatch.setattr(
+        cli, "_streamer_problem", lambda: "streamer is not answering on 127.0.0.1:8409"
+    )
+
+    assert cli.main(["--root", str(paths.root), "health", "--streamer"]) == 1
+    assert "not answering" in capsys.readouterr().err
+
+
+def test_health_with_streamer_passes_when_it_answers(paths, monkeypatch, capsys):
+    now_ms = 1_800_000_000_000
+    _write_live_playout(paths, now_ms)
+    monkeypatch.setattr(cli.time, "time", lambda: now_ms / 1000)
+    monkeypatch.setattr(cli, "_streamer_problem", lambda: None)
+
+    assert cli.main(["--root", str(paths.root), "health", "--streamer"]) == 0
+    assert "streamer is answering" in capsys.readouterr().out
+
+
+def test_streamer_problem_reports_a_closed_port(monkeypatch):
+    import socket
+
+    def refuse(*_args, **_kwargs):
+        raise ConnectionRefusedError(10061, "No connection could be made")
+
+    monkeypatch.setattr(socket, "create_connection", refuse)
+
+    problem = cli._streamer_problem()
+
+    assert problem is not None
+    assert "not answering" in problem
+
+
 def test_doctor_surfaces_failed_emit_even_when_a_previous_emit_succeeded(
     config, catalog, paths
 ):

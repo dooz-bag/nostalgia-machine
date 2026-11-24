@@ -114,7 +114,18 @@ def _parser() -> argparse.ArgumentParser:
     _add_common_plan_args(emit_cmd)
 
     sub.add_parser("doctor", help="check config, media and catalog")
-    sub.add_parser("health", help="check whether live playout covers the current time")
+    health_cmd = sub.add_parser(
+        "health", help="check whether live playout covers the current time"
+    )
+    health_cmd.add_argument(
+        "--streamer",
+        action="store_true",
+        help=(
+            "also check that the streamer answers on its published port. Off by "
+            "default: the scheduler's own container healthcheck runs this command, "
+            "and the streamer is not started until that healthcheck passes."
+        ),
+    )
 
     conform_cmd = sub.add_parser(
         "conform",
@@ -597,7 +608,35 @@ def _cmd_health(args, config, paths: Paths) -> int:
         print("no readable live playout covers the current time", file=sys.stderr)
         return 1
     print(f"live playout is available: {current.name}")
+    if not getattr(args, "streamer", False):
+        return 0
+    # A playout document covering now says nothing about whether anything is
+    # serving it: the scheduler can be healthy while the streamer is stopped, and
+    # that is exactly the outage this check exists to name.
+    problem = _streamer_problem()
+    if problem is not None:
+        print(problem, file=sys.stderr)
+        return 1
+    print(f"streamer is answering on port {_streamer_port()}")
     return 0
+
+
+def _streamer_problem() -> str | None:
+    """Why the streamer is not answering, or ``None`` when it is.
+
+    Only the published port is probed, so this works from the host and from a
+    container on the same compose network alike.
+    """
+    import os
+    import socket
+
+    port = _streamer_port()
+    host = os.environ.get("NOSTALGIA_STREAMER_HOST") or "127.0.0.1"
+    try:
+        with socket.create_connection((host, port), timeout=5):
+            return None
+    except OSError as exc:
+        return f"streamer is not answering on {host}:{port} ({exc})"
 
 
 def _must_emit_in_container() -> bool:

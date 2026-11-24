@@ -487,6 +487,12 @@ Each CLI live emit records its last attempt, success and error in the catalog's
 check asks whether a readable live playout covers the current time. This keeps a
 failed refresh visible without marking a still-playing channel down prematurely.
 
+That check deliberately says nothing about the streamer. It runs *inside* the
+scheduler, and `ersatztv` waits for the scheduler to report healthy before it
+starts, so probing the streamer there would deadlock the two containers. To ask
+whether anything is actually serving, run `nostalgia health --streamer` from the
+host: it adds a TCP probe of the published port and fails when nothing answers.
+
 ## The corner bug belongs to one side or the other
 
 A watermark can be applied by the scheduler or by the streamer, and doing both

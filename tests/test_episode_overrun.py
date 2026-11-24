@@ -15,7 +15,7 @@ from datetime import date
 import pytest
 
 from nostalgia.config import ProgrammingConfig
-from nostalgia.grid import build_day
+from nostalgia.grid import Slot, build_day
 from nostalgia.plan import PlanContext, PlanError, build_plan
 from nostalgia.rotation import build_rings
 
@@ -104,3 +104,64 @@ def test_programmed_modes_generate_slots_that_always_fit(config, catalog, paths)
     assert plan.validate() == []
     assert plan.episode_items()
     assert not any("cannot fit" in warning for warning in plan.warnings)
+
+
+def test_a_substitute_never_repeats_an_episode_already_aired_today(
+    config, catalog, paths
+):
+    """The regression: a substitution landed on an episode that had already run.
+
+    The ring order and the walk order differ -- `random` and `by_season` both
+    permute the ring -- so "the next episode in the ring" is not "the next
+    episode to air". Walking the ring blindly from the rejected episode picked
+    one that had aired hours earlier, and the same episode showed twice in a day.
+    """
+    from nostalgia.plan import _fitting_episode
+    from nostalgia.schedule import AssignedSlot
+
+    context = _context(config, catalog, paths)
+    plan = build_plan(DAY, config.days[0], context)
+    ring = context.rings["aqua-teen-hunger-force"]
+
+    # Pretend every episode but one has already aired today.
+    aired = {episode.key for episode in ring.episodes[:-1]}
+    plan.items = [
+        item
+        for item in plan.items
+        if item.kind != "episode" or item.show_id != "aqua-teen-hunger-force"
+    ]
+    plan.items.extend(
+        _fake_episode_item("aqua-teen-hunger-force", key) for key in aired
+    )
+
+    assigned = AssignedSlot(
+        slot=Slot(
+            index=0, start_ms=0, end_ms=15 * 60_000, family="short", daypart="test"
+        ),
+        show_id="aqua-teen-hunger-force",
+        slot_in_day=0,
+        of_same_show=1,
+    )
+    rejected = ring.episodes[0]
+    replacement = _fitting_episode(assigned, rejected, context, plan)
+
+    assert replacement is not None
+    assert replacement.key not in aired
+
+
+def _fake_episode_item(show_id: str, key: str):
+    from nostalgia.plan import PlannedItem
+
+    return PlannedItem(
+        item_id=f"fake-{key}",
+        kind="episode",
+        start_ms=0,
+        end_ms=1,
+        asset_key=key,
+        path="/dev/null",
+        title=show_id,
+        subtitle="",
+        description="",
+        show_id=show_id,
+        slot_index=0,
+    )

@@ -1150,6 +1150,47 @@ powercfg /change hibernate-timeout-ac 0
 * **DHCP** — the advertised address can change, silently orphaning every saved
   playlist. Reserve a lease on the router.
 
+### Docker Desktop does not come back after a reboot
+
+The channel is only as available as the Docker engine under it. Two settings decide
+whether a reboot restores it on its own:
+
+* **Start Docker Desktop when you sign in** (Settings → General). With this off, a
+  reboot leaves the engine stopped and every container down until you launch it by
+  hand — the channel is simply gone, with no error anywhere in the project.
+* **Windows Update.** An update that restarts the WSL engine takes the containers
+  with it. Docker's own recovery usually restarts them, but it can fail with
+  `wsl.exe --terminate docker-desktop failed: The file cannot be accessed by the
+  system`, after which the engine stays stopped.
+
+To tell this apart from a scheduling problem, check the engine first:
+
+```powershell
+docker info --format '{{.ServerVersion}}'   # fails when the engine is down
+docker compose ps                           # every service should be Up/healthy
+```
+
+If the engine is down, start Docker Desktop and run `docker compose up -d`. The
+playout files are untouched by an outage, so the channel resumes where the clock
+says it should rather than replaying from the start.
+
+`nostalgia health --streamer` answers the same question from the project's side: it
+fails when no playout covers now *or* when nothing is answering on the published
+port.
+
+### A rebuilt image is needed after pulling changes
+
+`docker compose up -d` reuses the existing images. After pulling a commit that
+changes the config schema, the old image rejects the new config and the containers
+crash-loop with, for example:
+
+```
+Configuration is invalid:
+  - bumps.generated.music_from_bumps: Extra inputs are not permitted
+```
+
+Rebuild before starting: `docker compose up -d --build`.
+
 Firewall: Docker Desktop's own inbound rule already covers the Private and Public
 profiles, and the network is normally Private, so no rule usually needs adding. If
 a TV still cannot connect, check that the network is not marked **Public** and
