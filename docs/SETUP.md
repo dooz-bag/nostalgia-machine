@@ -1301,5 +1301,3 @@ Common causes:
   | `unsupported schema version …expected …/0.1.2` | `CHANNEL_VERSION` in `emit.py` is newer than the image supports. |
   | `unknown variant …, expected burn or convert` | an enum value in `channel.json` is not in the schema. |
   | `failed to create the output folder /app/hls/1: Permission denied` | `hls/` is not owned by uid 1000; the `hls-init` service does this — make sure it ran (`docker compose ps -a`). |
-
-<!-- autosync verification marker -->
