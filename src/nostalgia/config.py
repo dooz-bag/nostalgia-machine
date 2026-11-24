@@ -786,6 +786,13 @@ def load_config(config_dir: Path) -> RootConfig:
     raw_programming = load("programming.yaml", required=False)
     if raw_programming:
         payload["programming"] = raw_programming.get("programming", raw_programming)
+    # `encoding` lives in channel.yaml beside `channel`, but it is a top-level
+    # field on RootConfig. Without this it silently fell back to the defaults, so
+    # every setting under `encoding:` was ignored -- including `accel`, which is
+    # why a QuickSync host still ran software x264.
+    raw_encoding = raw_channel.get("encoding")
+    if raw_encoding:
+        payload["encoding"] = raw_encoding
 
     try:
         return RootConfig.model_validate(payload)

@@ -66,6 +66,60 @@ def test_video_accel_is_omitted_rather_than_null(paths, tmp_path) -> None:
     assert video["format"] in ("h264", "hevc", "mpeg2video")
 
 
+def test_encoding_block_in_channel_yaml_is_actually_read(library) -> None:
+    """`encoding:` sits beside `channel:` but is a top-level RootConfig field.
+
+    It was never copied into the payload, so every value under it silently fell
+    back to the defaults -- including `accel`, which meant a QuickSync host still
+    ran software x264 and nobody could tell why.
+    """
+    from nostalgia.config import load_config
+
+    channel = library.config / "channel.yaml"
+    channel.write_text(
+        channel.read_text(encoding="utf-8")
+        + '\nencoding:\n  width: 960\n  height: 540\n  accel: qsv\n',
+        encoding="utf-8",
+    )
+
+    config = load_config(library.config)
+
+    assert config.encoding.accel == "qsv"
+    assert config.encoding.width == 960
+    assert config.encoding.height == 540
+
+
+def test_accel_reaches_the_emitted_channel_json(paths, tmp_path) -> None:
+    """The setting is only useful if it lands in the file the streamer reads."""
+    from nostalgia.emit import channel_json
+
+    payload = channel_json(
+        playout_folder="/app/playout",
+        width=1280,
+        height=720,
+        bitrate_kbps=2500,
+        audio_bitrate_kbps=160,
+        accel="qsv",
+    )
+
+    assert payload["normalization"]["video"]["accel"] == "qsv"
+
+
+def test_no_accel_means_the_key_is_absent(paths, tmp_path) -> None:
+    """Software is the absence of the key, not a null value."""
+    from nostalgia.emit import channel_json
+
+    payload = channel_json(
+        playout_folder="/app/playout",
+        width=1280,
+        height=720,
+        bitrate_kbps=2500,
+        audio_bitrate_kbps=160,
+    )
+
+    assert "accel" not in payload["normalization"]["video"]
+
+
 def test_audio_mode_and_format_are_real_variants(paths, tmp_path) -> None:
     payload = _write(paths, tmp_path)
     audio = payload["normalization"]["audio"]
