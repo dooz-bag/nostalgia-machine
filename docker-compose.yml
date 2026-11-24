@@ -39,7 +39,12 @@ services:
       # media/ -- the streamer mounts only that tree, so a card in data/ is
       # written but never readable by the process that composites it -- yet the
       # media mount itself is read-only, so this one subfolder is remounted rw.
-      - ./media/derived:/app/media/derived
+      #
+      # It must follow MEDIA_DIR, not a hardcoded ./media: when the library lives
+      # elsewhere (a Proxmox bind mount, say) a hardcoded path writes the card to
+      # a directory the streamer never sees, and every item then fails its probe
+      # with "No such file or directory" and falls back to black.
+      - ${MEDIA_DIR:-./media}/derived:/app/media/derived
     # Regenerate the plan on a loop. `emit` is idempotent, so re-running is safe
     # and is what keeps the horizon rolling without a restart.
     command:
@@ -92,7 +97,8 @@ services:
       # Saving a setting replans from here, and replanning renders the watermark
       # card into media/derived. Without this the media tree stays read-only and
       # every save reports "saved, but replanning failed: Read-only file system".
-      - ./media/derived:/app/media/derived
+      # Follows MEDIA_DIR for the same reason as the scheduler's copy above.
+      - ${MEDIA_DIR:-./media}/derived:/app/media/derived
     healthcheck:
       # A TCP connect, not a page fetch. The page renders a full day's schedule and
       # the first request after a config change rebuilds it; polling that on a timer
