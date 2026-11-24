@@ -22,6 +22,7 @@ already have it" an explicit, overridable decision rather than a guess.
 
 from __future__ import annotations
 
+import math
 import subprocess
 import tempfile
 from dataclasses import dataclass, field
@@ -850,15 +851,24 @@ def card_asset(
 def card_size(look: WatermarkLook, *, width: int, height: int) -> tuple[int, int]:
     """Canvas size to render the mark card on.
 
-    Deliberately generous and in a fixed aspect relative to the glyph height: the
-    card is cropped down to its ink afterwards, so the canvas only has to be big
-    enough to hold the wordmark without clipping. Sizing the canvas to the final
-    width instead would clip the text, because the width is what is discovered by
-    rendering, not what is decided up front.
+    The card is cropped down to its ink afterwards, so the canvas only has to be
+    big enough to hold the wordmark without clipping -- spare width costs nothing
+    but a slightly larger intermediate render.
+
+    The width must be sized from the *text*, not from ``font_size``. The mark is
+    drawn at a fixed 128px (see :func:`mark_filter`) and only then condensed, so
+    a canvas derived from ``font_size`` shrinks while the text does not: the
+    trailing glyph is clipped before the condense scale runs. That is why the
+    closing bracket of ``[adult swim]`` vanished when the mark was made smaller.
     """
     look = look.normalized()
     glyph = max(48, round(height * look.font_size * 6))
-    return glyph * 14, glyph * 3
+    text = look.text.upper() if look.uppercase else look.text
+    # Bold glyphs average well under 1em; 0.75 is deliberately generous, and the
+    # condense scale is applied to the canvas so the pre-scale width is what has
+    # to fit.
+    needed = math.ceil(len(text) * 128 * 0.75 / max(look.condense, 0.5))
+    return max(glyph * 14, needed), glyph * 3
 
 
 #: Fully transparent, used as the card's background.

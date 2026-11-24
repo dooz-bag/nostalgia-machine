@@ -162,6 +162,32 @@ def test_the_card_scales_with_the_output_resolution() -> None:
     assert large[1] > small[1]
 
 
+def test_the_canvas_is_wide_enough_for_the_text_at_any_font_size() -> None:
+    """The mark is drawn at a fixed 128px, so the canvas cannot follow font_size.
+
+    Sizing the canvas from `font_size` shrank it while the text stayed the same
+    size, and the trailing glyph was clipped before the condense scale ran -- the
+    closing bracket of `[adult swim]` disappeared when the mark was made smaller.
+    """
+    text = "[adult swim]"
+    for font_size in (0.013, 0.0117, 0.006, 0.02):
+        look = WatermarkLook(text=text, font_size=font_size)
+        width, _height = card_size(look, width=1280, height=720)
+        # 128px glyphs, generously under 1em each, before the condense scale.
+        needed = len(text) * 128 * 0.75 / look.normalized().condense
+        assert width >= needed, (font_size, width, needed)
+
+
+def test_a_smaller_mark_does_not_shrink_the_canvas_below_the_text() -> None:
+    """The regression: shrinking the mark clipped the closing bracket."""
+    big = card_size(WatermarkLook(font_size=0.013), width=1280, height=720)
+    small = card_size(WatermarkLook(font_size=0.0117), width=1280, height=720)
+    # The height still tracks font_size -- that is what sizes the mark on screen.
+    assert small[1] < big[1]
+    # The width must not, or the text is clipped.
+    assert small[0] >= big[0]
+
+
 def test_look_values_are_clamped_into_a_visible_range() -> None:
     """A typo must not silently move the mark off screen."""
     wild = WatermarkLook(font_size=9.0, margin_x=5.0, opacity=8.0, condense=0.0)
