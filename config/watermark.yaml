@@ -18,7 +18,7 @@
 # each episode and leaves it alone if a mark is already there, so you never get
 # two bugs stacked in the corner.
 watermark:
-  mode: "burn"
+  mode: "overlay"
 
   # The mark itself. Kept as fractions of the frame so a 4:3 rip and a 16:9
   # episode each get a mark sized to their own picture rather than one fixed
@@ -63,7 +63,8 @@ watermark:
   #
   # Now that it is trimmed to the ink, each point is worth real pixels: 15% read
   # slightly large on screen, so this is 15% less of a mark than before (12.75).
-  width_percent: 12.75
+  # 11.48 is a further 10% smaller than that.
+  width_percent: 11.48
 
   # Which shows get it. Empty = every show. Commercials and bumpers never do,
   # because [adult swim] did not bug them.
