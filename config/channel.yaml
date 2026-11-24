@@ -49,14 +49,13 @@ encoding:
   # most of a low-power box. The streamer also needs /dev/dri passed through,
   # which docker-compose.yml does. Set to null on a host without QuickSync.
   #
-  # LEFT OFF ON PURPOSE. With `accel: qsv` the streamer composites the watermark
-  # with `overlay_qsv`, and uploading the raw BGRA still to the QSV device fails
-  # with "Error synchronizing the operation" on this driver (i915, Gen 9.5).
-  # Every item then fails its probe and the channel falls back to black. The
-  # software overlay path works and still encodes with h264_qsv, but the streamer
-  # picks the filter itself and there is no per-filter override that reliably
-  # forces it. Software x264 at 720p is ~1 core, which this box has to spare.
-  # accel: qsv
+  # This only works with `watermark.mode: burn`. In overlay mode the streamer
+  # composites the mark with `overlay_qsv`, and uploading the raw BGRA still to
+  # the QSV device fails on this driver (i915, Gen 9.5) with "Error synchronizing
+  # the operation" -- every item then fails its probe and the channel falls back
+  # to black. Burn mode puts the mark in the file, so there is no overlay to
+  # composite and the encoder is free to use the hardware path.
+  accel: qsv
 
 # Where media lives, relative to the project root.
 media_root: "media"

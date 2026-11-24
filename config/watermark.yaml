@@ -18,7 +18,7 @@
 # each episode and leaves it alone if a mark is already there, so you never get
 # two bugs stacked in the corner.
 watermark:
-  mode: "overlay"
+  mode: "burn"
 
   # The mark itself. Kept as fractions of the frame so a 4:3 rip and a 16:9
   # episode each get a mark sized to their own picture rather than one fixed
@@ -35,7 +35,11 @@ watermark:
   font: "Helvetica Neue Condensed Bold"
   condense: 0.84
 
-  font_size: 0.013        # fraction of frame height; a bug is small
+  # Fraction of frame height. This is what sizes the mark in *burn* mode: the
+  # card is rendered at this glyph height and composited at native size, so
+  # `width_percent` below has no effect there. 0.0117 is 10% smaller than the
+  # 0.013 the overlay path used.
+  font_size: 0.0117
   colour: "white"
   # The broadcast bug was a solid white mark. It sat *in* the picture rather than
   # on top of it, so a little transparency keeps it from reading as a sticker --
@@ -49,6 +53,8 @@ watermark:
   margin_y_percent: 4.2
 
   # overlay mode only: scale the mark to this percent of the content width.
+  # Burn mode ignores it -- the card is composited at the size `font_size`
+  # renders it, so shrinking the mark there means lowering `font_size`.
   #
   # This finally means what it says. The card used to be rendered on a canvas far
   # wider than the wordmark and never trimmed, so the streamer was scaling mostly
